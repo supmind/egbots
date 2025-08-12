@@ -41,7 +41,10 @@ class TestExecutor(unittest.TestCase):
         self.message.delete = AsyncMock()
         self.context.bot.send_message = AsyncMock()
 
-        self.executor = RuleExecutor(self.update, self.context)
+        # Mock the database session
+        self.db_session = MagicMock()
+
+        self.executor = RuleExecutor(self.update, self.context, self.db_session)
 
     # --- Tests for _resolve_path ---
 

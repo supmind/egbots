@@ -1,9 +1,13 @@
 import re
 import logging
 from typing import Any
+from sqlalchemy.orm import Session
 from telegram import Update
 from telegram.ext import ContextTypes
+
 from src.core.parser import ParsedRule, Action
+from src.core.evaluator import ExpressionEvaluator
+from src.models.variable import StateVariable
 
 logger = logging.getLogger(__name__)
 
@@ -14,13 +18,12 @@ class StopRuleProcessing(Exception):
 class RuleExecutor:
     """
     Executes the actions defined in a parsed rule based on the PTB context.
-
-    This initial version contains the structure and placeholder methods
-    that will be implemented to perform the actual logic.
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session):
         self.update = update
         self.context = context
+        self.db_session = db_session
+        self.evaluator = ExpressionEvaluator(variable_resolver_func=self._resolve_path)
         self.action_map = {
             "delete_message": self._action_delete_message,
             "reply": self._action_reply,
@@ -28,6 +31,7 @@ class RuleExecutor:
             "kick_user": self._action_kick_user,
             "ban_user": self._action_ban_user,
             "mute_user": self._action_mute_user,
+            "set_var": self._action_set_var,
             "stop": self._action_stop,
         }
 
@@ -127,40 +131,57 @@ class RuleExecutor:
 
     def _resolve_path(self, path: str) -> Any:
         """
-        Dynamically gets a value from the Update or Context object using a path.
+        Dynamically gets a value from the Update, Context, or database variables.
 
-        This method safely traverses a dot-notation path (e.g., 'message.text')
-        and handles aliases like 'user' for 'update.effective_user'.
-
-        Args:
-            path: The dot-notation path to the desired attribute.
-
-        Returns:
-            The value of the attribute or None if the path is invalid.
+        This method safely traverses a dot-notation path and handles aliases.
+        - 'user.x' -> update.effective_user.x
+        - 'message.x' -> update.effective_message.x
+        - 'vars.user.y' -> state_variables(user_id=..., name='y')
+        - 'vars.group.z' -> state_variables(user_id=NULL, name='z')
         """
-        # Define aliases for convenience in rule scripts
+        # Handle database state variables first
+        if path.startswith('vars.'):
+            parts = path.split('.')
+            if len(parts) != 3 or parts[0] != 'vars':
+                logger.warning(f"Invalid variable path: {path}")
+                return None
+
+            scope, var_name = parts[1], parts[2]
+            query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
+
+            if scope == 'user':
+                query = query.filter_by(user_id=self.update.effective_user.id)
+            elif scope == 'group':
+                query = query.filter(StateVariable.user_id.is_(None))
+            else:
+                logger.warning(f"Invalid variable scope '{scope}' in path: {path}")
+                return None
+
+            variable = query.first()
+            if variable:
+                # TODO: Smarter type casting based on stored value
+                try: return int(variable.value)
+                except ValueError: return variable.value
+            return None # Variable not found
+
+        # Fall back to PTB context objects
+        obj = self.update
         if path.startswith('user.'):
             obj = self.update.effective_user
             path = path[len('user.'):]
         elif path.startswith('message.'):
             obj = self.update.effective_message
             path = path[len('message.'):]
-        else:
-            # Default to the top-level update object
-            obj = self.update
 
-        # Traverse the path
+        # Traverse the path on the selected object
         parts = path.split('.')
         for part in parts:
-            if obj is None:
-                return None
+            if obj is None: return None
             try:
                 obj = getattr(obj, part)
             except AttributeError:
-                # If any part of the path is invalid, return None
-                print(f"WARNING: Could not resolve attribute '{part}' in path '{path}'.")
+                logger.warning(f"Could not resolve attribute '{part}' in path '{path}'.")
                 return None
-
         return obj
 
     # --- Action Implementations ---
@@ -206,14 +227,118 @@ class RuleExecutor:
             logger.warning("Action 'send_message' called but no effective_chat was found in the update.")
 
     async def _action_kick_user(self, user_id: int = 0):
-        print(f"ACTION: kick_user({user_id if user_id else 'current user'})")
+        """Kicks a user from the group. Defaults to the user who triggered the rule."""
+        chat_id = self.update.effective_chat.id
+        target_user_id = int(user_id) or self.update.effective_user.id
+
+        if not chat_id or not target_user_id:
+            logger.warning("Action 'kick_user' called without sufficient context (chat_id or user_id).")
+            return
+
+        try:
+            # Note: kick_member is an alias for unban_chat_member, which is what we need.
+            await self.context.bot.unban_chat_member(chat_id=chat_id, user_id=target_user_id)
+            logger.info(f"Action 'kick_user' executed for user {target_user_id} in chat {chat_id}.")
+        except Exception as e:
+            logger.error(f"Failed to execute 'kick_user' for user {target_user_id} in chat {chat_id}: {e}")
 
     async def _action_ban_user(self, user_id: int = 0, reason: str = ""):
-        print(f"ACTION: ban_user({user_id if user_id else 'current user'}, reason='{reason}')")
+        """Bans a user from the group. Defaults to the user who triggered the rule."""
+        chat_id = self.update.effective_chat.id
+        target_user_id = int(user_id) or self.update.effective_user.id
+
+        if not chat_id or not target_user_id:
+            logger.warning("Action 'ban_user' called without sufficient context (chat_id or user_id).")
+            return
+
+        try:
+            await self.context.bot.ban_chat_member(chat_id=chat_id, user_id=target_user_id)
+            logger.info(f"Action 'ban_user' executed for user {target_user_id} in chat {chat_id}.")
+            if reason:
+                await self._action_send_message(f"User {target_user_id} has been banned. Reason: {reason}")
+        except Exception as e:
+            logger.error(f"Failed to execute 'ban_user' for user {target_user_id} in chat {chat_id}: {e}")
 
     async def _action_mute_user(self, user_id: int = 0, duration: str = ""):
-        print(f"ACTION: mute_user({user_id if user_id else 'current user'}, duration='{duration}')")
+        """
+        Mutes a user in the group (restricts them from sending messages).
+        Defaults to the user who triggered the rule.
+        NOTE: Duration parsing is not yet implemented. This is a permanent mute for now.
+        """
+        chat_id = self.update.effective_chat.id
+        target_user_id = int(user_id) or self.update.effective_user.id
+
+        if not chat_id or not target_user_id:
+            logger.warning("Action 'mute_user' called without sufficient context (chat_id or user_id).")
+            return
+
+        # To mute, we restrict message sending permissions.
+        from telegram import ChatPermissions
+        permissions = ChatPermissions(can_send_messages=False)
+
+        try:
+            # TODO: Implement duration parsing (e.g., "1h", "2d").
+            await self.context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=target_user_id,
+                permissions=permissions
+            )
+            logger.info(f"Action 'mute_user' executed for user {target_user_id} in chat {chat_id}.")
+        except Exception as e:
+            logger.error(f"Failed to execute 'mute_user' for user {target_user_id} in chat {chat_id}: {e}")
+
+    async def _action_set_var(self, variable_path: str, expression: str):
+        """Sets a persistent variable for a user or group."""
+        if not self.db_session:
+            logger.error("set_var action called but no db_session is available.")
+            return
+
+        # 1. Evaluate the expression to get the new value
+        new_value = self.evaluator.evaluate(expression)
+
+        # 2. Parse the variable path to get scope and name
+        parts = variable_path.strip("'\"").split('.')
+        if len(parts) != 2:
+            logger.warning(f"Invalid variable path for set_var: {variable_path}")
+            return
+        scope, var_name = parts
+
+        # 3. Determine the target for the variable
+        group_id = self.update.effective_chat.id
+        user_id = None
+        if scope == 'user':
+            user_id = self.update.effective_user.id
+        elif scope != 'group':
+            logger.warning(f"Invalid scope '{scope}' for set_var. Must be 'user' or 'group'.")
+            return
+
+        # 4. Find existing variable or create a new one
+        variable = self.db_session.query(StateVariable).filter_by(
+            group_id=group_id, user_id=user_id, name=var_name
+        ).first()
+
+        # 5. Handle deletion or upsert
+        if new_value is None:
+            if variable:
+                self.db_session.delete(variable)
+                logger.info(f"Deleted variable '{var_name}' for {scope} in group {group_id}.")
+        else:
+            if not variable:
+                variable = StateVariable(group_id=group_id, user_id=user_id, name=var_name)
+
+            variable.value = str(new_value) # Store all values as strings for simplicity
+            self.db_session.add(variable)
+            logger.info(f"Set variable '{var_name}' for {scope} in group {group_id} to '{new_value}'.")
+
+        # Commit the change to the database
+        try:
+            self.db_session.commit()
+        except Exception as e:
+            logger.error(f"Failed to commit set_var changes to DB: {e}")
+            self.db_session.rollback()
+
 
     async def _action_stop(self):
-        print("ACTION: stop()")
+        """Stops processing any further rules for this event."""
+        logger.debug("Action 'stop' called.")
         raise StopRuleProcessing()
