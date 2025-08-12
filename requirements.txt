@@ -1,0 +1,6 @@
+# Project Dependencies
+python-telegram-bot[ext]
+sqlalchemy
+psycopg2-binary
+apscheduler
+python-dotenv
