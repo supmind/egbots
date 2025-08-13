@@ -174,7 +174,7 @@ class TestRuleParser(unittest.TestCase):
 
         for script_condition, exp_left, exp_op, exp_right in test_cases:
             # 将每个条件片段包装成一个完整的、可解析的规则
-            full_script = f"IF {script_condition} THEN reply('ok') END"
+            full_script = f"WHEN command\nIF {script_condition}\nTHEN\nreply('ok')\nEND"
 
             with self.subTest(condition=script_condition):
                 rule = RuleParser(full_script).parse()
@@ -188,6 +188,7 @@ class TestRuleParser(unittest.TestCase):
 
     def test_line_number_in_error(self):
         """测试解析器是否能在错误消息中报告正确的行号。"""
+        # 注意：下面的脚本中，IF 语句的物理位置是在第 9 行。
         script = """
         # Line 1: Comment
         RuleName: Error test
@@ -195,15 +196,15 @@ class TestRuleParser(unittest.TestCase):
         # Line 4: WHEN clause
         WHEN message
 
-        # Line 7: Bad IF condition
+        # Line 8: Bad IF condition is on the next line
         IF user.id is not not valid
         THEN
             reply("This should not happen")
         END
         """
         parser = RuleParser(script)
-        # 我们期望一个 RuleParserError，其消息应包含 "第 7 行"
-        with self.assertRaisesRegex(RuleParserError, r"第 7 行"):
+        # 我们期望一个 RuleParserError，其消息应包含 "第 9 行"
+        with self.assertRaisesRegex(RuleParserError, r"第 9 行"):
             parser.parse()
 
 if __name__ == '__main__':
