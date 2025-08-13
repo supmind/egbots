@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock
 from src.core.parser import RuleParser
 from src.core.executor import RuleExecutor
 
-# A simple mock for the Telegram Update and Context objects
+# 一个用于测试的、简化的 Telegram Update 和 Context 模拟对象
 class MockUpdate:
     def __init__(self, text):
         self.effective_message = MagicMock()
@@ -20,8 +20,10 @@ class MockContext:
         self.bot = AsyncMock()
 
 class TestBuiltinFunctions(unittest.TestCase):
+    """针对内置函数的单元测试。"""
+
     def _run_script(self, script_body: str):
-        """Helper to run a script and return the final scope."""
+        """一个辅助函数，用于运行脚本并返回最终的作用域（scope）。"""
         full_script = f"WHEN command THEN {{ {script_body} }}"
         update = MockUpdate("/test")
         context = MockContext()
@@ -29,17 +31,17 @@ class TestBuiltinFunctions(unittest.TestCase):
         parser = RuleParser(full_script)
         rule = parser.parse()
 
-        # We pass db_session=None as these tests don't require database access.
+        # 因为这些测试不涉及数据库，所以 db_session 可以传入 None
         executor = RuleExecutor(update, context, db_session=None)
 
-        # Run the event loop for the async execution
+        # 运行事件循环来执行异步的 execute_rule 方法
         loop = asyncio.get_event_loop()
         loop.run_until_complete(executor.execute_rule(rule))
 
         return executor.scope
 
     def test_len_function(self):
-        """Tests the len() built-in function."""
+        """测试 len() 内置函数。"""
         scope = self._run_script('my_list = [1, "a", true]; result = len(my_list);')
         self.assertEqual(scope.get("result"), 3)
 
@@ -47,7 +49,7 @@ class TestBuiltinFunctions(unittest.TestCase):
         self.assertEqual(scope.get("result"), 5)
 
     def test_type_conversion_functions(self):
-        """Tests str() and int() built-in functions."""
+        """测试 str() 和 int() 内置函数。"""
         scope = self._run_script('my_num = 123; result = str(my_num);')
         self.assertEqual(scope.get("result"), "123")
 
@@ -55,10 +57,10 @@ class TestBuiltinFunctions(unittest.TestCase):
         self.assertEqual(scope.get("result"), 456)
 
         scope = self._run_script('my_str = "abc"; result = int(my_str);')
-        self.assertEqual(scope.get("result"), 0) # Should return 0 on failure
+        self.assertEqual(scope.get("result"), 0) # 转换失败时应返回 0
 
     def test_string_functions(self):
-        """Tests lower() and upper() built-in functions."""
+        """测试 lower() 和 upper() 内置函数。"""
         scope = self._run_script('my_str = "HeLLo"; result = lower(my_str);')
         self.assertEqual(scope.get("result"), "hello")
 
@@ -66,12 +68,17 @@ class TestBuiltinFunctions(unittest.TestCase):
         self.assertEqual(scope.get("result"), "HELLO")
 
     def test_split_function(self):
-        """Tests the split() built-in function."""
+        """测试 split() 内置函数。"""
         scope = self._run_script('my_str = "a b c"; result = split(my_str, " ");')
         self.assertEqual(scope.get("result"), ["a", "b", "c"])
 
         scope = self._run_script('my_str = "a,b,c"; result = split(my_str, ",");')
         self.assertEqual(scope.get("result"), ["a", "b", "c"])
+
+    def test_join_function(self):
+        """测试 join() 内置函数。"""
+        scope = self._run_script('my_list = ["a", "b", "c"]; result = join(my_list, "-");')
+        self.assertEqual(scope.get("result"), "a-b-c")
 
 if __name__ == '__main__':
     unittest.main()

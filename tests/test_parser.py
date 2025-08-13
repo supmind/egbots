@@ -5,12 +5,12 @@ from src.core.parser import RuleParser, ParsedRule, StatementBlock, Assignment, 
 
 class TestNewRuleParser(unittest.TestCase):
     """
-    Unit tests for the new, refactored RuleParser (v2.3).
-    These tests validate the C-style, brace-delimited language with its new features.
+    针对重构后的新版规则解析器 (v2.3) 的单元测试。
+    这些测试用于验证新的 C-style、大括号风格的语言及其新功能。
     """
 
     def test_parse_simple_assignment(self):
-        """Tests parsing a simple variable assignment."""
+        """测试解析简单的变量赋值语句。"""
         script = 'WHEN command THEN { my_var = "hello world"; }'
         parser = RuleParser(script)
         rule = parser.parse()
@@ -25,7 +25,7 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(stmt.expression.value, "hello world")
 
     def test_parse_action_call(self):
-        """Tests parsing a simple action call."""
+        """测试解析简单的动作调用语句。"""
         script = 'WHEN command THEN { reply("hello"); }'
         parser = RuleParser(script)
         rule = parser.parse()
@@ -38,8 +38,8 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(stmt.call.args[0].value, "hello")
 
     def test_binary_op_precedence(self):
-        """Tests that expressions with binary operators respect precedence."""
-        script = 'WHEN command THEN { x = 1 + 2 * 3; }' # Should be parsed as 1 + (2 * 3)
+        """测试带二元运算符的表达式是否遵循正确的运算优先级。"""
+        script = 'WHEN command THEN { x = 1 + 2 * 3; }' # 应被解析为 1 + (2 * 3)
         parser = RuleParser(script)
         rule = parser.parse()
 
@@ -56,12 +56,12 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(right_sub_expr.right.value, 3)
 
     def test_list_and_dict_literals(self):
-        """Tests parsing of list and dictionary literals."""
+        """测试对列表和字典字面量的解析。"""
         script = 'WHEN command THEN { my_list = [1, "a"]; my_dict = {"key": my_list}; }'
         parser = RuleParser(script)
         rule = parser.parse()
 
-        # Test list assignment
+        # 测试列表赋值
         list_stmt = rule.then_block.statements[0]
         self.assertIsInstance(list_stmt.expression, Literal)
         self.assertIsInstance(list_stmt.expression.value, list)
@@ -71,16 +71,16 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertIsInstance(list_stmt.expression.value[1], Literal)
         self.assertEqual(list_stmt.expression.value[1].value, "a")
 
-        # Test dict assignment
+        # 测试字典赋值
         dict_stmt = rule.then_block.statements[1]
         self.assertIsInstance(dict_stmt.expression, Literal)
-        # The value of the dict literal in the AST is a dict of AST nodes
+        # 字典字面量在AST中的值，是一个键到AST节点的映射
         self.assertIn("key", dict_stmt.expression.value)
         self.assertIsInstance(dict_stmt.expression.value["key"], Variable)
         self.assertEqual(dict_stmt.expression.value["key"].name, "my_list")
 
     def test_property_and_index_access(self):
-        """Tests parsing of chained property and index accessors."""
+        """测试对链式属性和下标访问器的解析。"""
         script = 'WHEN command THEN { x = my_var.prop[0]; }'
         parser = RuleParser(script)
         rule = parser.parse()
@@ -99,7 +99,7 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(target2.name, "my_var")
 
     def test_foreach_loop_parsing(self):
-        """Tests parsing a foreach loop."""
+        """测试解析 foreach 循环。"""
         script = 'WHEN command THEN { foreach (item in my_list) { reply(item); } }'
         parser = RuleParser(script)
         rule = parser.parse()
@@ -114,7 +114,7 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertIsInstance(stmt.body.statements[0], ActionCallStmt)
 
     def test_if_else_parsing(self):
-        """Tests parsing an if-else statement."""
+        """测试解析 if-else 语句。"""
         script = 'WHEN command WHERE x > 10 THEN { if (x > 10) { reply("big"); } else { reply("small"); } }'
         parser = RuleParser(script)
         rule = parser.parse()
@@ -128,12 +128,12 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(len(stmt.else_block.statements), 1)
 
     def test_syntax_error(self):
-        """Tests that invalid syntax raises a RuleParserError."""
-        script = 'WHEN command THEN { my_var = "hello" }' # Missing semicolon
+        """测试无效语法是否能正确抛出 RuleParserError。"""
+        script = 'WHEN command THEN { my_var = "hello" }' # 缺少分号
         with self.assertRaises(RuleParserError):
             RuleParser(script).parse()
 
-        script = 'WHEN command THEN { foreach (item in my_list) reply(item); }' # Missing braces
+        script = 'WHEN command THEN { foreach (item in my_list) reply(item); }' # 缺少大括号
         with self.assertRaises(RuleParserError):
             RuleParser(script).parse()
 
