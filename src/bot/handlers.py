@@ -213,7 +213,9 @@ async def scheduled_action_handler(context: ContextTypes.DEFAULT_TYPE):
             mock_update = MockUpdate(chat_id=group_id, user_id=user_id)
             executor = RuleExecutor(mock_update, context, db_session)
 
-            action_method = getattr(executor, f"_action_{action_name.lower()}", None)
+            # The action methods on the executor no longer have the `_action_` prefix
+            # due to the @action decorator refactoring.
+            action_method = getattr(executor, action_name.lower(), None)
 
             if action_method and callable(action_method):
                 await action_method(*action_args)

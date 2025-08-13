@@ -152,7 +152,6 @@ async def main():
     application.add_handler(MessageHandler(filters.COMMAND, command_handler))
     # 消息处理器 (处理非命令的纯文本)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, user_join_handler))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, user_leave_handler))
     application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, edited_message_handler))
     # 媒体处理器
