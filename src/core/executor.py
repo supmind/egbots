@@ -170,7 +170,7 @@ class RuleExecutor:
         # (此方法保持不变，为简洁起见省略)
         path_lower = path.lower()
         if path_lower.startswith('vars.'):
-            parts = path.split('.');
+            parts = path.split('.')
             if len(parts) != 3: return None
             _, scope, var_name = parts
             query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
@@ -179,15 +179,17 @@ class RuleExecutor:
                 query = query.filter_by(user_id=self.update.effective_user.id)
             elif scope.lower() == 'group': query = query.filter(StateVariable.user_id.is_(None))
             else: return None
+
             variable = query.first()
             if variable:
-                val = variable.value
-                try: return int(val)
-                except (ValueError, TypeError): pass
-                try: return float(val)
-                except (ValueError, TypeError): pass
-                if val.lower() in ('true', 'false'): return val.lower() == 'true'
-                return val
+                # 尝试将值作为 JSON 反序列化
+                try:
+                    import json
+                    return json.loads(variable.value)
+                except json.JSONDecodeError:
+                    # 如果失败，说明是旧格式的纯文本值，按原样返回
+                    # 这确保了对旧数据的向后兼容性
+                    return variable.value
             return None
         if path_lower == 'user.is_admin':
             if not (self.update.effective_chat and self.update.effective_user): return False
@@ -413,12 +415,21 @@ class RuleExecutor:
 
     @action("set_var")
     async def set_var(self, variable_path: str, expression: str):
+        """
+        动作：设置或修改一个持久化变量。
+        现在支持通过 JSON 序列化来存储复杂类型（如列表、字典），并保持类型安全。
+        """
+        import json
         new_value = await self.evaluator.evaluate(str(expression))
+
         parts = variable_path.strip("'\"").split('.')
-        if len(parts) != 2: return logger.warning(f"set_var 的变量路径无效: {variable_path}")
+        if len(parts) != 2:
+            return logger.warning(f"set_var 的变量路径无效: {variable_path}")
+
         scope, var_name = parts[0].lower(), parts[1]
         group_id = self.update.effective_chat.id
         user_id = None
+
         if scope == 'user':
             if not self.update.effective_user: return
             user_id = self.update.effective_user.id
@@ -430,12 +441,24 @@ class RuleExecutor:
         ).first()
 
         if new_value is None:
-            if variable: self.db_session.delete(variable)
+            # 如果新值为 null，则从数据库中删除该变量
+            if variable:
+                self.db_session.delete(variable)
+                logger.info(f"变量 '{variable_path}' 已被删除。")
         else:
+            # 将新值序列化为 JSON 字符串进行存储
+            try:
+                serialized_value = json.dumps(new_value)
+            except TypeError as e:
+                logger.error(f"无法将值 '{new_value}' 序列化为JSON: {e}")
+                return
+
             if not variable:
                 variable = StateVariable(group_id=group_id, user_id=user_id, name=var_name)
-            variable.value = str(new_value)
+
+            variable.value = serialized_value
             self.db_session.add(variable)
+            logger.info(f"变量 '{variable_path}' 已被设置为: {serialized_value}")
 
     @action("stop")
     async def stop(self):

@@ -107,7 +107,7 @@
 | `ban_user` | `ban_user(user.id, "违规")` | 永久封禁用户（可附带理由）。 |
 | `kick_user`| `kick_user()` | 将用户从群组中移除（用户可立即重新加入）。 |
 | `mute_user`| `mute_user("1h")` | 禁言用户（支持 `m`, `h`, `d` 等单位）。|
-| `set_var`| `set_var('user.warnings', vars.user.warnings + 1)` | 设置或修改一个持久化变量。 |
+| `set_var`| `set_var('user.warnings', vars.user.warnings + 1)` | 设置或修改一个持久化变量。<br>**注意**: 此动作现在支持所有JSON兼容类型 (如列表、字典)，并能安全地保持类型。 |
 | `stop` | `stop()` | 停止处理后续规则。 |
 | `schedule_action`| `schedule_action("5m", "reply('提醒')")` | 在指定延迟后执行一个动作。 |
 | `start_verification`| `start_verification()` | 对触发规则的用户启动人机验证流程。|

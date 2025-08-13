@@ -125,7 +125,22 @@ class ExpressionEvaluator:
             try:
                 return float(operand_str)
             except ValueError:
-                pass  # 如果不是数字，则继续判断是否为变量
+                pass  # 如果不是数字，则继续判断是否为其他类型
+
+        # 尝试将操作数解析为 JSON 对象或数组
+        if operand_str.startswith('{') and operand_str.endswith('}'):
+            try:
+                import json
+                return json.loads(operand_str)
+            except json.JSONDecodeError:
+                pass # 不是合法的 JSON，继续
+
+        if operand_str.startswith('[') and operand_str.endswith(']'):
+            try:
+                import json
+                return json.loads(operand_str)
+            except json.JSONDecodeError:
+                pass # 不是合法的 JSON，继续
 
         # 如果不是任何类型的字面量，则假定它是一个变量路径，并进行解析。
         return await self._resolve(operand_str)

@@ -59,11 +59,11 @@ async def test_set_var_evaluator_none_to_int(executor_factory, test_db_session_f
         executor = executor_factory(session)
         await executor._execute_action(action_node)
 
-    # 在一个新的会话中验证结果，以确保事务已提交
+    # 验证存储的值是 JSON 序列化后的
     with session_scope(test_db_session_factory) as session:
         variable = session.query(StateVariable).filter_by(name="warnings").first()
         assert variable is not None
-        assert variable.value == "1"
+        assert variable.value == '1' # JSON-encoded integer
 
 async def test_set_var_evaluator_none_to_string_lhs(executor_factory, test_db_session_factory):
     """测试 set_var 中，表达式求值器是否能将 None 转换成 '' 进行字符串拼接 (LHS)。"""
@@ -76,7 +76,7 @@ async def test_set_var_evaluator_none_to_string_lhs(executor_factory, test_db_se
     with session_scope(test_db_session_factory) as session:
         variable = session.query(StateVariable).filter_by(name="greeting").first()
         assert variable is not None
-        assert variable.value == "Hello "
+        assert variable.value == '"Hello "' # JSON-encoded string
 
 async def test_set_var_evaluator_none_to_string_rhs(executor_factory, test_db_session_factory):
     """测试 set_var 中，表达式求值器是否能将 None 转换成 '' 进行字符串拼接 (RHS)。"""
@@ -89,4 +89,44 @@ async def test_set_var_evaluator_none_to_string_rhs(executor_factory, test_db_se
     with session_scope(test_db_session_factory) as session:
         variable = session.query(StateVariable).filter_by(name="greeting").first()
         assert variable is not None
-        assert variable.value == " Welcome"
+        assert variable.value == '" Welcome"' # JSON-encoded string
+
+async def test_set_var_list_creation(executor_factory, test_db_session_factory):
+    """测试 set_var 是否能正确创建和存储一个列表。"""
+    action_node = Action(name="set_var", args=["user.items", '[1, "apple", true]'])
+
+    with session_scope(test_db_session_factory) as session:
+        executor = executor_factory(session)
+        await executor._execute_action(action_node)
+
+    with session_scope(test_db_session_factory) as session:
+        variable = session.query(StateVariable).filter_by(name="items").first()
+        assert variable is not None
+        assert variable.value == '[1, "apple", true]' # Check raw JSON
+
+        # Check that it resolves back to a list
+        resolved_value = await executor._resolve_path("vars.user.items")
+        assert resolved_value == [1, "apple", True]
+
+async def test_set_var_list_append(executor_factory, test_db_session_factory):
+    """测试 set_var 是否能向一个已存在的列表追加元素。"""
+    # 1. First, create the initial list
+    initial_action = Action(name="set_var", args=["user.items", '[1, 2]'])
+    with session_scope(test_db_session_factory) as session:
+        executor = executor_factory(session)
+        await executor._execute_action(initial_action)
+
+    # 2. Now, create the appending action
+    append_action = Action(name="set_var", args=["user.items", "vars.user.items + [3]"])
+    with session_scope(test_db_session_factory) as session:
+        executor = executor_factory(session)
+        await executor._execute_action(append_action)
+
+    # 3. Verify the final state
+    with session_scope(test_db_session_factory) as session:
+        variable = session.query(StateVariable).filter_by(name="items").first()
+        assert variable is not None
+        assert variable.value == '[1, 2, 3]'
+
+        resolved_value = await executor._resolve_path("vars.user.items")
+        assert resolved_value == [1, 2, 3]
