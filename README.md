@@ -69,9 +69,21 @@
 在 `IF` 条件中，你可以使用多种变量来获取事件的上下文信息。
 
 *   **用户**: `user.id`, `user.first_name`, `user.username`, `user.is_bot`, `user.is_admin`
-*   **消息**: `message.text`, `message.caption`, `message.contains_url`
+*   **消息**: `message.text`, `message.caption`, `message.contains_url`, `message.reply_to_message`
 *   **媒体**: `message.photo.width`, `message.video.duration`, `message.document.file_name`
+*   **命令 (NEW)**: `command.arg[0]`, `command.arg[1]`, ..., `command.full_args`, `command.arg_count`
 *   **自定义状态**: `vars.user.my_var`, `vars.group.my_var` (通过 `set_var` 设置)
+
+#### 命令变量 (`command.*`) 详解
+当 `WHEN command` 触发时，以下变量可用。假设收到的消息是 `/mute user123 "长时间禁言"`。
+
+| 变量 | 返回值 | 描述 |
+| :--- | :--- | :--- |
+| `message.text` | `"/mute user123 \"长时间禁言\""` | 完整的原始消息文本。 |
+| `command.arg[0]` | `"user123"` | 第一个参数。 |
+| `command.arg[1]` | `"长时间禁言"` | 第二个参数。 |
+| `command.full_args`| `"user123 \"长时间禁言\""` | 从第一个参数开始的完整字符串。 |
+| `command.arg_count`| `3` | 参数总数（包括命令本身）。 |
 
 ### 3.3. 运算符
 支持丰富的比较运算符，包括仿照 Cloudflare® Rules 的别名。
@@ -131,6 +143,33 @@ THEN
     reply("请不要在本群发送链接！")
     # 使用表达式增加用户警告次数
     set_var('user.warnings', vars.user.warnings + 1)
+END
+```
+
+**通用回复禁言命令 (新功能)**
+```
+RuleName: 通用回复禁言
+priority: 200
+
+# 触发器：当收到命令时
+WHEN command
+
+# 条件:
+# 1. 必须是一条回复消息
+# 2. 命令必须以 /mute 开头
+# 3. 必须有一个参数 (e.g., /mute 5m) -> arg_count == 2 (命令本身+1个参数)
+# 4. 操作者必须是管理员
+IF message.reply_to_message != null AND message.text startswith "/mute" AND command.arg_count == 2 AND user.is_admin == true
+
+# 动作:
+THEN
+    # 调用 mute_user 动作
+    # 第一个参数是时长: 从命令的第一个参数动态获取 (command.arg[0])
+    # 第二个参数是用户ID: 从被回复的消息中获取
+    mute_user(command.arg[0], message.reply_to_message.from_user.id)
+
+    # (可选) 发送一条操作成功的确认消息
+    reply("操作成功！")
 END
 ```
 

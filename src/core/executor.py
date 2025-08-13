@@ -203,6 +203,38 @@ class RuleExecutor:
         if path_lower == 'message.contains_url':
             if not (self.update.effective_message and self.update.effective_message.text): return False
             return bool(re.search(r'https?://\S+', self.update.effective_message.text))
+
+        # --- 优先级 4: 命令参数变量 ---
+        if path_lower.startswith('command.'):
+            # 首次请求命令参数时，解析并缓存它们
+            if '_command_parts' not in self.per_request_cache:
+                if not (self.update.effective_message and self.update.effective_message.text):
+                    self.per_request_cache['_command_parts'] = []
+                else:
+                    # 使用 shlex.split 可以正确处理带引号的参数，但为了保持简单，我们先用空格分割
+                    self.per_request_cache['_command_parts'] = self.update.effective_message.text.split()
+
+            parts = self.per_request_cache['_command_parts']
+
+            # command.full_args: 返回除命令外的所有参数，作为一个字符串
+            if path_lower == 'command.full_args':
+                return ' '.join(parts[1:]) if len(parts) > 1 else ""
+
+            # command.arg_count: 返回参数的数量
+            if path_lower == 'command.arg_count':
+                return len(parts) - 1 if len(parts) > 0 else 0
+
+            # command.arg[N]: 返回第 N 个参数
+            match = re.match(r'command\.arg\[(\d+)\]', path_lower)
+            if match:
+                arg_index = int(match.group(1))
+                # arg[0] 是第一个参数，对应 parts[1]
+                if 0 <= arg_index < len(parts) - 1:
+                    return parts[arg_index + 1]
+                return None # 索引越界
+
+            return None # 未知的 command 变量
+
         base_obj, path_to_resolve = self.update, path
         if path_lower.startswith('user.'):
             base_obj, path_to_resolve = self.update.effective_user, path[len('user.'):]
