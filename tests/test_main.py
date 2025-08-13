@@ -44,7 +44,7 @@ async def test_load_scheduled_rules(test_db_session_factory):
     """Tests that `load_scheduled_rules` correctly loads rules and registers them with the scheduler."""
     # --- 1. Setup ---
     group = Group(id=-1001, name="Scheduler Test Group")
-    rule_script = 'RuleName: Daily Report\npriority: 100\nWHEN schedule("0 9 * * *")\nTHEN\n send_message("Daily report time!")\nEND'
+    rule_script = 'WHEN schedule("0 9 * * *") THEN { send_message("Daily report time!"); }'
     rule = Rule(group_id=group.id, name="Daily Report", script=rule_script)
 
     mock_scheduler = MagicMock()

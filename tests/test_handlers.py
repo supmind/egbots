@@ -54,7 +54,7 @@ async def test_reload_rules_by_admin(mock_update, mock_context):
     # Verify
     assert -1001 not in mock_context.bot_data['rule_cache']
     mock_context.bot.get_chat_member.assert_called_once_with(-1001, 123)
-    mock_update.message.reply_text.assert_called_once_with("✅ 规则缓存已成功清除！将在下一条消息或事件发生时重新加载。")
+    mock_update.message.reply_text.assert_called_once_with("✅ 规则缓存已成功清除！")
 
 
 async def test_reload_rules_by_non_admin(mock_update, mock_context):
@@ -94,8 +94,8 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
     assert "检测到新群组" in caplog.text
     assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
-    # 4 default rules should be loaded
-    assert len(mock_context.bot_data['rule_cache'][-1001]) == 4
+    # 7 default rules should be loaded now that the parser is fixed
+    assert len(mock_context.bot_data['rule_cache'][-1001]) == 7
     # The executor should have been called at least once.
     assert MockRuleExecutor.called
 

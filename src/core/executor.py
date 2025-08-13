@@ -12,7 +12,11 @@ from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboa
 from telegram.ext import ContextTypes
 
 # Import the new AST nodes from the refactored parser
-from src.core.parser import ParsedRule, Stmt, Expr, StatementBlock, Assignment, ActionCallStmt, ActionCallExpr, Literal, Variable, PropertyAccess, IndexAccess, BinaryOp
+from src.core.parser import (
+    ParsedRule, Stmt, Expr, StatementBlock, Assignment, ActionCallStmt,
+    ActionCallExpr, Literal, Variable, PropertyAccess, IndexAccess, BinaryOp,
+    ListConstructor, DictConstructor, IfStmt, ForEachStmt, BreakStmt, ContinueStmt
+)
 from src.database import StateVariable
 
 logger = logging.getLogger(__name__)
@@ -117,14 +121,18 @@ class RuleExecutor:
         Executes a fully parsed rule.
         It creates a top-level scope for the execution.
         """
-        # In later phases, we will evaluate rule.where_clause here.
-        # where_passed = await self.evaluate_expression(rule.where_clause, self.scope)
-        # if not where_passed:
-        #     return
+        # A top-level scope is created for each rule execution to ensure isolation.
+        top_level_scope = {}
 
+        # 1. Evaluate the WHERE clause if it exists.
+        if rule.where_clause:
+            where_passed = await self.evaluate_expression(rule.where_clause, top_level_scope)
+            # If the WHERE condition is not met, stop execution for this rule.
+            if not where_passed:
+                return
+
+        # 2. Execute the THEN block if the WHERE clause passed (or didn't exist).
         if rule.then_block:
-            # Create the top-level scope for this execution run
-            top_level_scope = {}
             await self.execute_statement_block(rule.then_block, top_level_scope)
 
     async def execute_statement_block(self, block: StatementBlock, current_scope: Dict[str, Any]):
@@ -232,33 +240,57 @@ class RuleExecutor:
     async def evaluate_expression(self, expr: Expr, current_scope: Dict[str, Any]) -> Any:
         """Recursively evaluates an expression node and returns the result."""
         expr_type = type(expr)
+
         if expr_type is Literal:
             return expr.value
-        if expr_type is Variable:
+        elif expr_type is Variable:
             if expr.name in current_scope:
                 return current_scope[expr.name]
-            return await self._resolve_path(expr.name)
-        if expr_type is PropertyAccess:
+            else:
+                return await self._resolve_path(expr.name)
+        elif expr_type is PropertyAccess:
             target = await self.evaluate_expression(expr.target, current_scope)
-            if target is None: return None
-            if isinstance(target, dict):
+            if target is None:
+                return None
+            elif isinstance(target, dict):
                 return target.get(expr.property)
-            return getattr(target, expr.property, None)
-        if expr_type is IndexAccess:
+            else:
+                return getattr(target, expr.property, None)
+        elif expr_type is IndexAccess:
             target = await self.evaluate_expression(expr.target, current_scope)
             index = await self.evaluate_expression(expr.index, current_scope)
-            if target is None: return None
-            try:
-                return target[index]
-            except (IndexError, KeyError, TypeError):
+            if target is None:
                 return None
-        if expr_type is BinaryOp:
+            else:
+                try:
+                    return target[index]
+                except (IndexError, KeyError, TypeError):
+                    return None
+        elif expr_type is BinaryOp:
             return await self.visit_binary_op(expr, current_scope)
-        if expr_type is ActionCallExpr:
+        elif expr_type is ActionCallExpr:
             return await self.visit_function_call_expr(expr, current_scope)
+        elif expr_type is ListConstructor:
+            return await self.visit_list_constructor(expr, current_scope)
+        elif expr_type is DictConstructor:
+            return await self.visit_dict_constructor(expr, current_scope)
 
         logger.warning(f"Unsupported expression type for evaluation: {expr_type}")
         return None
+
+    async def visit_list_constructor(self, expr: ListConstructor, current_scope: Dict[str, Any]) -> List[Any]:
+        """Evaluates a list constructor by evaluating each of its element expressions."""
+        evaluated_elements = []
+        for element_expr in expr.elements:
+            evaluated_elements.append(await self.evaluate_expression(element_expr, current_scope))
+        return evaluated_elements
+
+    async def visit_dict_constructor(self, expr: DictConstructor, current_scope: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluates a dict constructor by evaluating each of its value expressions."""
+        evaluated_pairs = {}
+        for key, value_expr in expr.pairs.items():
+            evaluated_pairs[key] = await self.evaluate_expression(value_expr, current_scope)
+        return evaluated_pairs
 
     async def visit_binary_op(self, expr: BinaryOp, current_scope: Dict[str, Any]) -> Any:
         """Evaluates a binary operation, including arithmetic, comparison, and logic."""
@@ -290,10 +322,21 @@ class RuleExecutor:
                 return (lhs or 0) + (rhs or 0)
             if op == '-': return (lhs or 0) - (rhs or 0)
             if op == '*': return (lhs or 0) * (rhs or 0)
-            if op == '/': return (lhs or 0) / (rhs or 1)
+            if op == '/':
+                # Correctly handle division by zero.
+                # The original `rhs or 1` was hiding the error.
+                if rhs is None or rhs == 0:
+                    logger.warning(f"Division by zero attempted: {lhs} / {rhs}")
+                    return None
+                lhs_val = lhs or 0
+                return lhs_val / rhs
         except TypeError:
             logger.warning(f"Type error in arithmetic operation: {lhs} {op} {rhs}")
             return None
+        except ZeroDivisionError:
+            logger.warning(f"Division by zero error: {lhs} / {rhs}")
+            return None
+
 
         # Comparison Operators
         if op in ('==', 'eq'): return lhs == rhs
@@ -341,14 +384,53 @@ class RuleExecutor:
 
     async def _resolve_path(self, path: str) -> Any:
         """
-        Resolves a variable path (e.g., 'user.id', 'vars.group.my_var').
-        This crucial method remains mostly unchanged, bridging our new script interpreter
-        with the bot's existing data context.
+        Resolves a variable path (e.g., 'user.id', 'vars.group.my_var', 'command.arg[0]').
+        This is the bridge between the script engine and the bot's live data.
         """
         path_lower = path.lower()
 
-        # 1. Check local script scope first (not part of original method)
-        # This is now handled in evaluate_expression to give local vars precedence.
+        # 1. Check for command variables (e.g., 'command.arg[0]')
+        if path_lower.startswith('command.'):
+            # This logic should only run for command events
+            if not self.update.message or not self.update.message.text:
+                return None
+
+            message_text = self.update.message.text
+            if not message_text.startswith('/'):
+                return None
+
+            cache_key = f"command_args_{self.update.update_id}"
+            if cache_key not in self.per_request_cache:
+                # Use shlex to correctly handle quoted arguments
+                parts = shlex.split(message_text)
+                command_name = parts[0].lstrip('/') # 移除命令前缀
+                args = parts[1:]
+                self.per_request_cache[cache_key] = {
+                    "name": command_name,
+                    "args": args,
+                    "text": message_text,
+                    "full_args": " ".join(args)
+                }
+
+            command_data = self.per_request_cache[cache_key]
+
+            if path_lower == 'command.full_text':
+                return command_data["text"]
+            if path_lower in ('command.name', 'command.text'): # alias .text to .name
+                return command_data["name"]
+            if path_lower == 'command.full_args':
+                return command_data["full_args"]
+            if path_lower == 'command.arg_count':
+                return len(command_data["args"])
+
+            # Handle indexed access like command.arg[0]
+            match = re.match(r'command\.arg\[(\d+)\]', path_lower)
+            if match:
+                arg_index = int(match.group(1))
+                if 0 <= arg_index < len(command_data["args"]):
+                    return command_data["args"][arg_index]
+
+            return None # Return None for unknown command properties
 
         # 2. Check for persistent variables (`vars.scope.name`)
         if path_lower.startswith('vars.'):
@@ -412,14 +494,17 @@ class RuleExecutor:
     @action("set_var")
     async def set_var(self, variable_path: str, value: Any):
         """
-        Slightly adapted to take an already-evaluated value.
-        The old version took an expression string, the new one gets a direct value.
+        Sets a persistent variable in the database, correctly handling JSON serialization.
         """
-        parts = variable_path.strip("'\"").split('.')
+        if not isinstance(variable_path, str):
+            return logger.warning(f"set_var 'variable_path' must be a string, but got {type(variable_path)}.")
+
+        parts = variable_path.split('.')
         if len(parts) != 2:
-            return logger.warning(f"set_var's variable path is invalid: {variable_path}")
+            return logger.warning(f"set_var's variable path '{variable_path}' is invalid. Expected 'scope.name' format.")
 
         scope, var_name = parts[0].lower(), parts[1]
+        if not self.update.effective_chat: return
         group_id = self.update.effective_chat.id
         user_id = None
 
@@ -427,7 +512,7 @@ class RuleExecutor:
             if not self.update.effective_user: return
             user_id = self.update.effective_user.id
         elif scope != 'group':
-            return logger.warning(f"set_var has an invalid scope '{scope}'")
+            return logger.warning(f"set_var has an invalid scope '{scope}'. Must be 'user' or 'group'.")
 
         variable = self.db_session.query(StateVariable).filter_by(
             group_id=group_id, user_id=user_id, name=var_name
@@ -436,16 +521,70 @@ class RuleExecutor:
         if value is None:
             if variable:
                 self.db_session.delete(variable)
+                logger.info(f"Persistent variable '{variable_path}' deleted.")
         else:
-            serialized_value = json.dumps(value)
+            try:
+                # Ensure complex types (lists, dicts, bools) are stored as JSON text
+                serialized_value = json.dumps(value)
+            except TypeError as e:
+                return logger.error(f"Failed to serialize value for '{variable_path}': {e}. Value: {value}")
+
             if not variable:
                 variable = StateVariable(group_id=group_id, user_id=user_id, name=var_name)
             variable.value = serialized_value
             self.db_session.add(variable)
-        logger.info(f"Variable '{variable_path}' was set to: {variable.value if variable else 'null'}")
+            logger.info(f"Persistent variable '{variable_path}' was set to: {serialized_value}")
 
     # (Other actions like mute_user, kick_user, etc., would be here, unchanged)
     # For brevity, I am omitting them, but they are part of the file.
+
+    @action("delete_message")
+    async def delete_message(self):
+        """动作：删除触发此规则的消息。"""
+        if self.update.effective_message:
+            try:
+                await self.update.effective_message.delete()
+            except Exception as e:
+                logger.error(f"删除消息失败: {e}")
+
+    @action("start_verification")
+    async def start_verification(self):
+        """
+        动作：为新用户开启人机验证流程。
+        这包括：
+        1. 立即将用户设置为受限模式（仅可读）。
+        2. 向群组内发送一条带有 "开始验证" 按钮的消息。
+        """
+        if not (self.update.effective_chat and self.update.effective_user):
+            return
+
+        chat_id = self.update.effective_chat.id
+        user_id = self.update.effective_user.id
+        user_mention = self.update.effective_user.mention_html()
+        bot_username = self.context.bot.username
+
+        try:
+            # 1. 将用户禁言
+            await self.context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(can_send_messages=False)
+            )
+
+            # 2. 发送验证链接
+            verification_url = f"https://t.me/{bot_username}?start=verify_{chat_id}_{user_id}"
+            keyboard = InlineKeyboardMarkup.from_button(
+                InlineKeyboardButton(text="点此开始验证", url=verification_url)
+            )
+            await self.context.bot.send_message(
+                chat_id=chat_id,
+                text=f"欢迎 {user_mention}！为防止机器人骚扰，请在15分钟内点击下方按钮完成验证。",
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"为用户 {user_id} 在群组 {chat_id} 启动验证时出错: {e}", exc_info=True)
+
 
     @action("stop")
     async def stop(self):

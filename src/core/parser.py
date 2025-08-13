@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Dict
 
 # ======================================================================================
 # 脚本语言 v2.3 - 解析器实现
@@ -28,6 +28,16 @@ class Expr: pass
 class Literal(Expr):
     """字面量节点，例如: "hello", 123, true"""
     value: Any
+
+@dataclass
+class ListConstructor(Expr):
+    """列表构造节点，例如: [1, "a", my_var]"""
+    elements: List[Expr]
+
+@dataclass
+class DictConstructor(Expr):
+    """字典构造节点，例如: {"key": my_var}"""
+    pairs: Dict[str, Expr]
 
 @dataclass
 class Variable(Expr):
@@ -142,11 +152,11 @@ TOKEN_SPECIFICATION = [
     ('COMMA',        r','),
     ('COLON',        r':'),
     ('DOT',          r'\.'),
+    ('COMPARE_OP',   r'==|!=|>=|<=|>|<|\b(contains|CONTAINS|startswith|STARTSWITH|endswith|ENDSWITH)\b'),
     ('EQUALS',       r'='),
-    ('LOGIC_OP',     r'\b(and|or|not)\b'),
-    ('COMPARE_OP',   r'==|!=|>=|<=|>|<|\b(contains|startswith|endswith)\b'),
+    ('LOGIC_OP',     r'\b(and|AND|or|OR|not|NOT)\b'),
     ('ARITH_OP',     r'\+|-|\*|/'),
-    ('KEYWORD',      r'\b(WHEN|WHERE|THEN|END|if|else|foreach|in|break|continue|true|false|null)\b'),
+    ('KEYWORD',      r'\b(WHEN|when|WHERE|where|THEN|then|END|end|IF|if|ELSE|else|FOREACH|foreach|IN|in|BREAK|break|CONTINUE|continue|TRUE|true|FALSE|false|NULL|null)\b'),
     ('STRING',       r'"[^"]*"|\'[^\']*\''),
     ('NUMBER',       r'\d+(\.\d*)?'),
     ('IDENTIFIER',   r'[a-zA-Z_][a-zA-Z0-9_]*'),
@@ -192,7 +202,15 @@ class RuleParser:
 
         # 解析 WHEN
         self._consume_keyword('WHEN')
-        rule.when_event = self._consume('IDENTIFIER').value
+        # WHEN子句可以是一个简单的标识符，也可以是一个函数调用（主要用于schedule）
+        if self._peek_type('IDENTIFIER') and self._peek_type('LPAREN', 1):
+            call_expr = self._parse_action_call_expression()
+            # 为了简单起见，我们将整个调用表达式的字符串表示形式用作事件名称
+            # 注意：这是一种简化处理，理想情况下AST应该更一致
+            args_str = ', '.join(f'"{arg.value}"' if isinstance(arg, Literal) else '...' for arg in call_expr.args)
+            rule.when_event = f"{call_expr.action_name}({args_str})"
+        else:
+            rule.when_event = self._consume('IDENTIFIER').value
 
         # 解析可选的 WHERE
         if self._peek_value('WHERE'):
@@ -385,27 +403,33 @@ class RuleParser:
         elif token.type == 'NUMBER':
             self._consume('NUMBER')
             return Literal(value=float(token.value) if '.' in token.value else int(token.value))
-        elif token.type == 'IDENTIFIER':
-            self._consume('IDENTIFIER')
+        elif token.type == 'KEYWORD' and token.value.lower() in ('true', 'false', 'null'):
+            self._consume('KEYWORD')
             val_lower = token.value.lower()
             if val_lower == 'true': return Literal(value=True)
             if val_lower == 'false': return Literal(value=False)
             if val_lower == 'null': return Literal(value=None)
-            return Variable(name=token.value)
+        elif token.type == 'IDENTIFIER':
+            # 关键修复：检查标识符后是否跟有 '(', 如果是，则解析为函数/动作调用表达式
+            if self._peek_type('LPAREN', offset=1):
+                return self._parse_action_call_expression()
+            else:
+                self._consume('IDENTIFIER')
+                return Variable(name=token.value)
         elif self._peek_type('LPAREN'):
             self._consume('LPAREN')
             expr = self._parse_expression()
             self._consume('RPAREN')
             return expr
         elif self._peek_type('LBRACK'):
-            return self._parse_list_literal()
+            return self._parse_list_constructor()
         elif self._peek_type('LBRACE'):
-            return self._parse_dict_literal()
+            return self._parse_dict_constructor()
         else:
             raise RuleParserError(f"非预期的 token '{token.value}'，此处应为一个表达式。", token.line)
 
-    def _parse_list_literal(self) -> Literal:
-        """解析列表字面量，例如: [1, "a", my_var]"""
+    def _parse_list_constructor(self) -> ListConstructor:
+        """解析列表构造表达式，例如: [1, "a", my_var]"""
         self._consume('LBRACK')
         elements = []
         if not self._peek_type('RBRACK'):
@@ -415,10 +439,10 @@ class RuleParser:
                     break
                 self._consume('COMMA')
         self._consume('RBRACK')
-        return Literal(value=elements)
+        return ListConstructor(elements=elements)
 
-    def _parse_dict_literal(self) -> Literal:
-        """解析字典字面量，例如: {"key1": val1, "key2": 10}"""
+    def _parse_dict_constructor(self) -> DictConstructor:
+        """解析字典构造表达式，例如: {"key1": val1, "key2": 10}"""
         self._consume('LBRACE')
         pairs = {}
         if not self._peek_type('RBRACE'):
@@ -432,7 +456,7 @@ class RuleParser:
                     break
                 self._consume('COMMA')
         self._consume('RBRACE')
-        return Literal(value=pairs)
+        return DictConstructor(pairs=pairs)
 
     # --- 解析器辅助方法 ---
 
@@ -459,12 +483,13 @@ class RuleParser:
         return token
 
     def _consume_keyword(self, keyword: str) -> Token:
-        """消耗一个指定的关键字（不区分大小写）。"""
+        """消耗一个指定的关键字（不区分大小写）。也接受逻辑运算符作为关键字。"""
         if self.pos >= len(self.tokens):
             raise RuleParserError(f"期望得到关键字 '{keyword}'，但脚本已结束。", -1)
         token = self.tokens[self.pos]
-        if token.type != 'KEYWORD' or token.value.lower() != keyword.lower():
-            raise RuleParserError(f"期望得到关键字 '{keyword}'，但得到 '{token.value}'", token.line)
+        # 修复：允许 token 类型为 KEYWORD 或 LOGIC_OP
+        if (token.type not in ('KEYWORD', 'LOGIC_OP')) or token.value.lower() != keyword.lower():
+            raise RuleParserError(f"期望得到关键字 '{keyword}'，但得到 '{token.value}' (类型: {token.type})", token.line)
         self.pos += 1
         return token
 

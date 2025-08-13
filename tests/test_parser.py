@@ -1,7 +1,11 @@
 # tests/test_parser.py
 
 import unittest
-from src.core.parser import RuleParser, ParsedRule, StatementBlock, Assignment, ActionCallStmt, Literal, Variable, BinaryOp, PropertyAccess, IndexAccess, ForEachStmt, IfStmt, RuleParserError
+from src.core.parser import (
+    RuleParser, ParsedRule, StatementBlock, Assignment, ActionCallStmt, Literal,
+    Variable, BinaryOp, PropertyAccess, IndexAccess, ForEachStmt, IfStmt,
+    RuleParserError, ListConstructor, DictConstructor
+)
 
 class TestNewRuleParser(unittest.TestCase):
     """
@@ -63,21 +67,20 @@ class TestNewRuleParser(unittest.TestCase):
 
         # 测试列表赋值
         list_stmt = rule.then_block.statements[0]
-        self.assertIsInstance(list_stmt.expression, Literal)
-        self.assertIsInstance(list_stmt.expression.value, list)
-        self.assertEqual(len(list_stmt.expression.value), 2)
-        self.assertIsInstance(list_stmt.expression.value[0], Literal)
-        self.assertEqual(list_stmt.expression.value[0].value, 1)
-        self.assertIsInstance(list_stmt.expression.value[1], Literal)
-        self.assertEqual(list_stmt.expression.value[1].value, "a")
+        self.assertIsInstance(list_stmt.expression, ListConstructor)
+        self.assertEqual(len(list_stmt.expression.elements), 2)
+        self.assertIsInstance(list_stmt.expression.elements[0], Literal)
+        self.assertEqual(list_stmt.expression.elements[0].value, 1)
+        self.assertIsInstance(list_stmt.expression.elements[1], Literal)
+        self.assertEqual(list_stmt.expression.elements[1].value, "a")
 
         # 测试字典赋值
         dict_stmt = rule.then_block.statements[1]
-        self.assertIsInstance(dict_stmt.expression, Literal)
-        # 字典字面量在AST中的值，是一个键到AST节点的映射
-        self.assertIn("key", dict_stmt.expression.value)
-        self.assertIsInstance(dict_stmt.expression.value["key"], Variable)
-        self.assertEqual(dict_stmt.expression.value["key"].name, "my_list")
+        self.assertIsInstance(dict_stmt.expression, DictConstructor)
+        # 字典构造器的值是一个从字符串键到AST节点的映射
+        self.assertIn("key", dict_stmt.expression.pairs)
+        self.assertIsInstance(dict_stmt.expression.pairs["key"], Variable)
+        self.assertEqual(dict_stmt.expression.pairs["key"].name, "my_list")
 
     def test_property_and_index_access(self):
         """测试对链式属性和下标访问器的解析。"""
