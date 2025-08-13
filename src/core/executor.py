@@ -17,8 +17,10 @@ from src.database import StateVariable
 
 logger = logging.getLogger(__name__)
 
-# ==================== Action Decorator (Remains the same) ====================
+# ==================== Built-in Functions & Actions ====================
+
 _ACTION_REGISTRY: Dict[str, Callable[..., Coroutine]] = {}
+_BUILTIN_FUNCTIONS: Dict[str, Callable[..., Any]] = {}
 
 def action(name: str):
     """A decorator to register a method as a rule script action."""
@@ -27,7 +29,59 @@ def action(name: str):
         return func
     return decorator
 
+def builtin_function(name: str):
+    """A decorator to register a Python function as a built-in function in the script language."""
+    def decorator(func: Callable[..., Any]):
+        _BUILTIN_FUNCTIONS[name.lower()] = func
+        return func
+    return decorator
+
 # ==================== Exceptions ====================
+
+# Note: The function implementations are placed here, before the class that uses them.
+# They are decorated to register them into the _BUILTIN_FUNCTIONS registry.
+
+@builtin_function("len")
+def builtin_len(obj: Any) -> int:
+    """Returns the length of a list, dictionary, or string."""
+    try:
+        return len(obj)
+    except TypeError:
+        return 0
+
+@builtin_function("str")
+def builtin_str(obj: Any) -> str:
+    """Converts an object to its string representation."""
+    return str(obj)
+
+@builtin_function("int")
+def builtin_int(obj: Any) -> int:
+    """Converts an object to an integer. Returns 0 on failure."""
+    try:
+        return int(obj)
+    except (ValueError, TypeError):
+        return 0
+
+@builtin_function("lower")
+def builtin_lower(s: str) -> str:
+    """Converts a string to lowercase."""
+    return str(s).lower()
+
+@builtin_function("upper")
+def builtin_upper(s: str) -> str:
+    """Converts a string to uppercase."""
+    return str(s).upper()
+
+@builtin_function("split")
+def builtin_split(s: str, sep: str = None, maxsplit: int = -1) -> List[str]:
+    """Splits a string by a separator. If sep is not provided, splits by whitespace."""
+    return str(s).split(sep, maxsplit)
+
+@builtin_function("join")
+def builtin_join(l: list, sep: str) -> str:
+    """Joins a list of strings with a separator."""
+    return str(sep).join(map(str, l))
+
 
 class StopRuleProcessing(Exception):
     """Custom exception to stop processing further rules for the current event."""
@@ -201,7 +255,7 @@ class RuleExecutor:
         if expr_type is BinaryOp:
             return await self.visit_binary_op(expr, current_scope)
         if expr_type is ActionCallExpr:
-            pass
+            return await self.visit_function_call_expr(expr, current_scope)
 
         logger.warning(f"Unsupported expression type for evaluation: {expr_type}")
         return None
@@ -258,6 +312,27 @@ class RuleExecutor:
             return False
 
         logger.warning(f"Unsupported binary operator: {op}")
+        return None
+
+    async def visit_function_call_expr(self, expr: ActionCallExpr, current_scope: Dict[str, Any]) -> Any:
+        """Evaluates a built-in function call within an expression."""
+        func_name = expr.action_name.lower()
+
+        if func_name in _BUILTIN_FUNCTIONS:
+            func = _BUILTIN_FUNCTIONS[func_name]
+
+            evaluated_args = []
+            for arg_expr in expr.args:
+                evaluated_args.append(await self.evaluate_expression(arg_expr, current_scope))
+
+            try:
+                # Built-in functions are regular synchronous python functions
+                return func(*evaluated_args)
+            except Exception as e:
+                logger.error(f"Error executing built-in function '{func_name}': {e}")
+                return None
+
+        logger.warning(f"Unknown function called in expression: '{expr.action_name}'")
         return None
 
     async def _execute_action_legacy(self, action_node: Any):

@@ -48,146 +48,119 @@
 
 ---
 
-## 3. 规则语法
+## 3. 规则脚本语言指南 (v2.3)
 
-规则语言的核心是 `WHEN ... IF ... THEN ... END` 结构。
+本机器人由一个强大、灵活的嵌入式脚本语言驱动。它允许您编写复杂的规则来自动化管理您的群组。
 
-### 3.1. 触发器 (`WHEN`)
-`WHEN` 关键字定义了规则的触发时机。
+### 3.1. 核心概念
 
-| 触发器 | 描述 |
+*   **语法风格**: 语言采用类似 C/Java/JavaScript 的语法风格。代码块由 `{}` 包裹，每条语句以 `;` 结尾。
+*   **声明式与命令式结合**: 规则的总体结构是声明式的 (`WHEN...WHERE...THEN`)，但在 `THEN` 块内部，您可以编写命令式的脚本代码。
+
+### 3.2. 规则基本结构
+
+```
+WHEN event
+WHERE expression
+THEN {
+    // 脚本代码...
+}
+END
+```
+
+*   **`WHEN event`**: **必需**。定义规则的**触发器**。
+*   **`WHERE expression`**: **可选**。定义规则的**守卫条件**。这是一个高效的前置检查，只有当 `expression` 的结果为真时，`THEN` 块内的脚本才会被执行。
+*   **`THEN { ... }`**: **必需**。定义规则的**执行体**。其中包含用于处理事件的脚本。
+*   **`END`**: **必需**。标志着规则定义的结束。
+
+### 3.3. 数据类型
+
+*   **String**: 字符串，由 `"` 或 `'` 包裹。例如: `"hello"`, `'world'`。
+*   **Number**: 数字，包括整数和浮点数。例如: `123`, `99.9`。
+*   **Boolean**: 布尔值，`true` 或 `false`。
+*   **Null**: 代表“无”或“空”的值，关键字为 `null`。
+*   **List**: 列表（数组），有序的元素集合。例如: `[1, "a", true]`。
+*   **Dictionary**: 字典（对象），键值对的集合。键必须是字符串。例如: `{"key": "value", "count": 10}`。
+
+### 3.4. 变量
+
+语言中有三类变量：
+
+1.  **脚本变量 (本地变量)**: 在 `THEN` 块内通过赋值语句创建，只在当前脚本执行期间存在。
+    ```
+    my_var = 10;
+    my_list = [1, 2, 3];
+    ```
+2.  **上下文变量 (只读)**: 由系统提供，包含了当前触发事件的所有信息。
+    *   `user.*`: 触发事件的用户信息。 e.g., `user.id`, `user.is_admin`。
+    *   `message.*`: 触发事件的消息信息。 e.g., `message.text`, `message.reply_to_message`。
+    *   `command.*`: 当 `WHEN command` 时可用，提供对命令参数的访问。 e.g., `command.full_args`。
+3.  **持久化变量 (读写)**: 跨规则、跨时间存在的变量，存储在数据库中。
+    *   `vars.group.my_var`: 群组作用域的变量。
+    *   `vars.user.my_var`: 用户在特定群组内的作用域变量。
+    *   **读取**: `my_warnings = vars.user.warnings or 0;`
+    *   **写入**: 必须使用 `set_var` 动作: `set_var("user.warnings", my_warnings + 1);`
+
+### 3.5. 控制流
+
+*   **条件分支**: `if (expression) { ... } else { ... }`
+    ```
+    if (user.karma > 10) {
+        reply("感谢您的贡献!");
+    } else {
+        reply("请继续努力!");
+    }
+    ```
+*   **循环**: `foreach (item in collection) { ... }`
+    `collection` 可以是一个列表或一个字符串。
+    ```
+    my_list = ["a", "b", "c"];
+    foreach (item in my_list) {
+        reply(item);
+    }
+    ```
+*   **循环控制**:
+    *   `break;`: 立即跳出整个 `foreach` 循环。
+    *   `continue;`: 立即结束本次迭代，开始下一次迭代。
+
+### 3.6. 表达式与运算符
+
+支持标准的运算优先级。
+
+| 类别 | 运算符 |
 | :--- | :--- |
-| `message` | 当任何用户发送文本消息时触发。 |
-| `command` | 当用户发送一个命令 (如 `/start`) 时触发。 |
-| `user_join` | 当一个或多个新用户加入群组时触发。 |
-| `user_leave` | 当一个用户离开或被移出群组时触发。 |
-| `photo` / `video` / `document` | 当用户发送相应类型的媒体时触发。 |
-| `edited_message`| 当一条消息被编辑时触发。 |
-| `schedule("...")` | 根据指定的 [Cron 表达式](https://crontab.guru/) 定时触发。 |
+| **数学** | `+` (加法, 字符串/列表拼接), `-`, `*`, `/` |
+| **比较** | `==`, `!=`, `>`, `>=`, `<`, `<=` |
+| **逻辑** | `and`, `or`, `not` (前缀) |
+| **字符串** | `contains`, `startswith`, `endswith` |
 
-### 3.2. 可用变量
-在 `IF` 条件中，你可以使用多种变量来获取事件的上下文信息。
+### 3.7. 内置函数
 
-*   **用户**: `user.id`, `user.first_name`, `user.username`, `user.is_bot`, `user.is_admin`
-*   **消息**: `message.text`, `message.caption`, `message.contains_url`, `message.reply_to_message`
-*   **媒体**: `message.photo.width`, `message.video.duration`, `message.document.file_name`
-*   **命令 (NEW)**: `command.arg[0]`, `command.arg[1]`, ..., `command.full_args`, `command.arg_count`
-*   **自定义状态**: `vars.user.my_var`, `vars.group.my_var` (通过 `set_var` 设置)
+| 函数 | 描述 |
+| :--- | :--- |
+| `len(object)` | 返回列表、字典或字符串的长度/大小。 |
+| `str(object)` | 将一个对象转换为字符串。 |
+| `int(object)` | 尝试将一个对象转换为整数（失败则返回0）。 |
+| `lower(string)` | 将字符串转为小写。 |
+| `upper(string)` | 将字符串转为大写。 |
+| `split(string, separator)` | 将字符串按 `separator` 分割成一个列表。 |
+| `join(list, separator)` | 使用 `separator` 连接 `list` 中的所有元素成一个字符串。 |
 
-#### 命令变量 (`command.*`) 详解
-当 `WHEN command` 触发时，以下变量可用。假设收到的消息是 `/mute user123 "长时间禁言"`。
+### 3.8. 可用动作 (Actions)
 
-| 变量 | 返回值 | 描述 |
-| :--- | :--- | :--- |
-| `message.text` | `"/mute user123 \"长时间禁言\""` | 完整的原始消息文本。 |
-| `command.arg[0]` | `"user123"` | 第一个参数。 |
-| `command.arg[1]` | `"长时间禁言"` | 第二个参数。 |
-| `command.full_args`| `"user123 \"长时间禁言\""` | 从第一个参数开始的完整字符串。 |
-| `command.arg_count`| `3` | 参数总数（包括命令本身）。 |
+动作是脚本与机器人功能交互的唯一方式。
 
-### 3.3. 运算符
-支持丰富的比较运算符，包括仿照 Cloudflare® Rules 的别名。
-
-| 类别 | 运算符 | 别名 | 描述 |
-| :--- | :--- | :--- | :--- |
-| **相等性** | `==`, `!=` | `eq`, `ne`, `is`, `is not` | 等于 / 不等于 |
-| **比较** | `>`, `<`, `>=`, `<=` | `gt`, `lt`, `ge`, `le` | 大于 / 小于 |
-| **字符串** | `contains`, `startswith`, `endswith` | | 包含 / 开头 / 结尾 |
-| **正则** | `matches` | | 匹配正则表达式 |
-| **集合** | `in` | | 是集合成员之一 |
-
-### 3.4. 动作 (`THEN`)
-在 `THEN` 块中定义当条件满足时要执行的操作。
-
-| 动作 | 示例 | 描述 |
-| :--- | :--- | :--- |
-| `reply` | `reply("你好")` | 回复触发消息。 |
-| `send_message` | `send_message("群公告")` | 在群组中发送新消息。 |
-| `delete_message`| `delete_message()` | 删除触发消息。 |
-| `ban_user` | `ban_user(user.id, "违规")` | 永久封禁用户（可附带理由）。 |
-| `kick_user`| `kick_user()` | 将用户从群组中移除（用户可立即重新加入）。 |
-| `mute_user`| `mute_user("1h")` | 禁言用户（支持 `m`, `h`, `d` 等单位）。|
-| `set_var`| `set_var('user.warnings', vars.user.warnings + 1)` | 设置或修改一个持久化变量。<br>**注意**: 此动作现在支持所有JSON兼容类型 (如列表、字典)，并能安全地保持类型。 |
-| `stop` | `stop()` | 停止处理后续规则。 |
-| `schedule_action`| `schedule_action("5m", "reply('提醒')")` | 在指定延迟后执行一个动作。 |
-| `start_verification`| `start_verification()` | 对触发规则的用户启动人机验证流程。|
-
-### 3.5. 语法示例
-
-**欢迎新成员**
-```
-# 规则名 (可选)
-RuleName: 欢迎新成员
-
-# 触发器：当有新用户加入时
-WHEN user_join
-
-# 动作块
-THEN
-    # 使用花括号引用变量
-    reply("欢迎 {user.first_name} 加入本群！")
-    # 设置一个用户变量
-    set_var('user.joined', 'true')
-```
-
-**使用高级运算符删除广告**
-```
-RuleName: 删除广告链接
-priority: 100
-
-WHEN message
-
-# 如果消息包含 "http"，并且用户不是管理员
-IF message.text contains "http" AND user.is_admin == false
-THEN
-    delete_message()
-    reply("请不要在本群发送链接！")
-    # 使用表达式增加用户警告次数
-    set_var('user.warnings', vars.user.warnings + 1)
-END
-```
-
-**通用回复禁言命令 (新功能)**
-```
-RuleName: 通用回复禁言
-priority: 200
-
-# 触发器：当收到命令时
-WHEN command
-
-# 条件:
-# 1. 必须是一条回复消息
-# 2. 命令必须以 /mute 开头
-# 3. 必须有一个参数 (e.g., /mute 5m) -> arg_count == 2 (命令本身+1个参数)
-# 4. 操作者必须是管理员
-IF message.reply_to_message != null AND message.text startswith "/mute" AND command.arg_count == 2 AND user.is_admin == true
-
-# 动作:
-THEN
-    # 调用 mute_user 动作
-    # 第一个参数是时长: 从命令的第一个参数动态获取 (command.arg[0])
-    # 第二个参数是用户ID: 从被回复的消息中获取
-    mute_user(command.arg[0], message.reply_to_message.from_user.id)
-
-    # (可选) 发送一条操作成功的确认消息
-    reply("操作成功！")
-END
-```
-
-**入群验证**
-```
-RuleName: 新用户入群验证
-priority: 1000 # 最高优先级
-
-# 触发器：当有新用户加入时
-WHEN user_join
-
-# 动作:
-THEN
-    # 对新用户启动验证流程
-    start_verification()
-END
-```
+| 动作 | 描述 |
+| :--- | :--- |
+| `reply(text)` | 回复触发消息。 |
+| `send_message(text)` | 在当前群组发送一条新消息。 |
+| `delete_message()` | 删除触发当前规则的消息。 |
+| `ban_user(user_id, reason)` | 永久封禁用户。`user_id` 和 `reason` 都是可选的。 |
+| `kick_user(user_id)` | 将用户踢出群组（可重新加入）。 |
+| `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。 |
+| `set_var(name, value)` | 设置一个持久化变量 (例如 `"group.my_var"`)。 |
+| `stop()` | 立即停止执行，且不再处理后续规则。 |
+| `start_verification()` | 对新用户启动人机验证流程。 |
 
 ---
 

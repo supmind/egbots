@@ -70,32 +70,28 @@ DEFAULT_RULES = [
         "priority": 10,
         "script": """
 WHEN command
-WHERE user.is_admin == true AND message.text startswith "/setreminder" AND command.arg_count >= 3
+WHERE user.is_admin == true AND message.text startswith "/setreminder" AND command.arg_count >= 2
 THEN {
     reminders = vars.group.reminders or [];
-    # Note: This is a simplified arg parser. A robust solution might need a split function.
-    keyword = command.arg[0];
-    reply_text = command.full_args.split(' ', 1)[1]; # This split won't work in the script.
-    # A simplified approach for now:
-    # Let's assume the user provides keyword and reply as separate quoted args if they contain spaces.
-    # The command.arg variables would need to be updated to handle this via shlex.
-    # For now, we assume keyword is one word, reply is the rest.
-    # This is a limitation of the current command variable implementation.
-    # Let's stick to a simpler version that works with the current executor.
 
-    # A better approach without a split function:
-    # Let's assume the user does /setreminder keyword the reply text
-    # command.arg[0] is keyword
-    # command.arg[1] is "the"
-    # command.full_args is "keyword the reply text" -> we need to remove the keyword part.
-    # This is getting complex. Let's simplify the rule for now.
-    # Let's assume a simple structure: /setreminder keyword reply.
-    # This is what command.arg[0] and command.arg[1] would capture.
-    # This is a known limitation of the current implementation.
-    new_reminder = {"keyword": command.arg[0], "reply": command.arg[1]};
-    new_list = reminders + [new_reminder];
-    set_var("group.reminders", new_list);
-    reply("关键词回复已设置。");
+    # Use split to handle multi-word replies
+    args = split(command.full_args, " ", 1);
+    keyword = args[0];
+    reply_text = args[1];
+
+    new_reminder = {"keyword": keyword, "reply": reply_text};
+
+    # Remove old reminder if it exists, then add the new one
+    new_reminders = [];
+    foreach (item in reminders) {
+        if (item.keyword != keyword) {
+            new_reminders = new_reminders + [item];
+        }
+    }
+    new_reminders = new_reminders + [new_reminder];
+
+    set_var("group.reminders", new_reminders);
+    reply("关键词回复已设置: " + keyword + " -> " + reply_text);
 }
 """
     },
