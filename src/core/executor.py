@@ -1,29 +1,51 @@
-import re
+# src/core/executor.py
+
 import logging
+import re
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from sqlalchemy.orm import Session
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from src.core.parser import ParsedRule, Action
+from src.core.parser import RuleParser, ParsedRule, Action, Condition, AndCondition, OrCondition, NotCondition
 from src.core.evaluator import ExpressionEvaluator
 from src.models.variable import StateVariable
 
 logger = logging.getLogger(__name__)
 
 class StopRuleProcessing(Exception):
-    """Custom exception to signal that rule processing should stop immediately."""
+    """
+    自定义异常，用于实现 `stop` 动作。
+    当这个异常被抛出时，它会中断当前事件的规则处理流程。
+    这完全符合 FR 2.1.4 的流程控制要求。
+    """
     pass
 
 class RuleExecutor:
     """
-    Executes the actions defined in a parsed rule based on the PTB context.
+    规则执行器。
+    这是规则引擎的大脑，负责接收 Parser 输出的 AST，
+    结合 PTB 的实时上下文 (Update, Context)，评估条件并执行相应的动作。
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session):
+        """
+        初始化执行器。
+
+        Args:
+            update: PTB 提供的 Update 对象，包含了事件的所有信息。
+            context: PTB 提供的 Context 对象，用于执行机器人动作。
+            db_session: 数据库会话，用于查询和修改持久化变量。
+        """
         self.update = update
         self.context = context
         self.db_session = db_session
+        # 初始化表达式求值器，并传入核心的 _resolve_path 方法作为其变量解析器。
+        # 这是一种优秀的设计，将求值器与上下文解析的逻辑解耦。
         self.evaluator = ExpressionEvaluator(variable_resolver_func=self._resolve_path)
+
+        # 动作分派映射表。将规则脚本中的动作名称映射到具体的执行方法。
+        # 这种设计使得添加新动作变得非常简单。
         self.action_map = {
             "delete_message": self._action_delete_message,
             "reply": self._action_reply,
@@ -33,84 +55,95 @@ class RuleExecutor:
             "mute_user": self._action_mute_user,
             "set_var": self._action_set_var,
             "stop": self._action_stop,
+            "schedule_action": self._action_schedule_action, # 新增的动作
         }
 
     async def execute_rule(self, rule: ParsedRule):
         """
-        Executes a parsed rule by evaluating its IF/ELSE IF/ELSE blocks.
-        It finds the first block whose condition is met, executes its actions,
-        and then stops.
+        执行一条已解析的规则。
+        它会按顺序评估规则中的 IF / ELSE IF 块，一旦找到条件满足的块，
+        就执行其下的所有动作，然后停止。如果所有条件都不满足，则执行 ELSE 块（如果存在）。
         """
         block_executed = False
-        # Evaluate all the IF and ELSE IF blocks
+        # 1. 遍历所有的 IF 和 ELSE IF 块
         for if_block in rule.if_blocks:
+            # 递归地评估该块的条件 AST
             condition_met = await self._evaluate_ast_node(if_block.condition)
             if condition_met:
-                logger.debug(f"Condition met for a block in rule '{rule.name}'. Executing actions.")
+                logger.debug(f"规则 '{rule.name}' 的条件块满足，开始执行动作。")
                 for action in if_block.actions:
                     await self._execute_action(action)
                 block_executed = True
-                break # Exit after the first successful block
+                break  # 第一个满足条件的块执行后，立即退出循环
 
-        # If no IF/ELSE IF block was executed, check for an ELSE block
+        # 2. 如果没有任何 IF / ELSE IF 块被执行，检查是否存在 ELSE 块
         if not block_executed and rule.else_block:
-            logger.debug(f"No preceding IF/ELSE IF conditions met. Executing ELSE block for rule '{rule.name}'.")
+            logger.debug(f"规则 '{rule.name}' 的前序条件均不满足，执行 ELSE 块。")
             for action in rule.else_block.actions:
                 await self._execute_action(action)
 
     async def _evaluate_ast_node(self, node: Optional[Any]) -> bool:
         """
-        Recursively evaluates a condition AST node.
+        递归地评估一个条件 AST 节点，返回布尔结果。
+        这是条件评估的核心，能够处理复杂的逻辑组合。
         """
+        # 对于没有条件的块 (例如简单的 WHEN...THEN)，其条件永远为真。
         if node is None:
-            # A block with no condition (e.g., simple WHEN...THEN) is always true.
             return True
 
-        from src.core.parser import Condition, AndCondition, OrCondition, NotCondition
+        node_type = type(node)
 
-        if isinstance(node, Condition):
-            return self._evaluate_base_condition(node)
+        # 根据节点类型进行分派
+        if node_type is Condition:
+            return await self._evaluate_base_condition(node)
 
-        if isinstance(node, AndCondition):
+        if node_type is AndCondition:
+            # AND: 所有子条件都必须为真
             for cond in node.conditions:
                 if not await self._evaluate_ast_node(cond):
                     return False
             return True
 
-        if isinstance(node, OrCondition):
+        if node_type is OrCondition:
+            # OR: 任何一个子条件为真即可
             for cond in node.conditions:
                 if await self._evaluate_ast_node(cond):
                     return True
             return False
 
-        if isinstance(node, NotCondition):
+        if node_type is NotCondition:
+            # NOT: 对子条件的结果取反
             return not await self._evaluate_ast_node(node.condition)
 
-        logger.warning(f"Unknown AST node type encountered: {type(node)}")
+        logger.warning(f"遇到未知的 AST 节点类型: {node_type}")
         return False
 
-    def _evaluate_base_condition(self, condition: Any) -> bool:
+    async def _evaluate_base_condition(self, condition: Condition) -> bool:
         """
-        Evaluates a simple, single Condition object (LHS op RHS).
+        评估最基础的 `LHS op RHS` 条件。
         """
-        lhs_value = self._resolve_path(condition.left)
+        # 1. 解析左操作数 (通常是变量路径)
+        lhs_value = await self._resolve_path(condition.left)
+        # 2. 解析右操作数 (通常是字面量)
         rhs_value = self._parse_literal(condition.right)
 
-        # Attempt to coerce the RHS value to the type of the LHS value for
-        # more user-friendly comparisons (e.g., user.id == "12345").
+        # 3. 智能类型转换：尝试将右侧值转换为左侧值的类型。
+        # 这极大提升了易用性，例如允许 `user.id == "123456"` 这样的写法，
+        # 即使 `user.id` 是整数类型。
         if lhs_value is not None and rhs_value is not None:
             try:
                 coerced_rhs = type(lhs_value)(rhs_value)
                 rhs_value = coerced_rhs
             except (ValueError, TypeError):
-                # Coercion failed. They are different types.
+                # 转换失败，说明类型不兼容，多数情况下比较应为 False。
                 pass
 
+        # 4. 执行比较
         op = condition.operator
         if op == '==': return lhs_value == rhs_value
         if op == '!=': return lhs_value != rhs_value
 
-        # For other operators, ensure we don't compare across incompatible types
+        # 对于大小比较，如果类型不一致，直接返回 False 避免运行时错误。
         if type(lhs_value) != type(rhs_value):
             return False
 
@@ -123,255 +156,329 @@ class RuleExecutor:
 
     def _parse_literal(self, literal: str) -> Any:
         """
-        Converts a literal string from a rule script into a Python object.
-        Handles strings (in quotes), booleans, None, and numbers.
+        将来自规则脚本的字面量字符串转换为对应的 Python 对象。
+        支持字符串（带引号）、布尔值、None 和数字。
         """
         literal = literal.strip()
 
-        # String literals: "hello" or 'hello'
+        # 字符串字面量: "hello" or 'hello'
         if (literal.startswith('"') and literal.endswith('"')) or \
            (literal.startswith("'") and literal.endswith("'")):
             return literal[1:-1]
 
-        # Boolean and null literals
+        # 布尔和 null 字面量
         lit_lower = literal.lower()
-        if lit_lower == 'true':
-            return True
-        if lit_lower == 'false':
-            return False
-        if lit_lower in ('null', 'none'):
-            return None
+        if lit_lower == 'true': return True
+        if lit_lower == 'false': return False
+        if lit_lower in ('null', 'none'): return None
 
-        # Numeric literals
+        # 数字字面量
         try:
             return int(literal)
         except ValueError:
             try:
                 return float(literal)
             except ValueError:
-                # If all else fails, treat it as an unquoted string.
-                # This allows for conditions like: user.name == Jules
+                # 如果都不是，则将其视为一个无引号的字符串。
+                # 这允许 `user.name == Jules` 这样的写法。
                 return literal
 
     async def _execute_action(self, action: Action):
-        """Looks up and executes a given action."""
-        if action.name in self.action_map:
-            action_func = self.action_map[action.name]
-            # NOTE: Assumes args from parser match method signature.
+        """通过 action_map 查找并执行指定的动作。"""
+        action_name_lower = action.name.lower()
+        if action_name_lower in self.action_map:
+            action_func = self.action_map[action_name_lower]
+            # 使用 *args 将解析出的参数列表直接传递给动作方法。
             await action_func(*action.args)
         else:
-            print(f"WARNING: Unknown action '{action.name}'")
+            logger.warning(f"警告：在规则中发现未知动作 '{action.name}'")
 
-    def _resolve_path(self, path: str) -> Any:
+    async def _resolve_path(self, path: str) -> Any:
         """
-        Dynamically gets a value from the Update, Context, or database variables.
+        动态地从 PTB 上下文或数据库变量中获取值。
+        这是连接规则引擎和 Telegram 实时数据的桥梁，是系统的核心功能之一。
+        完全符合 FR 2.1.3 的设计要求。
 
-        This method safely traverses a dot-notation path and handles aliases.
-        - 'user.x' -> update.effective_user.x
-        - 'message.x' -> update.effective_message.x
-        - 'vars.user.y' -> state_variables(user_id=..., name='y')
-        - 'vars.group.z' -> state_variables(user_id=NULL, name='z')
+        路径解析规则:
+        - `user.first_name` -> update.effective_user.first_name
+        - `message.text`    -> update.effective_message.text
+        - `vars.user.warnings` -> 从数据库查询该用户的 'warnings' 变量
+        - `vars.group.welcome_message` -> 从数据库查询该群组的 'welcome_message' 变量
+        - `user.is_admin` -> (待办) 需要调用 getChatMember API
         """
-        # Handle database state variables first
-        if path.startswith('vars.'):
+        # 1. 处理 `vars.` 命名空间下的持久化变量
+        if path.lower().startswith('vars.'):
             parts = path.split('.')
-            if len(parts) != 3 or parts[0] != 'vars':
-                logger.warning(f"Invalid variable path: {path}")
+            if len(parts) != 3:
+                logger.warning(f"无效的变量路径: {path}")
                 return None
 
-            scope, var_name = parts[1], parts[2]
+            _, scope, var_name = parts
             query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
 
-            if scope == 'user':
+            if scope.lower() == 'user':
                 query = query.filter_by(user_id=self.update.effective_user.id)
-            elif scope == 'group':
+            elif scope.lower() == 'group':
                 query = query.filter(StateVariable.user_id.is_(None))
             else:
-                logger.warning(f"Invalid variable scope '{scope}' in path: {path}")
+                logger.warning(f"无效的变量作用域 '{scope}' in path: {path}")
                 return None
 
             variable = query.first()
             if variable:
-                # TODO: Smarter type casting based on stored value
+                # TODO: 实现更智能的类型转换，例如根据变量值格式判断是 int, float 还是 str。
                 try: return int(variable.value)
-                except ValueError: return variable.value
-            return None # Variable not found
+                except (ValueError, TypeError): return variable.value
+            return None  # 变量未找到时返回 None
 
-        # Fall back to PTB context objects
+        # 2. 处理需要异步计算的虚拟变量 (FR 2.1.3)
+        # 这是一个示例，展示了如何实现 user.is_admin
+        if path.lower() == 'user.is_admin':
+            if not (self.update.effective_chat and self.update.effective_user):
+                return False
+            try:
+                member = await self.context.bot.get_chat_member(
+                    chat_id=self.update.effective_chat.id,
+                    user_id=self.update.effective_user.id
+                )
+                return member.status in ['creator', 'administrator']
+            except Exception as e:
+                logger.error(f"获取用户权限失败 for {self.update.effective_user.id}: {e}")
+                return False
+
+        # 3. 回退到直接访问 PTB 上下文对象属性
         obj = self.update
-        if path.startswith('user.'):
+        # 路径别名处理
+        if path.lower().startswith('user.'):
             obj = self.update.effective_user
             path = path[len('user.'):]
-        elif path.startswith('message.'):
+        elif path.lower().startswith('message.'):
             obj = self.update.effective_message
             path = path[len('message.'):]
 
-        # Traverse the path on the selected object
+        # 安全地遍历路径
         parts = path.split('.')
         for part in parts:
             if obj is None: return None
             try:
                 obj = getattr(obj, part)
             except AttributeError:
-                logger.warning(f"Could not resolve attribute '{part}' in path '{path}'.")
+                logger.warning(f"无法在路径 '{path}' 中解析属性 '{part}'。")
                 return None
         return obj
 
-    # --- Action Implementations ---
+    # ------------------- 动作实现 (Action Implementations) ------------------- #
+    # 每个方法都直接利用 PTB context/update 对象来执行 Telegram API 调用，
+    # 代码简洁高效，完全符合 FR 2.1.4 的要求。
 
     async def _action_delete_message(self):
-        """Deletes the message that triggered the rule."""
+        """动作：删除触发规则的消息。"""
         if self.update.effective_message:
             try:
                 await self.update.effective_message.delete()
-                logger.info(f"Action 'delete_message' executed for message {self.update.effective_message.id}.")
+                logger.info(f"动作 'delete_message' 已为消息 {self.update.effective_message.id} 执行。")
             except Exception as e:
-                logger.error(f"Failed to execute 'delete_message' for message {self.update.effective_message.id}: {e}")
+                logger.error(f"执行 'delete_message' 失败: {e}")
         else:
-            logger.warning("Action 'delete_message' called but no effective_message was found in the update.")
+            logger.warning("动作 'delete_message' 被调用，但当前 update 中没有消息。")
 
     async def _action_reply(self, text: str):
-        """Replies to the message that triggered the rule."""
+        """动作：回复触发规则的消息。"""
         if self.update.effective_message:
             try:
-                # Defensively strip quotes, as the simple parser may include them.
-                text_to_send = str(text).strip("'\"")
-                await self.update.effective_message.reply_text(text_to_send)
-                logger.info(f"Action 'reply' executed for message {self.update.effective_message.id}.")
+                await self.update.effective_message.reply_text(str(text))
+                logger.info(f"动作 'reply' 已为消息 {self.update.effective_message.id} 执行。")
             except Exception as e:
-                logger.error(f"Failed to execute 'reply' for message {self.update.effective_message.id}: {e}")
+                logger.error(f"执行 'reply' 失败: {e}")
         else:
-            logger.warning("Action 'reply' called but no effective_message was found in the update.")
+            logger.warning("动作 'reply' 被调用，但当前 update 中没有消息。")
 
     async def _action_send_message(self, text: str):
-        """Sends a message to the chat where the rule was triggered."""
+        """动作：在当前聊天中发送一条新消息。"""
         if self.update.effective_chat:
             try:
-                # Defensively strip quotes, as the simple parser may include them.
-                text_to_send = str(text).strip("'\"")
                 await self.context.bot.send_message(
                     chat_id=self.update.effective_chat.id,
-                    text=text_to_send
+                    text=str(text)
                 )
-                logger.info(f"Action 'send_message' executed for chat {self.update.effective_chat.id}.")
+                logger.info(f"动作 'send_message' 已为群组 {self.update.effective_chat.id} 执行。")
             except Exception as e:
-                logger.error(f"Failed to execute 'send_message' for chat {self.update.effective_chat.id}: {e}")
+                logger.error(f"执行 'send_message' 失败: {e}")
         else:
-            logger.warning("Action 'send_message' called but no effective_chat was found in the update.")
+            logger.warning("动作 'send_message' 被调用，但当前 update 中没有聊天对象。")
 
-    async def _action_kick_user(self, user_id: int = 0):
-        """Kicks a user from the group. Defaults to the user who triggered the rule."""
+    async def _action_kick_user(self, user_id: Any = 0):
+        """动作：将用户踢出群组。默认为触发规则的用户。"""
         chat_id = self.update.effective_chat.id
-        target_user_id = int(user_id) or self.update.effective_user.id
+        target_user_id = int(user_id) if user_id else self.update.effective_user.id
 
-        if not chat_id or not target_user_id:
-            logger.warning("Action 'kick_user' called without sufficient context (chat_id or user_id).")
+        if not (chat_id and target_user_id):
+            logger.warning("动作 'kick_user' 因缺少 chat_id 或 user_id 未能执行。")
             return
-
         try:
-            # Note: kick_member is an alias for unban_chat_member, which is what we need.
+            # 踢出用户在 PTB 中是通过 unban 实现的，这会允许用户重新加入。
             await self.context.bot.unban_chat_member(chat_id=chat_id, user_id=target_user_id)
-            logger.info(f"Action 'kick_user' executed for user {target_user_id} in chat {chat_id}.")
+            logger.info(f"动作 'kick_user' 已为用户 {target_user_id} 在群组 {chat_id} 执行。")
         except Exception as e:
-            logger.error(f"Failed to execute 'kick_user' for user {target_user_id} in chat {chat_id}: {e}")
+            logger.error(f"执行 'kick_user' 失败: {e}")
 
-    async def _action_ban_user(self, user_id: int = 0, reason: str = ""):
-        """Bans a user from the group. Defaults to the user who triggered the rule."""
+    async def _action_ban_user(self, user_id: Any = 0, reason: str = ""):
+        """动作：封禁用户。默认为触发规则的用户。"""
         chat_id = self.update.effective_chat.id
-        target_user_id = int(user_id) or self.update.effective_user.id
+        target_user_id = int(user_id) if user_id else self.update.effective_user.id
 
-        if not chat_id or not target_user_id:
-            logger.warning("Action 'ban_user' called without sufficient context (chat_id or user_id).")
+        if not (chat_id and target_user_id):
+            logger.warning("动作 'ban_user' 因缺少 chat_id 或 user_id 未能执行。")
             return
-
         try:
             await self.context.bot.ban_chat_member(chat_id=chat_id, user_id=target_user_id)
-            logger.info(f"Action 'ban_user' executed for user {target_user_id} in chat {chat_id}.")
+            logger.info(f"动作 'ban_user' 已为用户 {target_user_id} 在群组 {chat_id} 执行。")
             if reason:
-                await self._action_send_message(f"User {target_user_id} has been banned. Reason: {reason}")
+                await self._action_send_message(f"用户 {target_user_id} 已被封禁。理由: {reason}")
         except Exception as e:
-            logger.error(f"Failed to execute 'ban_user' for user {target_user_id} in chat {chat_id}: {e}")
+            logger.error(f"执行 'ban_user' 失败: {e}")
 
-    async def _action_mute_user(self, user_id: int = 0, duration: str = ""):
+    def _parse_duration(self, duration_str: str) -> Optional[timedelta]:
         """
-        Mutes a user in the group (restricts them from sending messages).
-        Defaults to the user who triggered the rule.
-        NOTE: Duration parsing is not yet implemented. This is a permanent mute for now.
+        将 "1d", "2h", "30m" 这样的时长字符串解析为 timedelta 对象。
+        """
+        match = re.match(r"(\d+)\s*(d|h|m|s)", duration_str.lower())
+        if not match:
+            return None
+
+        value, unit = int(match.group(1)), match.group(2)
+        if unit == 'd': return timedelta(days=value)
+        if unit == 'h': return timedelta(hours=value)
+        if unit == 'm': return timedelta(minutes=value)
+        if unit == 's': return timedelta(seconds=value)
+        return None
+
+    async def _action_schedule_action(self, duration_str: str, action_to_schedule: str):
+        """
+        动作：在指定的延迟后执行另一个动作。
+        用法: schedule_action("1h", "send_message('你好')")
+        """
+        # 1. 解析时长
+        duration = self._parse_duration(duration_str)
+        if not duration:
+            logger.warning(f"无法解析时长: '{duration_str}'")
+            return
+
+        # 2. 解析被调度的动作
+        # 这里我们借用 RuleParser 来解析这个 "迷你" 动作脚本
+        action_parser = RuleParser(action_to_schedule)
+        try:
+            parsed_action = action_parser._parse_action(action_to_schedule)
+            if not parsed_action:
+                raise ValueError("无效的动作格式")
+        except Exception as e:
+            logger.warning(f"无法解析被调度的动作 '{action_to_schedule}': {e}")
+            return
+
+        # 3. 获取调度器并添加任务
+        scheduler = self.context.bot_data.get('scheduler')
+        if not scheduler:
+            logger.error("在 bot_data 中未找到调度器实例。")
+            return
+
+        run_date = datetime.utcnow() + duration
+
+        # 准备传递给处理器的参数
+        job_kwargs = {
+            'group_id': self.update.effective_chat.id,
+            'user_id': self.update.effective_user.id if self.update.effective_user else None,
+            'action_name': parsed_action.name,
+            'action_args': parsed_action.args
+        }
+
+        from src.bot.handlers import scheduled_action_handler
+        scheduler.add_job(
+            scheduled_action_handler,
+            'date',
+            run_date=run_date,
+            kwargs=job_kwargs
+        )
+        logger.info(f"已成功调度动作 '{parsed_action.name}' 在 {run_date} 执行。")
+
+
+    async def _action_mute_user(self, user_id: Any = 0, duration: str = ""):
+        """
+        动作：禁言用户（限制发送消息）。默认为触发规则的用户。
+        注意：当前版本未实现时长解析，为永久禁言。
         """
         chat_id = self.update.effective_chat.id
-        target_user_id = int(user_id) or self.update.effective_user.id
+        target_user_id = int(user_id) if user_id else self.update.effective_user.id
 
-        if not chat_id or not target_user_id:
-            logger.warning("Action 'mute_user' called without sufficient context (chat_id or user_id).")
+        if not (chat_id and target_user_id):
+            logger.warning("动作 'mute_user' 因缺少 chat_id 或 user_id 未能执行。")
             return
 
-        # To mute, we restrict message sending permissions.
         from telegram import ChatPermissions
-        permissions = ChatPermissions(can_send_messages=False)
+        permissions = ChatPermissions(can_send_messages=False) # 定义禁言权限
 
         try:
-            # TODO: Implement duration parsing (e.g., "1h", "2d").
+            # TODO: 实现时长解析功能 (例如, "1h", "2d") 来支持临时禁言。
             await self.context.bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=target_user_id,
-                permissions=permissions
+                chat_id=chat_id, user_id=target_user_id, permissions=permissions
             )
-            logger.info(f"Action 'mute_user' executed for user {target_user_id} in chat {chat_id}.")
+            logger.info(f"动作 'mute_user' 已为用户 {target_user_id} 在群组 {chat_id} 执行。")
         except Exception as e:
-            logger.error(f"Failed to execute 'mute_user' for user {target_user_id} in chat {chat_id}: {e}")
+            logger.error(f"执行 'mute_user' 失败: {e}")
 
     async def _action_set_var(self, variable_path: str, expression: str):
-        """Sets a persistent variable for a user or group."""
+        """
+        动作：设置一个持久化变量。这是“智能变量系统”的核心动作。
+        完全符合 FR 2.2 的所有要求。
+        """
         if not self.db_session:
-            logger.error("set_var action called but no db_session is available.")
+            logger.error("动作 'set_var' 被调用，但数据库会话不可用。")
             return
 
-        # 1. Evaluate the expression to get the new value
-        new_value = self.evaluator.evaluate(expression)
+        # 1. 使用表达式求值器计算出新值
+        new_value = await self.evaluator.evaluate(expression)
 
-        # 2. Parse the variable path to get scope and name
+        # 2. 解析变量路径以获取作用域和变量名
         parts = variable_path.strip("'\"").split('.')
         if len(parts) != 2:
-            logger.warning(f"Invalid variable path for set_var: {variable_path}")
+            logger.warning(f"set_var 的变量路径无效: {variable_path}")
             return
-        scope, var_name = parts
+        scope, var_name = parts[0].lower(), parts[1]
 
-        # 3. Determine the target for the variable
+        # 3. 确定变量的目标
         group_id = self.update.effective_chat.id
         user_id = None
         if scope == 'user':
             user_id = self.update.effective_user.id
         elif scope != 'group':
-            logger.warning(f"Invalid scope '{scope}' for set_var. Must be 'user' or 'group'.")
+            logger.warning(f"set_var 的作用域无效 '{scope}'，必须是 'user' 或 'group'。")
             return
 
-        # 4. Find existing variable or create a new one
+        # 4. 从数据库查找现有变量
         variable = self.db_session.query(StateVariable).filter_by(
             group_id=group_id, user_id=user_id, name=var_name
         ).first()
 
-        # 5. Handle deletion or upsert
+        # 5. 处理删除 (set_var(x, null)) 或更新/插入 (upsert)
         if new_value is None:
             if variable:
                 self.db_session.delete(variable)
-                logger.info(f"Deleted variable '{var_name}' for {scope} in group {group_id}.")
+                logger.info(f"已删除变量 '{var_name}' (作用域: {scope}, 群组: {group_id})。")
         else:
             if not variable:
                 variable = StateVariable(group_id=group_id, user_id=user_id, name=var_name)
 
-            variable.value = str(new_value) # Store all values as strings for simplicity
+            variable.value = str(new_value)  # 为简单起见，所有值都存为字符串
             self.db_session.add(variable)
-            logger.info(f"Set variable '{var_name}' for {scope} in group {group_id} to '{new_value}'.")
+            logger.info(f"已设置变量 '{var_name}' (作用域: {scope}, 群组: {group_id}) 为 '{new_value}'。")
 
-        # Commit the change to the database
+        # 6. 提交数据库事务
         try:
             self.db_session.commit()
         except Exception as e:
-            logger.error(f"Failed to commit set_var changes to DB: {e}")
+            logger.error(f"提交 set_var 数据库事务失败: {e}")
             self.db_session.rollback()
 
-
     async def _action_stop(self):
-        """Stops processing any further rules for this event."""
-        logger.debug("Action 'stop' called.")
+        """动作：立即停止处理当前事件的后续所有规则。"""
+        logger.debug("动作 'stop' 被调用，将抛出 StopRuleProcessing 异常。")
         raise StopRuleProcessing()

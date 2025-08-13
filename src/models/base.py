@@ -1,5 +1,9 @@
-# Database Models Base
-# This file will contain the SQLAlchemy declarative base.
+# src/models/base.py
+
+# 数据库模型基类
+# 这个文件定义了所有数据库模型都必须继承的 SQLAlchemy 声明式基类。
+# 通过这种方式，SQLAlchemy 的元数据功能可以统一管理所有的表和映射。
 from sqlalchemy.orm import declarative_base
 
+# 创建一个所有模型共享的基类实例
 Base = declarative_base()
