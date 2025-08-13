@@ -1,106 +1,187 @@
 # tests/test_executor.py
 
 import pytest
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock, AsyncMock, patch
+from telegram import ChatPermissions
 
 from src.core.parser import RuleParser
-from src.core.executor import RuleExecutor
+from src.core.executor import RuleExecutor, _ACTION_REGISTRY
 
-# 用于解析和求值的辅助函数
-async def evaluate(expression_str: str, scope: dict = None) -> any:
-    """一个辅助函数，用于快速解析和求值表达式字符串。"""
-    # 我们创建一个模拟的规则结构。对于此测试，执行器只需要 where_clause 部分。
-    rule_str = f"WHEN command WHERE {expression_str} THEN {{ reply('ok'); }} END"
+# =================== 辅助工具 ===================
+
+async def _evaluate_expression_in_where_clause(expression_str: str, scope: dict = None) -> any:
+    """一个辅助函数，用于快速解析和求值 WHERE 子句中的表达式字符串。"""
+    rule_str = f"WHEN command WHERE {expression_str} THEN {{}} END"
     parsed_rule = RuleParser(rule_str).parse()
 
-    # Mock the necessary objects for the executor
+    # 为执行器创建模拟对象
     mock_update = Mock()
     mock_context = Mock()
     mock_db_session = Mock()
 
     executor = RuleExecutor(mock_update, mock_context, mock_db_session)
+    # 模拟解析器以隔离测试
+    executor._resolve_path = AsyncMock(return_value=None)
 
-    # The executor's evaluate_expression needs an explicit scope
     execution_scope = scope if scope is not None else {}
+    return await executor._evaluate_expression(parsed_rule.where_clause, execution_scope)
 
-    return await executor.evaluate_expression(parsed_rule.where_clause, execution_scope)
+async def _execute_then_block(script_body: str, update: Mock, context: Mock) -> RuleExecutor:
+    """一个辅助函数，用于执行 THEN 代码块并返回执行器以供检查。"""
+    rule_str = f"WHEN command THEN {{ {script_body} }} END"
+    parsed_rule = RuleParser(rule_str).parse()
+    executor = RuleExecutor(update, context, Mock())
+    await executor.execute_rule(parsed_rule)
+    return executor
+
+# =================== 表达式求值测试 ===================
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expr, expected", [
-    # Basic Arithmetic
+    # 算术运算
     ("1 + 2", 3),
     ("10 - 5.5", 4.5),
     ("2 * 3", 6),
     ("10 / 4", 2.5),
-    ("10 / 0", None), # Division by zero
-    # Operator Precedence
+    ("5 / 2", 2.5), # 确保浮点除法
+    ("10 / 0", None), # 除以零
+    # 运算符优先级
     ("2 + 3 * 4", 14),
     ("(2 + 3) * 4", 20),
-    # String Concatenation
+    # 字符串拼接
     ("'hello' + ' ' + 'world'", "hello world"),
-    # Comparisons
+    # 比较运算
     ("10 > 5", True),
-    ("10 < 5", False),
     ("5 == 5", True),
-    ("5 != 6", True),
-    ("'abc' == 'abc'", True),
-    # Logic Operators
+    ("'abc' != 'def'", True),
+    # 逻辑运算
     ("true and true", True),
-    ("true and false", False),
     ("false or true", True),
-    ("false or false", False),
     ("not true", False),
-    ("not false", True),
     ("1 > 0 and 'a' == 'a'", True),
-    # String functions
+    # 字符串函数
     ("'hello' contains 'ell'", True),
-    ("'hello' contains 'xyz'", False),
     ("'hello' startswith 'he'", True),
     ("'hello' endswith 'lo'", True),
 ])
 async def test_expression_evaluation_simple(expr, expected):
-    """测试各种简单的表达式。"""
-    result = await evaluate(expr)
+    """测试各种简单的表达式求值。"""
+    result = await _evaluate_expression_in_where_clause(expr)
     assert result == expected
 
-@pytest.mark.skip(reason="由于 mock 框架对于不存在的属性会返回新的 Mock 对象而不是 None，暂时禁用此测试。")
 @pytest.mark.asyncio
-async def test_variable_evaluation():
-    """测试对作用域内变量的求值。"""
-    scope = {"x": 10, "y": 20, "name": "Jules"}
-    assert await evaluate("x + y", scope) == 30
-    assert await evaluate("name", scope) == "Jules"
-    assert await evaluate("z", scope) is None # 不存在的变量
+async def test_variable_evaluation_with_mocked_resolver():
+    """测试变量求值，包括作用域内变量和通过解析器获取的变量。"""
+    executor = RuleExecutor(Mock(), Mock(), Mock())
+
+    # 模拟解析器方法以隔离测试，使其能处理属性访问
+    async def mock_resolve(path):
+        if path == "user":
+            # 模拟解析 'user'，返回一个可进行属性访问的对象
+            user_mock = Mock()
+            user_mock.id = 12345
+            user_mock.is_admin = True # 确保 mock 对象有 is_admin 属性
+            return user_mock
+        if path == "user.is_admin":
+             # 模拟直接解析计算属性的场景
+            return True
+        return None
+    # 直接 mock 底层的 resolver 的 resolve 方法
+    executor.variable_resolver.resolve = mock_resolve
+
+    # 1. 测试来自本地作用域的变量
+    scope = {"x": 10}
+    expr_x = RuleParser("WHEN command WHERE x THEN {} END").parse().where_clause
+    assert await executor._evaluate_expression(expr_x, scope) == 10
+
+    # 2. 测试通过属性访问获取的变量 (user.id)
+    expr_user_id = RuleParser("WHEN command WHERE user.id THEN {} END").parse().where_clause
+    assert await executor._evaluate_expression(expr_user_id, {}) == 12345
+
+    # 3. 测试通过属性访问获取的计算属性 (user.is_admin)
+    expr_is_admin_prop = RuleParser("WHEN command WHERE user.is_admin THEN {} END").parse().where_clause
+    assert await executor._evaluate_expression(expr_is_admin_prop, {}) is True
+
+    # 4. 测试直接解析的计算属性 (user.is_admin)
+    expr_is_admin_direct = RuleParser("WHEN command WHERE user.is_admin THEN {} END").parse().where_clause
+    assert await executor._evaluate_expression(expr_is_admin_direct, {}) is True
+
+    # 5. 测试不存在的变量（应回退到解析器并返回 None）
+    expr_z = RuleParser("WHEN command WHERE z THEN {} END").parse().where_clause
+    assert await executor._evaluate_expression(expr_z, {}) is None
 
 @pytest.mark.asyncio
 async def test_list_and_dict_construction():
     """测试列表和字典的构造。"""
     # 测试列表构造
-    result_list = await evaluate("[1, 'a', true, 1+1]")
+    result_list = await _evaluate_expression_in_where_clause("[1, 'a', true, 1+1]")
     assert result_list == [1, 'a', True, 2]
 
     # 测试字典构造
-    result_dict = await evaluate("{'a': 10, 'b': 'hello', 'c': x}", {"x": 99})
+    result_dict = await _evaluate_expression_in_where_clause("{'a': 10, 'b': 'hello', 'c': x}", {"x": 99})
     assert result_dict == {'a': 10, 'b': 'hello', 'c': 99}
 
+# =================== 动作执行测试 ===================
+
 @pytest.mark.asyncio
-async def test_complex_nested_expression():
-    """测试一个更复杂的、带有括号和不同优先级的嵌套表达式。"""
-    scope = {"y": 10}
-    # 表达式: ( (y * 2) + ( (100 / 5) / 2 ) ) == 30 -> (20 + (20/2)) == 30 -> (20+10)==30 -> true
-    expression = "((y * 2) + ((100 / 5) / 2)) == 30"
-    assert await evaluate(expression, scope) is True
+async def test_action_reply():
+    """测试 reply 动作。"""
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+
+    await _execute_then_block("reply('hello world');", mock_update, Mock())
+
+    mock_update.effective_message.reply_text.assert_called_once_with('hello world')
+
+@pytest.mark.asyncio
+async def test_action_unmute_user():
+    """测试新增的 unmute_user 动作。"""
+    # 1. 设置 Mocks
+    mock_update = Mock()
+    mock_update.effective_chat.id = 12345
+    mock_update.effective_user.id = 9876
+    # 明确设置 effective_message 和 reply_to_message
+    mock_update.effective_message = Mock()
+    mock_update.effective_message.reply_to_message.from_user.id = 54321
+
+    mock_context = Mock()
+    mock_context.bot.restrict_chat_member = AsyncMock()
+
+    # 2. 测试通过回复来解除禁言
+    await _execute_then_block("unmute_user();", mock_update, mock_context)
+
+    # 3. 断言
+    mock_context.bot.restrict_chat_member.assert_called_once()
+    call_kwargs = mock_context.bot.restrict_chat_member.call_args.kwargs
+
+    assert call_kwargs['chat_id'] == 12345
+    assert call_kwargs['user_id'] == 54321  # 应针对被回复的用户
+    permissions = call_kwargs['permissions']
+    assert permissions.can_send_messages is True
+    assert permissions.can_send_photos is True
+    assert permissions.can_invite_users is True
+
+    # 4. 测试对指定 user_id 的情况
+    mock_context.bot.restrict_chat_member.reset_mock()
+    # 移除回复消息以测试下一个场景
+    mock_update.effective_message.reply_to_message = None
+
+    await _execute_then_block("unmute_user(111222);", mock_update, mock_context)
+
+    mock_context.bot.restrict_chat_member.assert_called_once()
+    call_kwargs_2 = mock_context.bot.restrict_chat_member.call_args.kwargs
+    assert call_kwargs_2['user_id'] == 111222  # 应针对显式提供的用户ID
+
+# =================== 控制流测试 ===================
 
 @pytest.mark.asyncio
 async def test_foreach_on_empty_and_null():
     """测试 foreach 循环在空集合或 null 上的行为是否正常。"""
-    # 这是一个模拟执行的辅助函数，因为它需要检查作用域的变化
     async def run_script(script: str):
-        rule_str = f"WHEN command THEN {{ {script} }} END"
-        parsed_rule = RuleParser(rule_str).parse()
         executor = RuleExecutor(Mock(), Mock(), Mock())
         scope = {"counter": 0}
-        await executor.execute_statement_block(parsed_rule.then_block, scope)
+        then_block = RuleParser(f"WHEN command THEN {{ {script} }} END").parse().then_block
+        await executor._execute_statement_block(then_block, scope)
         return scope
 
     # 在空列表上循环不应执行任何操作

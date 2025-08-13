@@ -2,6 +2,7 @@
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -131,9 +132,10 @@ async def test_ban_user_action(mock_update, mock_context, test_db_session_factor
     mock_update.message.text = "/ban"
     await process_event("command", mock_update, mock_context)
 
+    # The actual call is positional, so the assertion must match.
     mock_context.bot.ban_chat_member.assert_called_once_with(
-        chat_id=-1001,
-        user_id=12345
+        -1001,
+        12345
     )
 
 async def test_mute_user_action(mock_update, mock_context, test_db_session_factory):

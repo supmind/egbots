@@ -1,4 +1,4 @@
-# Telegram 核心群组管理机器人
+# Telegram 群组核心管理机器人
 
 一个可靠、高效、可定制的 Telegram 群组管理机器人，由一个强大的规则引擎驱动。
 
@@ -18,6 +18,7 @@
 
 *   **语法风格**: 语言采用类似 C/Java/JavaScript 的语法风格。代码块由 `{}` 包裹，每条语句以 `;` 结尾。
 *   **声明式与命令式结合**: 规则的总体结构是声明式的 (`WHEN...WHERE...THEN`)，但在 `THEN` 块内部，您可以编写命令式的脚本代码。
+*   **注释**: 您可以使用 `//` 来添加单行注释，解析器会忽略它们。
 
 ### 2.2. 规则基本结构
 
@@ -30,7 +31,7 @@ THEN {
 END
 ```
 
-*   **`WHEN event`**: **必需**。定义规则的**触发器**。
+*   **`WHEN event`**: **必需**。定义规则的**触发器**。例如 `message`, `user_join`。
 *   **`WHERE expression`**: **可选**。定义规则的**守卫条件**。这是一个高效的前置检查，只有当 `expression` 的结果为真时，`THEN` 块内的脚本才会被执行。
 *   **`THEN { ... }`**: **必需**。定义规则的**执行体**。其中包含用于处理事件的脚本。
 *   **`END`**: **必需**。标志着规则定义的结束。
@@ -54,11 +55,10 @@ END
     my_list = [1, 2, 3];
     ```
 2.  **上下文变量 (只读)**: 由系统提供，包含了当前触发事件的所有信息。
-    *   `user.*`: 触发事件的用户信息。 e.g., `user.id`, `user.is_admin`。
-    *   `message.*`: 触发事件的消息信息。 e.g., `message.text`, `message.reply_to_message`。
+    *   `user.*`: 触发事件的用户信息。例如, `user.id`, `user.is_admin`。
+    *   `message.*`: 触发事件的消息信息。例如, `message.text`, `message.reply_to_message`。
     *   `command.*`: 当 `WHEN command` 时可用，提供对命令参数的访问。
         *   `command.name`: 命令的名称 (不含 `/`)。例如, 对于 `/kick user1`，值为 `"kick"`。
-        *   `command.text`: `command.name` 的别名。
         *   `command.full_args`: 包含所有参数的单个字符串。
         *   `command.arg_count`: 参数的数量。
         *   `command.arg[N]`: 访问第N个参数 (从0开始)。
@@ -78,12 +78,13 @@ END
 
 支持标准的运算优先级。
 
-| 类别 | 运算符 |
-| :--- | :--- |
-| **数学** | `+` (加法, 字符串/列表拼接), `-`, `*`, `/` |
-| **比较** | `==`, `!=`, `>`, `>=`, `<`, `<=` |
-| **逻辑** | `and`, `or`, `not` (前缀) |
-| **字符串** | `contains`, `startswith`, `endswith` |
+| 类别 | 运算符 | 描述 |
+| :--- | :--- | :--- |
+| **数学** | `+`, `-`, `*` | 加、减、乘。`+` 也可用于字符串和列表拼接。 |
+| | `/` | 除法。始终执行浮点除法（例如 `5 / 2` 的结果是 `2.5`）。 |
+| **比较** | `==`, `!=`, `>`, `>=`, `<`, `<=` | 等于、不等于、大于、大于等于、小于、小于等于。 |
+| **逻辑** | `and`, `or`, `not` | 与、或、非（前缀）。`and` 和 `or` 支持短路求值。 |
+| **字符串** | `contains`, `startswith`, `endswith` | 包含、以...开头、以...结尾。 |
 
 ### 2.7. 内置函数
 
@@ -99,28 +100,57 @@ END
 
 ### 2.8. 可用动作 (Actions)
 
-动作是脚本与机器人功能交互的唯一方式。
+动作是脚本与机器人功能交互的唯一方式。除非特别说明，所有动作的目标用户都遵循以下优先级：1. 显式提供的`user_id` -> 2. 回复的消息的发送者 -> 3. 触发规则的用户。
 
 | 动作 | 描述 |
 | :--- | :--- |
 | `reply(text)` | 回复触发当前规则的消息。 |
 | `send_message(text)` | 在当前群组发送一条新消息。 |
 | `delete_message()` | 删除触发当前规则的消息。 |
-| `ban_user(user_id, reason)` | 永久封禁用户。`user_id` 和 `reason` 是可选的。 |
-| `kick_user(user_id)` | 将用户踢出群组（可重新加入）。`user_id` 是可选的。 |
-| `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。`user_id` 是可选的。 |
+| `ban_user(user_id, reason)` | 永久封禁用户。`user_id` 和 `reason` 可选。 |
+| `kick_user(user_id)` | 将用户踢出群组（可重新加入）。`user_id` 可选。 |
+| `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。`user_id` 可选。 |
+| `unmute_user(user_id)` | 解除用户禁言（恢复发送消息权限）。`user_id` 可选。 |
 | `set_var(name, value)` | 设置一个持久化变量 (例如 `"group.my_var"`)。 |
 | `start_verification()` | 对新用户启动人机验证流程。 |
 | `stop()` | 立即停止执行当前规则，且不再处理后续规则。 |
 
 ---
 
-## 4. 安装与启动
+## 3. 安装与启动
 
-(此部分保持不变)
+1.  **克隆代码库**:
+    ```bash
+    git clone https://github.com/your-repo/telegram-bot.git
+    cd telegram-bot
+    ```
+2.  **创建 `.env` 文件**:
+    复制 `.env.example` (如果存在) 或创建一个新的 `.env` 文件，并填入以下内容:
+    ```
+    TELEGRAM_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+    DATABASE_URL="postgresql+psycopg2://user:password@host:port/dbname"
+    ```
+3.  **安装依赖**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+4.  **运行机器人**:
+    ```bash
+    python main.py
+    ```
 
 ---
 
-## 5. 测试
+## 4. 测试
 
-(此部分保持不变)
+本项目使用 `pytest` 进行测试。
+
+1.  **安装测试依赖**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+2.  **运行测试**:
+    在项目根目录运行:
+    ```bash
+    python -m pytest
+    ```

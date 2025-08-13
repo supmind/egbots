@@ -1,4 +1,4 @@
-# src/core/parser.py
+# src/core/parser.py (规则解析器)
 
 import re
 from dataclasses import dataclass, field
@@ -23,12 +23,14 @@ class RuleParserError(Exception):
         else:
             super().__init__(f"解析错误: {message}")
 
-# =================== 抽象语法树 (AST) 节点定义 v2.3 ===================
-# AST 是将纯文本脚本转换为程序可理解的结构化对象的关键。
+# =================== 抽象语法树 (AST) 节点定义 ===================
+# AST (Abstract Syntax Tree) 是将纯文本脚本转换为程序可理解的结构化对象的关键。
 
-# --- 表达式 (Expressions) ---
+# --- 表达式节点 (Expression Nodes) ---
 @dataclass
-class Expr: pass
+class Expr:
+    """所有表达式节点的基类。"""
+    pass
 
 @dataclass
 class Literal(Expr):
@@ -75,12 +77,14 @@ class ActionCallExpr(Expr):
     action_name: str
     args: List[Expr]
 
-# --- 语句 (Statements) ---
+# --- 语句节点 (Statement Nodes) ---
 @dataclass
-class Stmt: pass
+class Stmt:
+    """所有语句节点的基类。"""
+    pass
 
 @dataclass
-class Assignment(Expr): # 继承自 Expr 而不是 Stmt
+class Assignment(Expr): # 赋值也是一种表达式，因此继承自 Expr
     """赋值表达式节点，例如: x = 10"""
     variable: Expr  # 左值可以是变量、属性访问或下标访问
     expression: Expr
@@ -131,6 +135,7 @@ class ParsedRule:
     then_block: Optional[StatementBlock] = None
 
     def __repr__(self) -> str:
+        """提供一个清晰的、可调试的对象表示形式。"""
         return f"ParsedRule(name='{self.name}', priority={self.priority}, event='{self.when_event}')"
 
 
@@ -147,6 +152,7 @@ class Token:
 # 使用正则表达式定义所有合法的词法单元
 TOKEN_SPECIFICATION = [
     ('SKIP',         r'[ \t]+'),
+    ('COMMENT',      r'//[^\n]*'),
     ('NEWLINE',      r'\n'),
     ('LBRACE',       r'\{'),
     ('RBRACE',       r'\}'),
@@ -183,7 +189,7 @@ def tokenize(code: str) -> List[Token]:
             line_start = mo.end()
             line_num += 1
             continue
-        elif kind == 'SKIP':
+        elif kind == 'SKIP' or kind == 'COMMENT':
             continue
         elif kind == 'MISMATCH':
             raise RuleParserError(f"存在无效字符: {value}", line_num, column)
@@ -191,11 +197,11 @@ def tokenize(code: str) -> List[Token]:
     return tokens
 
 
-# =================== 规则解析器 v2.3 ===================
+# =================== 规则解析器 ===================
 
 class RuleParser:
     """
-    一个完整的、用于我们C风格脚本语言的解析器。
+    一个完整的、用于C风格脚本语言的解析器。
     它接收脚本字符串，将其分词，然后构建一个详细的AST。
     """
     def __init__(self, script: str):
@@ -231,11 +237,8 @@ class RuleParser:
         if not self._is_at_end() and self._peek_value('END'):
             self._consume_keyword('END')
 
-        # 确保所有 token 都已消耗
-        if not self._is_at_end():
-            token = self._current_token()
-            raise RuleParserError("规则在 END 之后存在多余的 token。", token.line, token.column)
-
+        # 在此我们不再检查 END 之后是否有多余的 token。
+        # 这使得规则脚本可以包含尾随的空行或注释，而不会导致解析失败，从而提高了灵活性。
         return rule
 
     def _parse_statement_block(self) -> StatementBlock:
@@ -250,7 +253,7 @@ class RuleParser:
     def _parse_statement(self) -> Stmt:
         """
         解析单条语句。
-        在重构后，语句可以是一条独立的表达式（例如赋值或动作调用），
+        语句可以是一条独立的表达式（例如赋值或动作调用），
         也可以是特定的语句关键字（如 if, foreach）。
         """
         if self._peek_value('if'):
@@ -407,7 +410,7 @@ class RuleParser:
             if val_lower == 'false': return Literal(value=False)
             if val_lower == 'null': return Literal(value=None)
         elif token.type == 'IDENTIFIER':
-            # 关键修复：检查标识符后是否跟有 '(', 如果是，则解析为函数/动作调用表达式
+            # 关键逻辑：检查标识符后是否跟有'('，如果是，则解析为函数/动作调用表达式
             if self._peek_type('LPAREN', offset=1):
                 return self._parse_action_call_expression()
             else:
@@ -472,7 +475,6 @@ class RuleParser:
     def _consume(self, expected_type: str) -> Token:
         """消耗一个指定类型的 token，如果类型不匹配则抛出错误。"""
         if self.pos >= len(self.tokens):
-            # 在脚本意外结束时，我们没有可用的行列号
             raise RuleParserError(f"期望得到 {expected_type}，但脚本已结束。")
         token = self.tokens[self.pos]
         if token.type != expected_type:
@@ -485,7 +487,7 @@ class RuleParser:
         if self.pos >= len(self.tokens):
             raise RuleParserError(f"期望得到关键字 '{keyword}'，但脚本已结束。")
         token = self.tokens[self.pos]
-        # 修复：允许 token 类型为 KEYWORD 或 LOGIC_OP
+        # 注意：允许 token 类型为 KEYWORD 或 LOGIC_OP，以统一处理 'not' 等逻辑关键字
         if (token.type not in ('KEYWORD', 'LOGIC_OP')) or token.value.lower() != keyword.lower():
             raise RuleParserError(f"期望得到关键字 '{keyword}'，但得到 '{token.value}' (类型: {token.type})", token.line, token.column)
         self.pos += 1

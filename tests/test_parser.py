@@ -140,5 +140,25 @@ class TestNewRuleParser(unittest.TestCase):
         with self.assertRaises(RuleParserError):
             RuleParser(script).parse()
 
+    def test_default_rules_are_parsable(self):
+        """
+        一个直接的测试，验证所有默认规则脚本是否都能被解析器成功解析。
+        这个测试对于捕捉解析器或规则脚本中的回归错误至关重要。
+        """
+        from src.bot.default_rules import DEFAULT_RULES
+        import pytest
+
+        for i, rule_data in enumerate(DEFAULT_RULES):
+            script = rule_data["script"]
+            try:
+                RuleParser(script).parse()
+            except RuleParserError as e:
+                # 使用 pytest.fail 来提供更详细的错误输出
+                pytest.fail(
+                    f"默认规则 #{i} (名称: '{rule_data['name']}') 解析失败。\n"
+                    f"错误: {e}\n"
+                    f"脚本:\n---\n{script}\n---"
+                )
+
 if __name__ == '__main__':
     unittest.main()

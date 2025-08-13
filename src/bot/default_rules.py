@@ -1,43 +1,121 @@
 # src/bot/default_rules.py
 
+# ======================================================================================
 # 预设的默认规则列表
-# 当机器人被添加到一个新的群组时，这些规则会自动被安装。
+# ======================================================================================
+# 当机器人被添加到一个新的群组时，此列表中的规则会自动被安装。
+# 这为群组管理员提供了一套即开即用的基础管理功能。
+#
+# 规则说明:
+# - `name`: 规则的描述性名称。
+# - `priority`: 规则的执行优先级，数字越大，优先级越高。
+# - `script`: 规则的核心逻辑，使用本机器人定制的脚本语言编写。
+# ======================================================================================
+
 DEFAULT_RULES = [
     {
         "name": "新用户入群验证",
         "priority": 1000,
-        "script": "WHEN user_join THEN { start_verification(); }"
-    },
-    {
-        "name": "通用回复禁言",
-        "priority": 200,
-        "script": 'WHEN command WHERE message.reply_to_message != null AND message.text startswith "/mute" AND command.arg_count >= 2 AND user.is_admin == true THEN { mute_user(command.arg[0], message.reply_to_message.from_user.id); reply("操作成功！"); }'
+        "script": """
+WHEN user_join
+THEN {
+    // 对新加入的用户启动人机验证流程
+    start_verification();
+}
+END
+"""
     },
     {
         "name": "通用回复封禁",
         "priority": 200,
-        "script": 'WHEN command WHERE message.reply_to_message != null AND message.text startswith "/ban" AND user.is_admin == true THEN { ban_user(message.reply_to_message.from_user.id, command.full_args); reply("操作成功！"); }'
+        "script": """
+WHEN command
+WHERE
+    user.is_admin == true AND
+    command.name == "ban" AND
+    message.reply_to_message != null
+THEN {
+    // 对回复的消息所对应的用户执行封禁操作
+    ban_user(message.reply_to_message.from_user.id, command.full_args);
+    reply("操作成功！用户已被封禁。");
+}
+END
+"""
     },
     {
-        "name": "通用回复踢人",
+        "name": "通用回复踢出",
         "priority": 200,
-        "script": 'WHEN command WHERE message.reply_to_message != null AND message.text startswith "/kick" AND user.is_admin == true THEN { kick_user(message.reply_to_message.from_user.id); reply("操作成功！"); }'
+        "script": """
+WHEN command
+WHERE
+    user.is_admin == true AND
+    command.name == "kick" AND
+    message.reply_to_message != null
+THEN {
+    // 对回复的消息所对应的用户执行踢出操作
+    kick_user(message.reply_to_message.from_user.id);
+    reply("操作成功！用户已被移出群组。");
+}
+END
+"""
+    },
+    {
+        "name": "通用回复禁言",
+        "priority": 200,
+        "script": """
+WHEN command
+WHERE
+    user.is_admin == true AND
+    command.name == "mute" AND
+    command.arg_count >= 1 AND
+    message.reply_to_message != null
+THEN {
+    // 对回复的消息所对应的用户执行禁言操作，时长为第一个参数
+    mute_user(command.arg[0], message.reply_to_message.from_user.id);
+    reply("操作成功！用户已被禁言 " + command.arg[0] + "。");
+}
+END
+"""
+    },
+    {
+        "name": "通用回复解除禁言",
+        "priority": 200,
+        "script": """
+WHEN command
+WHERE
+    user.is_admin == true AND
+    command.name == "unmute" AND
+    message.reply_to_message != null
+THEN {
+    // 对回复的消息所对应的用户执行解除禁言操作
+    unmute_user(message.reply_to_message.from_user.id);
+    reply("操作成功！用户已解除禁言。");
+}
+END
+"""
     },
     {
         "name": "设置关键词回复",
         "priority": 10,
         "script": """
 WHEN command
-WHERE user.is_admin == true AND message.text startswith "/setreminder" AND command.arg_count >= 2
+WHERE
+    user.is_admin == true AND
+    command.name == "set_reply" AND
+    command.arg_count >= 2
 THEN {
+    // 从持久化变量中读取已有的关键词列表
     reminders = vars.group.reminders or [];
 
+    // 解析命令参数
     args = split(command.full_args, " ", 1);
     keyword = args[0];
     reply_text = args[1];
 
+    // 创建一个新的关键词对象
     new_reminder = {"keyword": keyword, "reply": reply_text};
 
+    // 过滤掉已存在的同名关键词，实现覆盖效果
     new_reminders = [];
     foreach (item in reminders) {
         if (item.keyword != keyword) {
@@ -46,9 +124,11 @@ THEN {
     }
     new_reminders = new_reminders + [new_reminder];
 
+    // 将更新后的列表写回持久化变量
     set_var("group.reminders", new_reminders);
     reply("关键词回复已设置: " + keyword + " -> " + reply_text);
 }
+END
 """
     },
     {
@@ -56,19 +136,33 @@ THEN {
         "priority": 10,
         "script": """
 WHEN command
-WHERE user.is_admin == true AND message.text startswith "/deletereminder" AND command.arg_count >= 2
+WHERE
+    user.is_admin == true AND
+    command.name == "del_reply" AND
+    command.arg_count >= 1
 THEN {
     reminders = vars.group.reminders or [];
     keyword_to_delete = command.arg[0];
+
     new_reminders = [];
+    found = false;
     foreach (item in reminders) {
         if (item.keyword != keyword_to_delete) {
             new_reminders = new_reminders + [item];
+        } else {
+            found = true;
         }
     }
+
     set_var("group.reminders", new_reminders);
-    reply("关键词 " + keyword_to_delete + " 已删除。");
+
+    if (found) {
+        reply("关键词 " + keyword_to_delete + " 已被删除。");
+    } else {
+        reply("未找到关键词 " + keyword_to_delete + "。");
+    }
 }
+END
 """
     },
     {
@@ -76,16 +170,19 @@ THEN {
         "priority": 1,
         "script": """
 WHEN message
-WHERE vars.group.reminders != null
+WHERE vars.group.reminders != null AND len(vars.group.reminders) > 0
 THEN {
     reminders = vars.group.reminders;
     foreach (item in reminders) {
+        // 简单包含匹配
         if (message.text contains item.keyword) {
             reply(item.reply);
+            // 匹配到第一个后即停止，避免刷屏
             break;
         }
     }
 }
+END
 """
     }
 ]

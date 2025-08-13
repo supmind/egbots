@@ -1,8 +1,7 @@
-# src/core/executor.py
+# src/core/executor.py (规则执行器)
 
 import logging
 import re
-import shlex
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Dict, Callable, Coroutine, List
@@ -11,7 +10,6 @@ from sqlalchemy.orm import Session
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-# Import the new AST nodes from the refactored parser
 from src.core.parser import (
     ParsedRule, Stmt, Expr, StatementBlock, Assignment, ActionCallStmt,
     ActionCallExpr, Literal, Variable, PropertyAccess, IndexAccess, BinaryOp,
@@ -22,29 +20,30 @@ from .resolver import VariableResolver
 
 logger = logging.getLogger(__name__)
 
-# ==================== Built-in Functions & Actions ====================
+# ==================== 动作与内置函数注册表 ====================
 
+# 用于存储所有可用动作的注册表
 _ACTION_REGISTRY: Dict[str, Callable[..., Coroutine]] = {}
+# 用于存储所有内置函数的注册表
 _BUILTIN_FUNCTIONS: Dict[str, Callable[..., Any]] = {}
 
 def action(name: str):
-    """A decorator to register a method as a rule script action."""
+    """一个装饰器，用于将一个异步方法注册为规则脚本中的“动作”。"""
     def decorator(func: Callable[..., Coroutine]):
         _ACTION_REGISTRY[name.lower()] = func
         return func
     return decorator
 
 def builtin_function(name: str):
-    """A decorator to register a Python function as a built-in function in the script language."""
+    """一个装饰器，用于将一个普通函数注册为规则脚本中的“内置函数”。"""
     def decorator(func: Callable[..., Any]):
         _BUILTIN_FUNCTIONS[name.lower()] = func
         return func
     return decorator
 
-# ==================== Exceptions ====================
-
-# Note: The function implementations are placed here, before the class that uses them.
-# They are decorated to register them into the _BUILTIN_FUNCTIONS registry.
+# ==================== 内置函数实现 ====================
+# 注意：函数实现先于使用它们的类定义。
+# 它们通过装饰器被添加到 _BUILTIN_FUNCTIONS 注册表中。
 
 @builtin_function("len")
 def builtin_len(obj: Any) -> int:
@@ -87,27 +86,26 @@ def builtin_join(l: list, sep: str) -> str:
     """内置函数：使用分隔符连接列表中的所有元素，生成一个字符串。"""
     return str(sep).join(map(str, l))
 
+# ==================== 自定义控制流异常 ====================
 
 class StopRuleProcessing(Exception):
-    """Custom exception to stop processing further rules for the current event."""
+    """当执行 stop() 动作时抛出，用于立即停止处理当前事件的所有后续规则。"""
     pass
 
 class BreakException(Exception):
-    """Used to break out of a foreach loop."""
+    """用于从 foreach 循环中跳出，实现 break 语句。"""
     pass
 
 class ContinueException(Exception):
-    """Used to skip to the next iteration of a foreach loop."""
+    """用于跳至 foreach 循环的下一次迭代，实现 continue 语句。"""
     pass
 
-# ======================================================================================
-# Phase 1 Refactoring: New RuleExecutor as a Script Interpreter
-# ======================================================================================
+# ==================== 规则执行器 (AST 解释器) ====================
 
 class RuleExecutor:
     """
-    一个AST解释器，负责执行由 RuleParser 生成的语法树。
-    它负责遍历AST、对表达式求值、管理状态和执行动作。
+    一个AST（抽象语法树）解释器，负责执行由 RuleParser 生成的语法树。
+    它通过访问者模式遍历AST，对表达式求值，管理变量作用域，并执行与外部世界交互的“动作”。
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session):
         """
@@ -123,98 +121,92 @@ class RuleExecutor:
         self.db_session = db_session
         self.per_request_cache: Dict[str, Any] = {}
         self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache)
-        # The scope will hold local variables defined within the script
-        self.scope: Dict[str, Any] = {}
 
     async def execute_rule(self, rule: ParsedRule):
         """
         执行一个已完全解析的规则。
         此方法会为本次执行创建一个顶层的变量作用域。
         """
-        # A top-level scope is created for each rule execution to ensure isolation.
+        # 为每个规则的执行创建一个独立的顶层作用域，以确保变量隔离。
         top_level_scope = {}
 
-        # 1. Evaluate the WHERE clause if it exists.
+        # 1. 如果存在 WHERE 子句，则对其求值。
         if rule.where_clause:
-            where_passed = await self.evaluate_expression(rule.where_clause, top_level_scope)
-            # If the WHERE condition is not met, stop execution for this rule.
+            where_passed = await self._evaluate_expression(rule.where_clause, top_level_scope)
+            # 如果 WHERE 条件不为真，则终止此规则的执行。
             if not where_passed:
                 return
 
-        # 2. Execute the THEN block if the WHERE clause passed (or didn't exist).
+        # 2. 如果 WHERE 子句通过（或不存在），则执行 THEN 代码块。
         if rule.then_block:
-            await self.execute_statement_block(rule.then_block, top_level_scope)
+            await self._execute_statement_block(rule.then_block, top_level_scope)
 
-    async def execute_statement_block(self, block: StatementBlock, current_scope: Dict[str, Any]):
-        """Executes a block of statements within a given scope."""
+    async def _execute_statement_block(self, block: StatementBlock, current_scope: Dict[str, Any]):
+        """在给定的作用域内执行一个语句块。"""
         for stmt in block.statements:
-            await self.execute_statement(stmt, current_scope)
+            await self._execute_statement(stmt, current_scope)
 
-    async def execute_statement(self, stmt: Stmt, current_scope: Dict[str, Any]):
-        """Dispatches a single statement to the correct visitor method."""
+    async def _execute_statement(self, stmt: Stmt, current_scope: Dict[str, Any]):
+        """将单个语句分派到正确的处理方法。"""
         stmt_type = type(stmt)
         if stmt_type is Assignment:
-            await self.visit_assignment(stmt, current_scope)
+            await self._visit_assignment(stmt, current_scope)
         elif stmt_type is ActionCallStmt:
-            await self.visit_action_call_stmt(stmt, current_scope)
+            await self._visit_action_call_stmt(stmt, current_scope)
         elif stmt_type is ForEachStmt:
-            await self.visit_foreach_stmt(stmt, current_scope)
+            await self._visit_foreach_stmt(stmt, current_scope)
         elif stmt_type is BreakStmt:
             raise BreakException()
         elif stmt_type is ContinueStmt:
             raise ContinueException()
         elif stmt_type is IfStmt:
-            await self.visit_if_stmt(stmt, current_scope)
+            await self._visit_if_stmt(stmt, current_scope)
         else:
-            logger.warning(f"Unknown statement type encountered: {stmt_type}")
+            logger.warning(f"遇到了未知的语句类型: {stmt_type}")
 
-    async def visit_if_stmt(self, stmt: IfStmt, current_scope: Dict[str, Any]):
-        """Executes an 'if (condition) { ... } else { ... }' statement."""
-        condition_result = await self.evaluate_expression(stmt.condition, current_scope)
+    async def _visit_if_stmt(self, stmt: IfStmt, current_scope: Dict[str, Any]):
+        """执行 'if (condition) { ... } else { ... }' 语句。"""
+        condition_result = await self._evaluate_expression(stmt.condition, current_scope)
 
-        # In our language, we'll treat 0, "", [], {}, None, and False as "falsy"
+        # 在我们的脚本语言中，0, "", [], {}, None, 和 False 都被视为“假值”。
         is_truthy = bool(condition_result)
 
         if is_truthy:
-            await self.execute_statement_block(stmt.then_block, current_scope)
+            await self._execute_statement_block(stmt.then_block, current_scope)
         elif stmt.else_block:
-            await self.execute_statement_block(stmt.else_block, current_scope)
+            await self._execute_statement_block(stmt.else_block, current_scope)
 
-    async def visit_foreach_stmt(self, stmt: ForEachStmt, current_scope: Dict[str, Any]):
-        """Executes a 'foreach (var in collection) { ... }' statement."""
-        collection = await self.evaluate_expression(stmt.collection, current_scope)
+    async def _visit_foreach_stmt(self, stmt: ForEachStmt, current_scope: Dict[str, Any]):
+        """执行 'foreach (var in collection) { ... }' 语句。"""
+        collection = await self._evaluate_expression(stmt.collection, current_scope)
 
         if not isinstance(collection, (list, str)):
-            logger.warning(f"Foreach loop target is not iterable: {type(collection)}")
+            logger.warning(f"foreach 循环的目标不是可迭代对象: {type(collection)}")
             return
 
         for item in collection:
-            # Create a new, nested scope for the loop body
+            # 为循环体创建一个新的、嵌套的作用域。
             loop_scope = current_scope.copy()
             loop_scope[stmt.loop_var] = item
 
             try:
-                await self.execute_statement_block(stmt.body, loop_scope)
+                await self._execute_statement_block(stmt.body, loop_scope)
             except BreakException:
-                break # Exit the loop
+                break  # 退出循环
             except ContinueException:
-                continue # Go to the next iteration
+                continue  # 进入下一次迭代
 
-        # After the loop, the parent scope is automatically restored because
-        # we only modified a copy.
-
-    async def visit_assignment(self, stmt: Assignment, current_scope: Dict[str, Any]):
-        """Handles assignment to variables, properties, and indexes."""
-        value = await self.evaluate_expression(stmt.expression, current_scope)
+    async def _visit_assignment(self, stmt: Assignment, current_scope: Dict[str, Any]):
+        """处理对变量、属性和下标的赋值操作。"""
+        value = await self._evaluate_expression(stmt.expression, current_scope)
         target_expr = stmt.variable
 
         if isinstance(target_expr, Variable):
             current_scope[target_expr.name] = value
-            logger.debug(f"Assigned to local var '{target_expr.name}': {value}")
         elif isinstance(target_expr, (PropertyAccess, IndexAccess)):
-            container = await self.evaluate_expression(target_expr.target, current_scope)
+            container = await self._evaluate_expression(target_expr.target, current_scope)
             if container is None:
-                logger.warning(f"Cannot assign to property/index of a null object.")
+                logger.warning(f"无法对空对象(null)的属性或下标进行赋值。")
                 return
 
             if isinstance(target_expr, PropertyAccess):
@@ -222,108 +214,72 @@ class RuleExecutor:
                     container[target_expr.property] = value
                 else:
                     setattr(container, target_expr.property, value)
-            else: # IndexAccess
-                index = await self.evaluate_expression(target_expr.index, current_scope)
+            else:  # IndexAccess
+                index = await self._evaluate_expression(target_expr.index, current_scope)
                 if isinstance(container, (list, dict)):
                     try:
                         container[index] = value
                     except (IndexError, KeyError) as e:
-                        logger.warning(f"Error during index assignment: {e}")
+                        logger.warning(f"下标赋值时出错: {e}")
         else:
-            logger.warning(f"Invalid assignment target: {target_expr}")
+            logger.warning(f"无效的赋值目标: {target_expr}")
 
-    async def visit_action_call_stmt(self, stmt: ActionCallStmt, current_scope: Dict[str, Any]):
-        """Handles 'action_name(...);'"""
+    async def _visit_action_call_stmt(self, stmt: ActionCallStmt, current_scope: Dict[str, Any]):
+        """处理形如 'action_name(...);' 的动作调用语句。"""
         action_name = stmt.call.action_name.lower()
 
         if action_name in _ACTION_REGISTRY:
             action_func = _ACTION_REGISTRY[action_name]
-
-            evaluated_args = []
-            for arg_expr in stmt.call.args:
-                evaluated_args.append(await self.evaluate_expression(arg_expr, current_scope))
-
+            evaluated_args = [await self._evaluate_expression(arg_expr, current_scope) for arg_expr in stmt.call.args]
             await action_func(self, *evaluated_args)
         else:
-            logger.warning(f"Unknown action '{stmt.call.action_name}' called.")
+            logger.warning(f"调用了未知的动作: '{stmt.call.action_name}'")
 
-    async def evaluate_expression(self, expr: Expr, current_scope: Dict[str, Any]) -> Any:
-        """Recursively evaluates an expression node and returns the result."""
+    async def _evaluate_expression(self, expr: Expr, current_scope: Dict[str, Any]) -> Any:
+        """递归地对一个表达式节点求值并返回结果。"""
         expr_type = type(expr)
 
-        if expr_type is Literal:
-            return expr.value
-        elif expr_type is Variable:
-            if expr.name in current_scope:
-                return current_scope[expr.name]
-            else:
-                return await self._resolve_path(expr.name)
-        elif expr_type is PropertyAccess:
-            target = await self.evaluate_expression(expr.target, current_scope)
-            if target is None:
+        if expr_type is Literal: return expr.value
+        if expr_type is Variable:
+            return current_scope.get(expr.name, await self._resolve_path(expr.name))
+        if expr_type is PropertyAccess:
+            target = await self._evaluate_expression(expr.target, current_scope)
+            return target.get(expr.property) if isinstance(target, dict) else getattr(target, expr.property, None)
+        if expr_type is IndexAccess:
+            target = await self._evaluate_expression(expr.target, current_scope)
+            index = await self._evaluate_expression(expr.index, current_scope)
+            try:
+                return target[index] if target is not None else None
+            except (IndexError, KeyError, TypeError):
                 return None
-            elif isinstance(target, dict):
-                return target.get(expr.property)
-            else:
-                return getattr(target, expr.property, None)
-        elif expr_type is IndexAccess:
-            target = await self.evaluate_expression(expr.target, current_scope)
-            index = await self.evaluate_expression(expr.index, current_scope)
-            if target is None:
-                return None
-            else:
-                try:
-                    return target[index]
-                except (IndexError, KeyError, TypeError):
-                    return None
-        elif expr_type is BinaryOp:
-            return await self.visit_binary_op(expr, current_scope)
-        elif expr_type is ActionCallExpr:
-            return await self.visit_function_call_expr(expr, current_scope)
-        elif expr_type is ListConstructor:
-            return await self.visit_list_constructor(expr, current_scope)
-        elif expr_type is DictConstructor:
-            return await self.visit_dict_constructor(expr, current_scope)
+        if expr_type is BinaryOp: return await self._visit_binary_op(expr, current_scope)
+        if expr_type is ActionCallExpr: return await self._visit_function_call_expr(expr, current_scope)
+        if expr_type is ListConstructor:
+            return [await self._evaluate_expression(elem, current_scope) for elem in expr.elements]
+        if expr_type is DictConstructor:
+            return {key: await self._evaluate_expression(val, current_scope) for key, val in expr.pairs.items()}
 
-        logger.warning(f"Unsupported expression type for evaluation: {expr_type}")
+        logger.warning(f"不支持的表达式求值类型: {expr_type}")
         return None
 
-    async def visit_list_constructor(self, expr: ListConstructor, current_scope: Dict[str, Any]) -> List[Any]:
-        """Evaluates a list constructor by evaluating each of its element expressions."""
-        evaluated_elements = []
-        for element_expr in expr.elements:
-            evaluated_elements.append(await self.evaluate_expression(element_expr, current_scope))
-        return evaluated_elements
-
-    async def visit_dict_constructor(self, expr: DictConstructor, current_scope: Dict[str, Any]) -> Dict[str, Any]:
-        """Evaluates a dict constructor by evaluating each of its value expressions."""
-        evaluated_pairs = {}
-        for key, value_expr in expr.pairs.items():
-            evaluated_pairs[key] = await self.evaluate_expression(value_expr, current_scope)
-        return evaluated_pairs
-
-    async def visit_binary_op(self, expr: BinaryOp, current_scope: Dict[str, Any]) -> Any:
-        """Evaluates a binary operation, including arithmetic, comparison, and logic."""
+    async def _visit_binary_op(self, expr: BinaryOp, current_scope: Dict[str, Any]) -> Any:
+        """处理二元运算，包括算术、比较和逻辑运算。"""
         op = expr.op.lower()
 
-        # Handle logical operators with short-circuiting for efficiency
+        # 为 and 和 or 实现短路求值，提高效率
         if op == 'and':
-            lhs = await self.evaluate_expression(expr.left, current_scope)
-            if not lhs: return False
-            return bool(await self.evaluate_expression(expr.right, current_scope))
+            lhs = await self._evaluate_expression(expr.left, current_scope)
+            return bool(await self._evaluate_expression(expr.right, current_scope)) if lhs else False
         if op == 'or':
-            lhs = await self.evaluate_expression(expr.left, current_scope)
-            if lhs: return True
-            return bool(await self.evaluate_expression(expr.right, current_scope))
+            lhs = await self._evaluate_expression(expr.left, current_scope)
+            return True if lhs else bool(await self._evaluate_expression(expr.right, current_scope))
         if op == 'not':
-            # 'not' is parsed as a binary op with a None lhs
-            return not bool(await self.evaluate_expression(expr.right, current_scope))
+            return not bool(await self._evaluate_expression(expr.right, current_scope))
 
-        # Evaluate both operands for all other (non-short-circuiting) operators
-        lhs = await self.evaluate_expression(expr.left, current_scope)
-        rhs = await self.evaluate_expression(expr.right, current_scope)
+        lhs = await self._evaluate_expression(expr.left, current_scope)
+        rhs = await self._evaluate_expression(expr.right, current_scope)
 
-        # Arithmetic, List, and String Operations
+        # 算术、列表和字符串运算
         try:
             if op == '+':
                 if isinstance(lhs, list): return lhs + (rhs if isinstance(rhs, list) else [rhs])
@@ -333,29 +289,26 @@ class RuleExecutor:
             if op == '-': return (lhs or 0) - (rhs or 0)
             if op == '*': return (lhs or 0) * (rhs or 0)
             if op == '/':
-                # Correctly handle division by zero.
-                # The original `rhs or 1` was hiding the error.
                 if rhs is None or rhs == 0:
-                    logger.warning(f"Division by zero attempted: {lhs} / {rhs}")
+                    logger.warning(f"执行除法时检测到除数为零: {lhs} / {rhs}")
                     return None
-                lhs_val = lhs or 0
-                return lhs_val / rhs
+                try:
+                    # 确保执行浮点除法，以符合大多数脚本语言用户的直觉
+                    return float(lhs or 0) / float(rhs)
+                except (ValueError, TypeError):
+                    logger.warning(f"除法运算的操作数无法转换为浮点数: {lhs} / {rhs}")
+                    return None
         except TypeError:
-            logger.warning(f"Type error in arithmetic operation: {lhs} {op} {rhs}")
-            return None
-        except ZeroDivisionError:
-            logger.warning(f"Division by zero error: {lhs} / {rhs}")
+            logger.warning(f"算术运算中存在类型错误: {lhs} {op} {rhs}")
             return None
 
-
-        # Comparison Operators
+        # 比较运算符
         if op in ('==', 'eq'): return lhs == rhs
         if op in ('!=', 'ne'): return lhs != rhs
         if op == 'contains': return str(rhs) in str(lhs)
         if op == 'startswith': return str(lhs).startswith(str(rhs))
         if op == 'endswith': return str(lhs).endswith(str(rhs))
 
-        # These comparisons can fail with TypeError if types are incompatible (e.g., 10 > "a")
         try:
             if op in ('>', 'gt'): return lhs > rhs
             if op in ('<', 'lt'): return lhs < rhs
@@ -364,39 +317,50 @@ class RuleExecutor:
         except TypeError:
             return False
 
-        logger.warning(f"Unsupported binary operator: {op}")
+        logger.warning(f"不支持的二元运算符: {op}")
         return None
 
-    async def visit_function_call_expr(self, expr: ActionCallExpr, current_scope: Dict[str, Any]) -> Any:
-        """Evaluates a built-in function call within an expression."""
+    async def _visit_function_call_expr(self, expr: ActionCallExpr, current_scope: Dict[str, Any]) -> Any:
+        """处理表达式内部的内置函数调用。"""
         func_name = expr.action_name.lower()
+        if func_name not in _BUILTIN_FUNCTIONS:
+            logger.warning(f"表达式中调用了未知的函数: '{expr.action_name}'")
+            return None
 
-        if func_name in _BUILTIN_FUNCTIONS:
-            func = _BUILTIN_FUNCTIONS[func_name]
-
-            evaluated_args = []
-            for arg_expr in expr.args:
-                evaluated_args.append(await self.evaluate_expression(arg_expr, current_scope))
-
-            try:
-                # Built-in functions are regular synchronous python functions
-                return func(*evaluated_args)
-            except Exception as e:
-                logger.error(f"Error executing built-in function '{func_name}': {e}")
-                return None
-
-        logger.warning(f"Unknown function called in expression: '{expr.action_name}'")
-        return None
+        func = _BUILTIN_FUNCTIONS[func_name]
+        evaluated_args = [await self._evaluate_expression(arg, current_scope) for arg in expr.args]
+        try:
+            return func(*evaluated_args)
+        except Exception as e:
+            logger.error(f"执行内置函数 '{func_name}' 时出错: {e}")
+            return None
 
     async def _resolve_path(self, path: str) -> Any:
-        """
-        解析一个变量路径。
-        此方法现在是一个简单的包装器，将调用委托给 VariableResolver 实例。
-        """
+        """解析变量路径，委托给 VariableResolver 实例处理。"""
         return await self.variable_resolver.resolve(path)
 
     # =================== 动作实现 (Action Implementations) ===================
-    # 动作本身不需要太多改变，它们只需要接收已经求值过的参数。
+
+    def _get_initiator_id(self) -> Optional[int]:
+        """获取当前动作的发起者用户ID。"""
+        return self.update.effective_user.id if self.update.effective_user else None
+
+    def _get_target_user_id(self, explicit_user_id: Any = None) -> Optional[int]:
+        """
+        一个辅助方法，用于确定动作的目标用户ID。
+        优先级顺序: 1. 显式提供的 user_id 参数 -> 2. 回复的消息中的用户ID -> 3. 触发事件的用户ID。
+        """
+        if explicit_user_id:
+            try:
+                return int(explicit_user_id)
+            except (ValueError, TypeError):
+                logger.warning(f"提供的 user_id '{explicit_user_id}' 不是一个有效的用户ID。")
+                return None
+        if self.update.effective_message and self.update.effective_message.reply_to_message:
+            return self.update.effective_message.reply_to_message.from_user.id
+        if self.update.effective_user:
+            return self.update.effective_user.id
+        return None
 
     @action("reply")
     async def reply(self, text: Any):
@@ -408,162 +372,7 @@ class RuleExecutor:
     async def send_message(self, text: Any):
         """动作：在当前群组发送一条新消息。"""
         if self.update.effective_chat:
-            await self.context.bot.send_message(
-                chat_id=self.update.effective_chat.id,
-                text=str(text)
-            )
-
-def _parse_duration(duration_str: str) -> Optional[timedelta]:
-    """将 '1m', '2h', '3d' 这样的字符串解析为 timedelta 对象。"""
-    if not isinstance(duration_str, str):
-        return None
-
-    match = re.match(r"(\d+)\s*([mhd])", duration_str.lower())
-    if not match:
-        return None
-
-    value, unit = int(match.group(1)), match.group(2)
-    if unit == 'm':
-        return timedelta(minutes=value)
-    elif unit == 'h':
-        return timedelta(hours=value)
-    elif unit == 'd':
-        return timedelta(days=value)
-    return None
-
-
-    @action("ban_user")
-    async def ban_user(self, user_id: Any = None, reason: str = ""):
-        """动作：永久封禁一个用户。"""
-        if not self.update.effective_chat:
-            return
-
-        target_user_id = user_id
-        if target_user_id is None:
-            if self.update.effective_message and self.update.effective_message.reply_to_message:
-                target_user_id = self.update.effective_message.reply_to_message.from_user.id
-            elif self.update.effective_user:
-                target_user_id = self.update.effective_user.id
-
-        if not target_user_id:
-            logger.warning("ban_user 动作无法确定目标用户ID。")
-            return
-
-        try:
-            await self.context.bot.ban_chat_member(
-                chat_id=self.update.effective_chat.id,
-                user_id=target_user_id
-            )
-            logger.info(f"用户 {target_user_id} 已在群组 {self.update.effective_chat.id} 中被封禁。原因: {reason}")
-        except Exception as e:
-            logger.error(f"封禁用户 {target_user_id} 失败: {e}")
-
-    @action("kick_user")
-    async def kick_user(self, user_id: Any = None):
-        """动作：将用户踢出群组（可重新加入）。"""
-        if not self.update.effective_chat:
-            return
-
-        target_user_id = user_id
-        if target_user_id is None:
-            if self.update.effective_message and self.update.effective_message.reply_to_message:
-                target_user_id = self.update.effective_message.reply_to_message.from_user.id
-            elif self.update.effective_user:
-                target_user_id = self.update.effective_user.id
-
-        if not target_user_id:
-            logger.warning("kick_user 动作无法确定目标用户ID。")
-            return
-
-        try:
-            # 踢出用户是通过 ban + unban 实现的
-            await self.context.bot.ban_chat_member(chat_id=self.update.effective_chat.id, user_id=target_user_id)
-            await self.context.bot.unban_chat_member(chat_id=self.update.effective_chat.id, user_id=target_user_id)
-            logger.info(f"用户 {target_user_id} 已从群组 {self.update.effective_chat.id} 中被踢出。")
-        except Exception as e:
-            logger.error(f"踢出用户 {target_user_id} 失败: {e}")
-
-    @action("mute_user")
-    async def mute_user(self, duration: str, user_id: Any = None):
-        """动作：禁言一个用户一段时间。"""
-        if not self.update.effective_chat:
-            return
-
-        target_user_id = user_id
-        if target_user_id is None:
-            if self.update.effective_message and self.update.effective_message.reply_to_message:
-                target_user_id = self.update.effective_message.reply_to_message.from_user.id
-            elif self.update.effective_user:
-                target_user_id = self.update.effective_user.id
-
-        if not target_user_id:
-            logger.warning("mute_user 动作无法确定目标用户ID。")
-            return
-
-        delta = _parse_duration(duration)
-        if not delta:
-            logger.warning(f"无效的时长格式: '{duration}'")
-            return
-
-        until_date = datetime.now(timezone.utc) + delta
-
-        try:
-            await self.context.bot.restrict_chat_member(
-                chat_id=self.update.effective_chat.id,
-                user_id=target_user_id,
-                permissions=ChatPermissions(can_send_messages=False),
-                until_date=until_date
-            )
-            logger.info(f"用户 {target_user_id} 在群组 {self.update.effective_chat.id} 中已被禁言至 {until_date}。")
-        except Exception as e:
-            logger.error(f"禁言用户 {target_user_id} 失败: {e}")
-
-    @action("set_var")
-    async def set_var(self, variable_path: str, value: Any):
-        """
-        动作：设置一个持久化变量，并正确处理JSON序列化。
-        """
-        if not isinstance(variable_path, str):
-            return logger.warning(f"set_var 'variable_path' must be a string, but got {type(variable_path)}.")
-
-        parts = variable_path.split('.')
-        if len(parts) != 2:
-            return logger.warning(f"set_var's variable path '{variable_path}' is invalid. Expected 'scope.name' format.")
-
-        scope, var_name = parts[0].lower(), parts[1]
-        if not self.update.effective_chat: return
-        group_id = self.update.effective_chat.id
-        user_id = None
-
-        if scope == 'user':
-            if not self.update.effective_user: return
-            user_id = self.update.effective_user.id
-        elif scope != 'group':
-            return logger.warning(f"set_var has an invalid scope '{scope}'. Must be 'user' or 'group'.")
-
-        variable = self.db_session.query(StateVariable).filter_by(
-            group_id=group_id, user_id=user_id, name=var_name
-        ).first()
-
-        if value is None:
-            if variable:
-                self.db_session.delete(variable)
-                logger.info(f"Persistent variable '{variable_path}' deleted.")
-        else:
-            try:
-                # Ensure complex types (lists, dicts, bools) are stored as JSON text
-                serialized_value = json.dumps(value)
-            except TypeError as e:
-                return logger.error(f"Failed to serialize value for '{variable_path}': {e}. Value: {value}")
-
-            if not variable:
-                variable = StateVariable(group_id=group_id, user_id=user_id, name=var_name)
-            variable.value = serialized_value
-            self.db_session.add(variable)
-            logger.info(f"Persistent variable '{variable_path}' was set to: {serialized_value}")
-
-    # (Other actions like mute_user, kick_user, etc., would be here, unchanged)
-    # For brevity, I am omitting them, but they are part of the file.
+            await self.context.bot.send_message(chat_id=self.update.effective_chat.id, text=str(text))
 
     @action("delete_message")
     async def delete_message(self):
@@ -574,31 +383,117 @@ def _parse_duration(duration_str: str) -> Optional[timedelta]:
             except Exception as e:
                 logger.error(f"删除消息失败: {e}")
 
+    @action("ban_user")
+    async def ban_user(self, user_id: Any = None, reason: str = ""):
+        """动作：永久封禁一个用户。"""
+        if not self.update.effective_chat: return
+        target_user_id = self._get_target_user_id(user_id)
+        if not target_user_id:
+            return logger.warning("ban_user 动作无法确定目标用户ID。")
+
+        try:
+            await self.context.bot.ban_chat_member(self.update.effective_chat.id, target_user_id)
+            logger.info(
+                f"用户 {target_user_id} 已在群组 {self.update.effective_chat.id} 中被封禁 "
+                f"(由 {self._get_initiator_id()} 发起)。原因: {reason or '未提供'}"
+            )
+        except Exception as e:
+            logger.error(f"封禁用户 {target_user_id} 失败: {e}")
+
+    @action("kick_user")
+    async def kick_user(self, user_id: Any = None):
+        """动作：将用户踢出群组（可重新加入）。"""
+        if not self.update.effective_chat: return
+        target_user_id = self._get_target_user_id(user_id)
+        if not target_user_id:
+            return logger.warning("kick_user 动作无法确定目标用户ID。")
+
+        try:
+            await self.context.bot.ban_chat_member(self.update.effective_chat.id, target_user_id)
+            await self.context.bot.unban_chat_member(self.update.effective_chat.id, target_user_id)
+            logger.info(
+                f"用户 {target_user_id} 已从群组 {self.update.effective_chat.id} 中被踢出 "
+                f"(由 {self._get_initiator_id()} 发起)。"
+            )
+        except Exception as e:
+            logger.error(f"踢出用户 {target_user_id} 失败: {e}")
+
+    @action("mute_user")
+    async def mute_user(self, duration: str, user_id: Any = None):
+        """动作：禁言一个用户一段时间。时长格式: '1m', '2h', '3d'。"""
+        if not self.update.effective_chat: return
+        target_user_id = self._get_target_user_id(user_id)
+        if not target_user_id:
+            return logger.warning("mute_user 动作无法确定目标用户ID。")
+
+        delta = _parse_duration(duration)
+        if not delta:
+            return logger.warning(f"无效的时长格式: '{duration}'")
+
+        until_date = datetime.now(timezone.utc) + delta
+        try:
+            await self.context.bot.restrict_chat_member(
+                chat_id=self.update.effective_chat.id,
+                user_id=target_user_id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date
+            )
+            logger.info(
+                f"用户 {target_user_id} 在群组 {self.update.effective_chat.id} 中已被禁言至 {until_date} "
+                f"(由 {self._get_initiator_id()} 发起)。"
+            )
+        except Exception as e:
+            logger.error(f"禁言用户 {target_user_id} 失败: {e}")
+
+    @action("set_var")
+    async def set_var(self, variable_path: str, value: Any):
+        """动作：设置一个持久化变量 (例如 "user.warns" 或 "group.config")。"""
+        if not isinstance(variable_path, str) or '.' not in variable_path:
+            return logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效，应为 'scope.name' 格式。")
+
+        scope, var_name = variable_path.split('.', 1)
+        if not self.update.effective_chat: return
+        group_id = self.update.effective_chat.id
+        user_id = None
+
+        if scope.lower() == 'user':
+            if not self.update.effective_user: return
+            user_id = self.update.effective_user.id
+        elif scope.lower() != 'group':
+            return logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
+
+        variable = self.db_session.query(StateVariable).filter_by(
+            group_id=group_id, user_id=user_id, name=var_name
+        ).first()
+
+        if value is None:
+            if variable:
+                self.db_session.delete(variable)
+                logger.info(f"持久化变量 '{variable_path}' 已被删除。")
+        else:
+            try:
+                serialized_value = json.dumps(value)
+            except TypeError as e:
+                return logger.error(f"为变量 '{variable_path}' 序列化值时失败: {e}。值: {value}")
+
+            if not variable:
+                variable = StateVariable(group_id=group_id, user_id=user_id, name=var_name)
+            variable.value = serialized_value
+            self.db_session.add(variable)
+            logger.info(f"持久化变量 '{variable_path}' 已被设为: {serialized_value}")
+
     @action("start_verification")
     async def start_verification(self):
-        """
-        动作：为新用户开启人机验证流程。
-        这包括：
-        1. 立即将用户设置为受限模式（仅可读）。
-        2. 向群组内发送一条带有 "开始验证" 按钮的消息。
-        """
-        if not (self.update.effective_chat and self.update.effective_user):
-            return
-
-        chat_id = self.update.effective_chat.id
-        user_id = self.update.effective_user.id
+        """动作：为新用户开启人机验证流程。"""
+        if not (self.update.effective_chat and self.update.effective_user): return
+        chat_id, user_id = self.update.effective_chat.id, self.update.effective_user.id
         user_mention = self.update.effective_user.mention_html()
         bot_username = self.context.bot.username
 
         try:
-            # 1. 将用户禁言
             await self.context.bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-                permissions=ChatPermissions(can_send_messages=False)
+                chat_id=chat_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False)
             )
-
-            # 2. 发送验证链接
             verification_url = f"https://t.me/{bot_username}?start=verify_{chat_id}_{user_id}"
             keyboard = InlineKeyboardMarkup.from_button(
                 InlineKeyboardButton(text="点此开始验证", url=verification_url)
@@ -612,7 +507,55 @@ def _parse_duration(duration_str: str) -> Optional[timedelta]:
         except Exception as e:
             logger.error(f"为用户 {user_id} 在群组 {chat_id} 启动验证时出错: {e}", exc_info=True)
 
+    @action("unmute_user")
+    async def unmute_user(self, user_id: Any = None):
+        """动作：为一个用户解除禁言（恢复发送消息、媒体等权限）。"""
+        if not self.update.effective_chat: return
+        target_user_id = self._get_target_user_id(user_id)
+        if not target_user_id:
+            return logger.warning("unmute_user 动作无法确定目标用户ID。")
+
+        # 授予所有普通成员通常拥有的权限
+        permissions = ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_invite_users=True,
+        )
+
+        try:
+            await self.context.bot.restrict_chat_member(
+                chat_id=self.update.effective_chat.id,
+                user_id=target_user_id,
+                permissions=permissions
+            )
+            logger.info(
+                f"用户 {target_user_id} 在群组 {self.update.effective_chat.id} 中已被解除禁言 "
+                f"(由 {self._get_initiator_id()} 发起)。"
+            )
+        except Exception as e:
+            logger.error(f"为用户 {target_user_id} 解除禁言失败: {e}", exc_info=True)
+
 
     @action("stop")
     async def stop(self):
+        """动作：立即停止执行当前规则，并且不再处理此事件的任何后续规则。"""
         raise StopRuleProcessing()
+
+def _parse_duration(duration_str: str) -> Optional[timedelta]:
+    """将 '1m', '2h', '3d' 这样的字符串解析为 timedelta 对象。"""
+    if not isinstance(duration_str, str): return None
+    match = re.match(r"(\d+)\s*([mhd])", duration_str.lower())
+    if not match: return None
+    value, unit = int(match.group(1)), match.group(2)
+    if unit == 'm': return timedelta(minutes=value)
+    if unit == 'h': return timedelta(hours=value)
+    if unit == 'd': return timedelta(days=value)
+    return None

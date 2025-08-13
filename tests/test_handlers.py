@@ -59,15 +59,15 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
     # --- 2. First Call (Group doesn't exist, rules are seeded, cache is populated) ---
     # We need to simulate a command event to match one of the default rules
     mock_update.effective_message.text = "/kick"
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         await process_event("command", mock_update, mock_context)
 
     # Verification (First Call)
     assert "检测到新群组" in caplog.text
     assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
-    # 7 default rules should be loaded now that the parser is fixed
-    assert len(mock_context.bot_data['rule_cache'][-1001]) == 7
+    # 8 default rules (7 original + 1 new) should be loaded
+    assert len(mock_context.bot_data['rule_cache'][-1001]) == 8
     # The executor should have been called at least once.
     assert MockRuleExecutor.called
 
