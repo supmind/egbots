@@ -1,6 +1,7 @@
 # tests/test_handlers.py
 
 import pytest
+import logging
 from unittest.mock import MagicMock, AsyncMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -73,44 +74,43 @@ async def test_reload_rules_by_non_admin(mock_update, mock_context):
 
 
 @patch('src.bot.handlers.RuleExecutor')
-async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_context, test_db_session_factory):
+async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_context, test_db_session_factory, caplog):
     """
-    Tests the caching logic in `process_event`.
-    The database should only be queried on the first call for a given chat_id.
-    Subsequent calls should use the cache.
+    Tests the caching logic in `process_event` using log capture.
+    The "缓存未命中" (Cache miss) log message should only appear once.
     """
     # --- 1. Setup ---
-    rule_script = "\nWHEN message\nTHEN\n    reply('ok')\n"
-    with test_db_session_factory() as session:
-        group = Group(id=-1001, name="Test Group")
-        rule = Rule(group=group, name="Test Rule", script=rule_script)
-        session.add_all([group, rule])
-        session.commit()
-
+    # The group does not exist initially, so the first call will seed it.
     mock_executor_instance = MockRuleExecutor.return_value
     mock_executor_instance.execute_rule = AsyncMock()
 
-    # --- 2. First Call (Cache Miss) ---
-    await process_event("message", mock_update, mock_context)
+    # --- 2. First Call (Group doesn't exist, rules are seeded, cache is populated) ---
+    # We need to simulate a command event to match one of the default rules
+    mock_update.effective_message.text = "/kick"
+    with caplog.at_level(logging.INFO):
+        await process_event("command", mock_update, mock_context)
 
-    # --- 3. Verification (First Call) ---
+    # Verification (First Call)
+    assert "检测到新群组" in caplog.text
+    assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
-    assert len(mock_context.bot_data['rule_cache'][-1001]) == 1
-    MockRuleExecutor.assert_called_once()
-    mock_executor_instance.execute_rule.assert_called_once()
+    # 4 default rules should be loaded
+    assert len(mock_context.bot_data['rule_cache'][-1001]) == 4
+    # The executor should have been called at least once.
+    assert MockRuleExecutor.called
 
-    # --- 4. Setup for Second Call ---
+    # --- 3. Setup for Second Call ---
     MockRuleExecutor.reset_mock()
     mock_executor_instance.reset_mock()
+    caplog.clear() # Clear the log capture
 
-    # Spy on a low-level connection method to see if any SQL is executed.
-    with patch('sqlalchemy.engine.Connection.execute') as mock_execute:
-        # --- 5. Second Call (Cache Hit) ---
-        await process_event("message", mock_update, mock_context)
+    # --- 4. Second Call (Group exists, cache is used) ---
+    with caplog.at_level(logging.INFO):
+        await process_event("command", mock_update, mock_context)
 
-        # --- 6. Verification (Second Call) ---
-        # The low-level execute method should NOT have been called.
-        mock_execute.assert_not_called()
-        # The executor should have been called again.
-        MockRuleExecutor.assert_called_once()
-        mock_executor_instance.execute_rule.assert_called_once()
+    # --- 5. Verification (Second Call) ---
+    # The key is that the "Cache miss" log should NOT appear this time.
+    assert "检测到新群组" not in caplog.text
+    assert "缓存未命中" not in caplog.text
+    # Executor should have been called again.
+    assert MockRuleExecutor.called

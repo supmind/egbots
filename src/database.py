@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     DateTime,
+    Boolean,
 )
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -70,6 +71,8 @@ class Rule(Base):
     priority = Column(Integer, default=0, nullable=False,
                       comment="执行优先级 (priority)，值越大优先级越高")
     script = Column(Text, nullable=False, comment="完整的规则脚本内容")
+    is_active = Column(Boolean, default=True, nullable=False, server_default='true',
+                       comment="规则是否激活")
 
     # ORM 关系：与 Group 模型建立多对一关系
     group = relationship("Group", back_populates="rules")

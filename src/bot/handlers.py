@@ -42,6 +42,58 @@ class MockUpdate:
         self.effective_message = None
 
 
+# =================== 默认规则预置 ===================
+
+DEFAULT_RULES = [
+    {
+        "name": "新用户入群验证",
+        "priority": 1000,
+        "script": "WHEN user_join\nTHEN\n    start_verification()\nEND"
+    },
+    {
+        "name": "通用回复禁言",
+        "priority": 200,
+        "script": 'WHEN command\nIF message.reply_to_message != null AND message.text startswith "/mute" AND command.arg_count >= 2 AND user.is_admin == true\nTHEN\n    mute_user(command.arg[0], message.reply_to_message.from_user.id)\n    reply("操作成功！")\nEND'
+    },
+    {
+        "name": "通用回复封禁",
+        "priority": 200,
+        "script": 'WHEN command\nIF message.reply_to_message != null AND message.text startswith "/ban" AND user.is_admin == true\nTHEN\n    ban_user(message.reply_to_message.from_user.id, command.full_args)\n    reply("操作成功！")\nEND'
+    },
+    {
+        "name": "通用回复踢人",
+        "priority": 200,
+        "script": 'WHEN command\nIF message.reply_to_message != null AND message.text startswith "/kick" AND user.is_admin == true\nTHEN\n    kick_user(message.reply_to_message.from_user.id)\n    reply("操作成功！")\nEND'
+    }
+]
+
+def _seed_rules_if_new_group(group_id: int, db_session):
+    """如果群组是新的，则为其预置一套默认规则。"""
+    from src.database import Group # 避免循环导入
+    group = db_session.query(Group).filter_by(id=group_id).first()
+    if group is None:
+        logger.info(f"检测到新群组 {group_id}，正在为其安装默认规则...")
+        new_group = Group(id=group_id, name=f"Group {group_id}")
+        db_session.add(new_group)
+
+        for rule_data in DEFAULT_RULES:
+            new_rule = Rule(
+                group_id=group_id,
+                name=rule_data["name"],
+                script=rule_data["script"],
+                priority=rule_data["priority"],
+                is_active=True
+            )
+            db_session.add(new_rule)
+
+        # 提交事务以确保群组和规则被创建
+        db_session.commit()
+        logger.info(f"已为群组 {group_id} 成功安装 {len(DEFAULT_RULES)} 条默认规则。")
+        # 返回 True 表示这是一个新群组，可能需要重新加载缓存
+        return True
+    return False
+
+
 # =================== 事件处理器 ===================
 
 async def reload_rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,6 +129,88 @@ async def reload_rules_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"❌ 清除缓存时发生错误: {e}")
 
 
+async def rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /rules 命令，列出当前群组的所有规则及其状态。"""
+    if not update.effective_chat or not update.effective_user:
+        return
+
+    chat_id = update.effective_chat.id
+
+    # 此命令也应仅限管理员使用
+    try:
+        member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
+        if member.status not in ['creator', 'administrator']:
+            await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+            return
+    except Exception as e:
+        logger.error(f"检查 /rules 命令权限时出错: {e}")
+        return
+
+    session_factory: sessionmaker = context.bot_data.get('session_factory')
+    with session_scope(session_factory) as db_session:
+        # 注意：这里我们查询所有规则，包括禁用的，以便管理员可以看到它们
+        all_rules = db_session.query(Rule).filter(Rule.group_id == chat_id).order_by(Rule.id).all()
+
+        if not all_rules:
+            await update.message.reply_text("本群组还没有任何规则。")
+            return
+
+        message_lines = ["<b>本群组的规则列表:</b>"]
+        for rule in all_rules:
+            status_icon = "✅ [激活]" if rule.is_active else "❌ [禁用]"
+            message_lines.append(f"<code>{rule.id}</code>: {status_icon} {rule.name}")
+
+        message_lines.append("\n使用 <code>/togglerule &lt;ID&gt;</code> 来激活或禁用某条规则。")
+
+        await update.message.reply_text("\n".join(message_lines), parse_mode='HTML')
+
+
+async def toggle_rule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /togglerule <rule_id> 命令，用于激活或禁用一条规则。"""
+    if not update.effective_chat or not update.effective_user:
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    # 权限检查
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status not in ['creator', 'administrator']:
+            await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+            return
+    except Exception as e:
+        logger.error(f"检查 /togglerule 命令权限时出错: {e}")
+        return
+
+    # 参数检查
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("请提供一个有效的规则ID。用法: /togglerule <ID>")
+        return
+
+    rule_id_to_toggle = int(context.args[0])
+
+    session_factory: sessionmaker = context.bot_data.get('session_factory')
+    with session_scope(session_factory) as db_session:
+        rule = db_session.query(Rule).filter_by(id=rule_id_to_toggle, group_id=chat_id).first()
+
+        if not rule:
+            await update.message.reply_text(f"错误：在当前群组中未找到ID为 {rule_id_to_toggle} 的规则。")
+            return
+
+        # 切换状态并提交
+        rule.is_active = not rule.is_active
+        db_session.commit()
+
+        # 清除缓存以使更改立即生效
+        rule_cache: dict = context.bot_data.get('rule_cache', {})
+        if chat_id in rule_cache:
+            del rule_cache[chat_id]
+
+        new_status = "✅ 激活" if rule.is_active else "❌ 禁用"
+        await update.message.reply_text(f"成功将规则 “{rule.name}” (ID: {rule.id}) 的状态更新为: {new_status}。")
+
+
 async def process_event(event_type: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     一个通用的事件处理函数，用于处理所有类型的事件。
@@ -96,10 +230,21 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
     try:
         # 使用事务作用域来处理整个事件
         with session_scope(session_factory) as db_session:
+            # 检查是否为新群组，如果是则安装默认规则
+            is_new_group = _seed_rules_if_new_group(chat_id, db_session)
+
+            # 如果是新安装了规则，需要强制清除缓存以加载新规则
+            if is_new_group and chat_id in rule_cache:
+                del rule_cache[chat_id]
+
             # --- 规则缓存逻辑 ---
             if chat_id not in rule_cache:
                 logger.info(f"缓存未命中：正在为群组 {chat_id} 从数据库加载并解析规则。")
-                rules_from_db = db_session.query(Rule).filter(Rule.group_id == chat_id).order_by(Rule.priority.desc()).all()
+                # 只查询状态为“激活”的规则
+                rules_from_db = db_session.query(Rule).filter(
+                    Rule.group_id == chat_id,
+                    Rule.is_active == True
+                ).order_by(Rule.priority.desc()).all()
                 parsed_rules = []
                 for db_rule in rules_from_db:
                     try:

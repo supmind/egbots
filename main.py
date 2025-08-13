@@ -30,6 +30,8 @@ from src.bot.handlers import (
     document_handler,
     start_handler,
     verification_callback_handler,
+    rules_handler,
+    toggle_rule_handler,
 )
 
 # ==================== 日志配置 ====================
@@ -150,6 +152,8 @@ async def main():
     logger.info("正在注册事件处理器...")
     # 命令处理器
     application.add_handler(CommandHandler("reload_rules", reload_rules_handler))
+    application.add_handler(CommandHandler("rules", rules_handler))
+    application.add_handler(CommandHandler("togglerule", toggle_rule_handler))
     # 使用 MessageHandler 和 command 过滤器来捕获所有未被明确处理的命令，以便规则引擎能够处理它们
     application.add_handler(MessageHandler(filters.COMMAND, command_handler))
     # 消息处理器 (处理非命令的纯文本)
