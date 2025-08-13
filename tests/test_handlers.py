@@ -14,8 +14,8 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_reload_rules_by_admin(mock_update, mock_context):
-    """Tests that an admin can successfully reload the rule cache."""
-    # Setup
+    """测试：管理员应能成功重载规则缓存。"""
+    # 设置
     mock_context.bot_data['rule_cache'][-1001] = ["some_cached_rule"]
     mock_admin = MagicMock(status='administrator')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
@@ -30,8 +30,8 @@ async def test_reload_rules_by_admin(mock_update, mock_context):
 
 
 async def test_reload_rules_by_non_admin(mock_update, mock_context):
-    """Tests that a non-admin user fails to reload the rule cache."""
-    # Setup
+    """测试：非管理员用户无法重载规则缓存。"""
+    # 设置
     mock_context.bot_data['rule_cache'][-1001] = ["some_cached_rule"]
     mock_member = MagicMock(status='member')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_member)
@@ -48,11 +48,11 @@ async def test_reload_rules_by_non_admin(mock_update, mock_context):
 @patch('src.bot.handlers.RuleExecutor')
 async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_context, test_db_session_factory, caplog):
     """
-    Tests the caching logic in `process_event` using log capture.
-    The "缓存未命中" (Cache miss) log message should only appear once.
+    测试 `process_event` 中的缓存逻辑。
+    通过捕获日志来验证“缓存未命中”的消息只在第一次出现。
     """
-    # --- 1. Setup ---
-    # The group does not exist initially, so the first call will seed it.
+    # --- 1. 准备阶段 ---
+    # 群组初始不存在，因此第一次调用时会为其植入默认规则。
     mock_executor_instance = MockRuleExecutor.return_value
     mock_executor_instance.execute_rule = AsyncMock()
 

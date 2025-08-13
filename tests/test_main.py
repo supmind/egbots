@@ -15,7 +15,7 @@ TEST_DATABASE_URL = "sqlite:///:memory:"
 
 @pytest.fixture(scope="function")
 def test_db_session_factory():
-    """Provides a session_factory for a clean in-memory SQLite DB."""
+    """提供一个用于测试的、干净的内存 SQLite 数据库会话工厂。"""
     engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -25,10 +25,10 @@ def test_db_session_factory():
 
 @pytest.mark.asyncio
 @patch('main.os.getenv')
-@patch('main.logger.critical') # Patch the logger instance directly
+@patch('main.logger.critical') # 直接修补 logger 实例
 async def test_main_exit_on_missing_env_vars(mock_logger_critical, mock_getenv):
-    """Tests that main() logs a critical error and returns if env vars are missing."""
-    # Scenario 1: Missing TELEGRAM_TOKEN
+    """测试：当环境变量缺失时，main() 应记录一个严重错误并直接返回。"""
+    # 场景1：缺少 TELEGRAM_TOKEN
     mock_getenv.side_effect = lambda key, default=None: None if key == "TELEGRAM_TOKEN" else "dummy_db_url"
     await main_module.main()
     mock_logger_critical.assert_called_with("关键错误: 未在环境变量中找到 TELEGRAM_TOKEN，机器人无法启动。")
@@ -41,8 +41,8 @@ async def test_main_exit_on_missing_env_vars(mock_logger_critical, mock_getenv):
 
 @pytest.mark.asyncio
 async def test_load_scheduled_rules(test_db_session_factory):
-    """Tests that `load_scheduled_rules` correctly loads rules and registers them with the scheduler."""
-    # --- 1. Setup ---
+    """测试：`load_scheduled_rules` 函数应能正确加载规则并将其注册到调度器。"""
+    # --- 1. 准备阶段 ---
     group = Group(id=-1001, name="Scheduler Test Group")
     rule_script = 'WHEN schedule("0 9 * * *") THEN { send_message("Daily report time!"); }'
     rule = Rule(group_id=group.id, name="Daily Report", script=rule_script)
@@ -85,8 +85,8 @@ async def test_load_scheduled_rules(test_db_session_factory):
 @patch('main.load_scheduled_rules', new_callable=AsyncMock)
 @patch('main.os.getenv')
 async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_get_session, mock_init_db, mock_app_builder):
-    """Performs a high-level integration test of the main() function's flow."""
-    # --- 1. Setup Mocks ---
+    """对 main() 函数的流程进行一次高层次的集成测试。"""
+    # --- 1. 准备模拟对象 ---
     mock_getenv.side_effect = lambda key, default=None: {
         "TELEGRAM_TOKEN": "fake_token",
         "DATABASE_URL": "sqlite:///:memory:"

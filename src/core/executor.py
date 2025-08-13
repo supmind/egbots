@@ -47,7 +47,7 @@ def builtin_function(name: str):
 
 @builtin_function("len")
 def builtin_len(obj: Any) -> int:
-    """Returns the length of a list, dictionary, or string."""
+    """内置函数：返回列表、字典或字符串的长度。"""
     try:
         return len(obj)
     except TypeError:
@@ -55,12 +55,12 @@ def builtin_len(obj: Any) -> int:
 
 @builtin_function("str")
 def builtin_str(obj: Any) -> str:
-    """Converts an object to its string representation."""
+    """内置函数：将一个对象转换为其字符串表示形式。"""
     return str(obj)
 
 @builtin_function("int")
 def builtin_int(obj: Any) -> int:
-    """Converts an object to an integer. Returns 0 on failure."""
+    """内置函数：将一个对象转换为整数。转换失败时返回 0。"""
     try:
         return int(obj)
     except (ValueError, TypeError):
@@ -68,22 +68,22 @@ def builtin_int(obj: Any) -> int:
 
 @builtin_function("lower")
 def builtin_lower(s: str) -> str:
-    """Converts a string to lowercase."""
+    """内置函数：将字符串转换为小写。"""
     return str(s).lower()
 
 @builtin_function("upper")
 def builtin_upper(s: str) -> str:
-    """Converts a string to uppercase."""
+    """内置函数：将字符串转换为大写。"""
     return str(s).upper()
 
 @builtin_function("split")
 def builtin_split(s: str, sep: str = None, maxsplit: int = -1) -> List[str]:
-    """Splits a string by a separator. If sep is not provided, splits by whitespace."""
+    """内置函数：按分隔符分割字符串。如果未提供分隔符，则按空白字符分割。"""
     return str(s).split(sep, maxsplit)
 
 @builtin_function("join")
 def builtin_join(l: list, sep: str) -> str:
-    """Joins a list of strings with a separator."""
+    """内置函数：使用分隔符连接列表中的所有元素，生成一个字符串。"""
     return str(sep).join(map(str, l))
 
 
@@ -109,6 +109,14 @@ class RuleExecutor:
     It walks the AST, evaluates expressions, manages state, and executes actions.
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session):
+        """
+        初始化规则执行器。
+
+        Args:
+            update: 当前的 Telegram Update 对象。
+            context: 当前的 Telegram Context 对象。
+            db_session: 当前数据库会话。
+        """
         self.update = update
         self.context = context
         self.db_session = db_session
@@ -118,8 +126,8 @@ class RuleExecutor:
 
     async def execute_rule(self, rule: ParsedRule):
         """
-        Executes a fully parsed rule.
-        It creates a top-level scope for the execution.
+        执行一个已完全解析的规则。
+        此方法会为本次执行创建一个顶层的变量作用域。
         """
         # A top-level scope is created for each rule execution to ensure isolation.
         top_level_scope = {}
@@ -380,98 +388,105 @@ class RuleExecutor:
 
     async def _resolve_path(self, path: str) -> Any:
         """
-        Resolves a variable path (e.g., 'user.id', 'vars.group.my_var', 'command.arg[0]').
-        This is the bridge between the script engine and the bot's live data.
+        解析一个变量路径 (例如 'user.id', 'vars.group.my_var', 'command.arg[0]')。
+        这是脚本引擎和机器人实时数据之间的桥梁。
         """
         path_lower = path.lower()
 
-        # 1. Check for command variables (e.g., 'command.arg[0]')
-        if path_lower.startswith('command.'):
-            # This logic should only run for command events
-            if not self.update.message or not self.update.message.text:
-                return None
+        if path_lower.startswith('command'):
+            return self._resolve_command_variable(path_lower)
 
-            message_text = self.update.message.text
-            if not message_text.startswith('/'):
-                return None
-
-            cache_key = f"command_args_{self.update.update_id}_{message_text}"
-            if cache_key not in self.per_request_cache:
-                # Use shlex to correctly handle quoted arguments
-                parts = shlex.split(message_text)
-                command_name = parts[0].lstrip('/') # 移除命令前缀
-                args = parts[1:]
-                self.per_request_cache[cache_key] = {
-                    "name": command_name,
-                    "args": args,
-                    "text": message_text,
-                    "full_args": " ".join(args)
-                }
-
-            command_data = self.per_request_cache[cache_key]
-
-            if path_lower == 'command':
-                return command_data
-            if path_lower == 'command.full_text':
-                return command_data["text"]
-            if path_lower in ('command.name', 'command.text'): # alias .text to .name
-                return command_data["name"]
-            if path_lower == 'command.full_args':
-                return command_data["full_args"]
-            if path_lower == 'command.arg_count':
-                return len(command_data["args"])
-
-            # Handle indexed access like command.arg[0]
-            match = re.match(r'command\.arg\[(\d+)\]', path_lower)
-            if match:
-                arg_index = int(match.group(1))
-                if 0 <= arg_index < len(command_data["args"]):
-                    return command_data["args"][arg_index]
-
-            return None # Return None for unknown command properties
-
-        # 2. Check for persistent variables (`vars.scope.name`)
         if path_lower.startswith('vars.'):
-            # (Implementation from old executor is preserved here)
-            parts = path.split('.')
-            if len(parts) != 3: return None
-            _, scope, var_name = parts
-            query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
-            if scope.lower() == 'user':
-                if not self.update.effective_user: return None
-                query = query.filter_by(user_id=self.update.effective_user.id)
-            elif scope.lower() == 'group': query = query.filter(StateVariable.user_id.is_(None))
-            else: return None
+            return self._resolve_persistent_variable(path)
 
-            variable = query.first()
-            if variable:
-                try:
-                    return json.loads(variable.value)
-                except json.JSONDecodeError:
-                    return variable.value
+        # 特殊计算变量
+        if path_lower == 'user.is_admin':
+            return await self._resolve_computed_is_admin()
+
+        # 默认回退到从 Update 对象中解析
+        return self._resolve_from_update_object(path)
+
+    def _resolve_command_variable(self, path_lower: str) -> Any:
+        """解析 `command.*` 相关的变量。"""
+        if not self.update.message or not self.update.message.text or not self.update.message.text.startswith('/'):
             return None
 
-        # 3. Check for special computed variables (e.g., 'user.is_admin')
-        # (Implementation from old executor is preserved here)
-        if path_lower == 'user.is_admin':
-            if not (self.update.effective_chat and self.update.effective_user): return False
-            cache_key = f"is_admin_{self.update.effective_user.id}"
-            if cache_key in self.per_request_cache: return self.per_request_cache[cache_key]
-            try:
-                member = await self.context.bot.get_chat_member(chat_id=self.update.effective_chat.id, user_id=self.update.effective_user.id)
-                is_admin = member.status in ['creator', 'administrator']
-                self.per_request_cache[cache_key] = is_admin
-                return is_admin
-            except Exception:
-                return False
+        cache_key = f"command_args_{self.update.update_id}_{self.update.message.text}"
+        if cache_key not in self.per_request_cache:
+            parts = shlex.split(self.update.message.text)
+            self.per_request_cache[cache_key] = {
+                "name": parts[0].lstrip('/'),
+                "args": parts[1:],
+                "text": self.update.message.text,
+                "full_args": " ".join(parts[1:])
+            }
 
-        # 4. Resolve against the Telegram Update object
-        # (Implementation from old executor is preserved here)
-        base_obj, path_to_resolve = self.update, path
-        current_obj = base_obj
-        for part in path_to_resolve.split('.'):
+        command_data = self.per_request_cache[cache_key]
+
+        if path_lower == 'command':
+            return command_data
+        if path_lower == 'command.full_text':
+            return command_data["text"]
+        if path_lower in ('command.name', 'command.text'):
+            return command_data["name"]
+        if path_lower == 'command.full_args':
+            return command_data["full_args"]
+        if path_lower == 'command.arg_count':
+            return len(command_data["args"])
+
+        match = re.match(r'command\.arg\[(\d+)\]', path_lower)
+        if match:
+            arg_index = int(match.group(1))
+            if 0 <= arg_index < len(command_data["args"]):
+                return command_data["args"][arg_index]
+
+        return None
+
+    def _resolve_persistent_variable(self, path: str) -> Any:
+        """解析 `vars.*` 相关的持久化变量。"""
+        parts = path.split('.')
+        if len(parts) != 3: return None
+
+        _, scope, var_name = parts
+        query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
+
+        if scope.lower() == 'user':
+            if not self.update.effective_user: return None
+            query = query.filter_by(user_id=self.update.effective_user.id)
+        elif scope.lower() == 'group':
+            query = query.filter(StateVariable.user_id.is_(None))
+        else:
+            return None
+
+        variable = query.first()
+        if variable:
+            try:
+                return json.loads(variable.value)
+            except json.JSONDecodeError:
+                return variable.value
+        return None
+
+    async def _resolve_computed_is_admin(self) -> bool:
+        """解析需要实时计算的 `user.is_admin` 变量。"""
+        if not (self.update.effective_chat and self.update.effective_user): return False
+
+        cache_key = f"is_admin_{self.update.effective_user.id}"
+        if cache_key in self.per_request_cache:
+            return self.per_request_cache[cache_key]
+
+        try:
+            member = await self.context.bot.get_chat_member(chat_id=self.update.effective_chat.id, user_id=self.update.effective_user.id)
+            is_admin = member.status in ['creator', 'administrator']
+            self.per_request_cache[cache_key] = is_admin
+            return is_admin
+        except Exception:
+            return False
+
+    def _resolve_from_update_object(self, path: str) -> Any:
+        """作为默认方式，直接从 Update 对象中解析属性。"""
+        current_obj = self.update
+        for part in path.split('.'):
             if current_obj is None: return None
-            # Check for dict access first
             if isinstance(current_obj, dict):
                 current_obj = current_obj.get(part)
             else:
@@ -481,18 +496,19 @@ class RuleExecutor:
                     return None
         return current_obj
 
-    # =================== Action Implementations (Largely Unchanged) ===================
-    # The actions themselves don't need much change. They just receive evaluated arguments.
+    # =================== 动作实现 (Action Implementations) ===================
+    # 动作本身不需要太多改变，它们只需要接收已经求值过的参数。
 
     @action("reply")
     async def reply(self, text: Any):
+        """动作：回复触发当前规则的消息。"""
         if self.update.effective_message:
             await self.update.effective_message.reply_text(str(text))
 
     @action("set_var")
     async def set_var(self, variable_path: str, value: Any):
         """
-        Sets a persistent variable in the database, correctly handling JSON serialization.
+        动作：设置一个持久化变量，并正确处理JSON序列化。
         """
         if not isinstance(variable_path, str):
             return logger.warning(f"set_var 'variable_path' must be a string, but got {type(variable_path)}.")

@@ -11,11 +11,17 @@ from typing import List, Any, Optional, Dict
 # =================== 自定义异常 ===================
 
 class RuleParserError(Exception):
-    """自定义的解析器异常，包含行号信息以便于调试。"""
-    def __init__(self, message: str, line: int = -1):
+    """自定义的解析器异常，包含行列号信息以便于调试。"""
+    def __init__(self, message: str, line: int = -1, column: int = -1):
         self.message = message
         self.line = line
-        super().__init__(f"解析错误 (第 {line} 行): {message}" if line != -1 else f"解析错误: {message}")
+        self.column = column
+        if line != -1 and column != -1:
+            super().__init__(f"解析错误 (第 {line} 行, 第 {column} 列): {message}")
+        elif line != -1:
+            super().__init__(f"解析错误 (第 {line} 行): {message}")
+        else:
+            super().__init__(f"解析错误: {message}")
 
 # =================== 抽象语法树 (AST) 节点定义 v2.3 ===================
 # AST 是将纯文本脚本转换为程序可理解的结构化对象的关键。
@@ -180,7 +186,7 @@ def tokenize(code: str) -> List[Token]:
         elif kind == 'SKIP':
             continue
         elif kind == 'MISMATCH':
-            raise RuleParserError(f"存在无效字符: {value}", line_num)
+            raise RuleParserError(f"存在无效字符: {value}", line_num, column)
         tokens.append(Token(kind, value, line_num, column))
     return tokens
 
@@ -227,7 +233,8 @@ class RuleParser:
 
         # 确保所有 token 都已消耗
         if not self._is_at_end():
-            raise RuleParserError("规则在 END 之后存在多余的 token。", self._current_token().line)
+            token = self._current_token()
+            raise RuleParserError("规则在 END 之后存在多余的 token。", token.line, token.column)
 
         return rule
 
@@ -263,7 +270,8 @@ class RuleParser:
                 call_expr = self._parse_action_call_expression()
                 stmt = ActionCallStmt(call=call_expr)
         else:
-            raise RuleParserError(f"非预期的 token '{self._current_token().value}'，此处应为一条语句。", self._current_token().line)
+            token = self._current_token()
+            raise RuleParserError(f"非预期的 token '{token.value}'，此处应为一条语句。", token.line, token.column)
 
         self._consume('SEMICOLON')
         return stmt
@@ -317,7 +325,8 @@ class RuleParser:
         target_expr = self._parse_accessor_expression()
         # 赋值语句的左侧必须是一个可以被赋值的表达式
         if not isinstance(target_expr, (Variable, PropertyAccess, IndexAccess)):
-            raise RuleParserError("赋值语句的左侧必须是变量、属性或下标。", self._current_token().line)
+            token = self._current_token()
+            raise RuleParserError("赋值语句的左侧必须是变量、属性或下标。", token.line, token.column)
 
         self._consume('EQUALS')
         expression = self._parse_expression()
@@ -426,7 +435,7 @@ class RuleParser:
         elif self._peek_type('LBRACE'):
             return self._parse_dict_constructor()
         else:
-            raise RuleParserError(f"非预期的 token '{token.value}'，此处应为一个表达式。", token.line)
+            raise RuleParserError(f"非预期的 token '{token.value}'，此处应为一个表达式。", token.line, token.column)
 
     def _parse_list_constructor(self) -> ListConstructor:
         """解析列表构造表达式，例如: [1, "a", my_var]"""
@@ -475,21 +484,22 @@ class RuleParser:
     def _consume(self, expected_type: str) -> Token:
         """消耗一个指定类型的 token，如果类型不匹配则抛出错误。"""
         if self.pos >= len(self.tokens):
-            raise RuleParserError(f"期望得到 {expected_type}，但脚本已结束。", -1)
+            # 在脚本意外结束时，我们没有可用的行列号
+            raise RuleParserError(f"期望得到 {expected_type}，但脚本已结束。")
         token = self.tokens[self.pos]
         if token.type != expected_type:
-            raise RuleParserError(f"期望得到 token 类型 {expected_type}，但得到 {token.type} ('{token.value}')", token.line)
+            raise RuleParserError(f"期望得到 token 类型 {expected_type}，但得到 {token.type} ('{token.value}')", token.line, token.column)
         self.pos += 1
         return token
 
     def _consume_keyword(self, keyword: str) -> Token:
         """消耗一个指定的关键字（不区分大小写）。也接受逻辑运算符作为关键字。"""
         if self.pos >= len(self.tokens):
-            raise RuleParserError(f"期望得到关键字 '{keyword}'，但脚本已结束。", -1)
+            raise RuleParserError(f"期望得到关键字 '{keyword}'，但脚本已结束。")
         token = self.tokens[self.pos]
         # 修复：允许 token 类型为 KEYWORD 或 LOGIC_OP
         if (token.type not in ('KEYWORD', 'LOGIC_OP')) or token.value.lower() != keyword.lower():
-            raise RuleParserError(f"期望得到关键字 '{keyword}'，但得到 '{token.value}' (类型: {token.type})", token.line)
+            raise RuleParserError(f"期望得到关键字 '{keyword}'，但得到 '{token.value}' (类型: {token.type})", token.line, token.column)
         self.pos += 1
         return token
 
