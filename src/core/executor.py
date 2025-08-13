@@ -395,7 +395,7 @@ class RuleExecutor:
             if not message_text.startswith('/'):
                 return None
 
-            cache_key = f"command_args_{self.update.update_id}"
+            cache_key = f"command_args_{self.update.update_id}_{message_text}"
             if cache_key not in self.per_request_cache:
                 # Use shlex to correctly handle quoted arguments
                 parts = shlex.split(message_text)
@@ -410,6 +410,8 @@ class RuleExecutor:
 
             command_data = self.per_request_cache[cache_key]
 
+            if path_lower == 'command':
+                return command_data
             if path_lower == 'command.full_text':
                 return command_data["text"]
             if path_lower in ('command.name', 'command.text'): # alias .text to .name
