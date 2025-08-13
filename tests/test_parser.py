@@ -142,5 +142,35 @@ class TestRuleParser(unittest.TestCase):
         rule = parser.parse()
         self.assertEqual(rule.when_event, 'schedule("* * * * *")')
 
+    def test_new_keywords_parsing(self):
+        """测试新的条件关键字 (CONTAINS, IS, IS NOT) 是否能被正确解析。"""
+        test_cases = {
+            "contains": "IF message.text CONTAINS 'http' THEN delete_message() END",
+            "is": "IF user.is_bot IS false THEN reply('not a bot') END",
+            "is_not": "IF user.is_admin IS NOT true THEN kick_user() END"
+        }
+
+        # 测试 'CONTAINS'
+        rule_contains = RuleParser(test_cases["contains"]).parse()
+        cond_contains = rule_contains.if_blocks[0].condition
+        self.assertIsInstance(cond_contains, Condition)
+        self.assertEqual(cond_contains.left, "message.text")
+        self.assertEqual(cond_contains.operator, "CONTAINS")
+        self.assertEqual(cond_contains.right, "http")
+
+        # 测试 'IS'
+        rule_is = RuleParser(test_cases["is"]).parse()
+        cond_is = rule_is.if_blocks[0].condition
+        self.assertIsInstance(cond_is, Condition)
+        self.assertEqual(cond_is.operator, "IS")
+        self.assertEqual(cond_is.right, "false")
+
+        # 测试 'IS NOT'
+        rule_is_not = RuleParser(test_cases["is_not"]).parse()
+        cond_is_not = rule_is_not.if_blocks[0].condition
+        self.assertIsInstance(cond_is_not, Condition)
+        self.assertEqual(cond_is_not.operator, "IS NOT")
+        self.assertEqual(cond_is_not.right, "true")
+
 if __name__ == '__main__':
     unittest.main()

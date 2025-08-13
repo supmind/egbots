@@ -219,7 +219,8 @@ class RuleParser:
         """
         # 1. 词法分析 (Tokenization): 将字符串分解成一个 token 列表。
         # 这个正则表达式非常关键，它能识别出所有操作符、括号、变量路径和字面量。
-        tokens = re.findall(r'\(|\)|\w+(?:\.\w+)*|==|!=|>=|<=|>|<|AND|OR|NOT|"[^"]*"|\'[^\']*\'|[\w\.\-]+', condition_str, re.IGNORECASE)
+        # 添加了 'contains' 和 'is' 作为新的操作符。
+        tokens = re.findall(r'\(|\)|\w+(?:\.\w+)*|==|!=|>=|<=|>|<|contains|is|and|or|not|"[^"]*"|\'[^\']*\'|[\w\.\-]+', condition_str, re.IGNORECASE)
         self.cond_tokens = tokens
         self.cond_idx = 0
         # 2. 语法分析 (Parsing): 从最高优先级的 OR 运算开始递归解析。
@@ -284,13 +285,21 @@ class RuleParser:
         return self._parse_base_condition() # 解析最高优先级的基础条件
 
     def _parse_base_condition(self) -> Condition:
-        """解析基础的 'LHS op RHS' 条件。这是递归的终点。"""
+        """解析基础的 'LHS op RHS' 条件，例如 `user.id == 123`。这是递归的终点。"""
         left = self._consume()
         op = self._consume()
+
+        # 特殊处理 'IS NOT' 组合
+        if op.upper() == 'IS' and self._peek() == 'NOT':
+            self._consume('NOT')  # 消耗 'NOT' token
+            op = 'IS NOT'         # 将操作符合并为 'IS NOT'
+
         right = self._consume()
+
         # 对右操作数进行预处理，去除可能存在的多余引号
         if isinstance(right, str) and right.startswith("'") and right.endswith("'"):
             right = right[1:-1]
         if isinstance(right, str) and right.startswith('"') and right.endswith('"'):
             right = right[1:-1]
-        return Condition(left=left, operator=op, right=right)
+
+        return Condition(left=left, operator=op.upper(), right=right)

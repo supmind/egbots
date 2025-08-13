@@ -45,20 +45,6 @@ class RuleExecutor:
         # 这是一种优秀的设计，将求值器与上下文解析的逻辑解耦。
         self.evaluator = ExpressionEvaluator(variable_resolver_func=self._resolve_path)
 
-        # 动作分派映射表。将规则脚本中的动作名称映射到具体的执行方法。
-        # 这种设计使得添加新动作变得非常简单。
-        self.action_map = {
-            "delete_message": self._action_delete_message,
-            "reply": self._action_reply,
-            "send_message": self._action_send_message,
-            "kick_user": self._action_kick_user,
-            "ban_user": self._action_ban_user,
-            "mute_user": self._action_mute_user,
-            "set_var": self._action_set_var,
-            "stop": self._action_stop,
-            "schedule_action": self._action_schedule_action,
-        }
-
     async def execute_rule(self, rule: ParsedRule):
         """
         执行一条已解析的规则。
@@ -147,9 +133,13 @@ class RuleExecutor:
                 pass
 
         # 4. 执行比较
-        op = condition.operator
-        if op == '==': return lhs_value == rhs_value
-        if op == '!=': return lhs_value != rhs_value
+        op = condition.operator.upper()
+        if op == '==' or op == 'IS':
+            return lhs_value == rhs_value
+        if op == '!=' or op == 'IS NOT':
+            return lhs_value != rhs_value
+        if op == 'CONTAINS':
+            return str(rhs_value) in str(lhs_value)
 
         # 对于大小比较，如果类型不一致，直接返回 False 避免运行时错误。
         if type(lhs_value) != type(rhs_value):
@@ -195,10 +185,25 @@ class RuleExecutor:
                 return literal
 
     async def _execute_action(self, action: Action):
-        """通过 action_map 查找并执行指定的动作。"""
+        """
+        通过动作映射表查找并执行指定的动作。
+        将映射表定义在此方法内部，可以确保在测试中 patch 的 mock 对象能够被正确使用。
+        """
+        action_map = {
+            "delete_message": self._action_delete_message,
+            "reply": self._action_reply,
+            "send_message": self._action_send_message,
+            "kick_user": self._action_kick_user,
+            "ban_user": self._action_ban_user,
+            "mute_user": self._action_mute_user,
+            "set_var": self._action_set_var,
+            "stop": self._action_stop,
+            "schedule_action": self._action_schedule_action,
+        }
+
         action_name_lower = action.name.lower()
-        if action_name_lower in self.action_map:
-            action_func = self.action_map[action_name_lower]
+        if action_name_lower in action_map:
+            action_func = action_map[action_name_lower]
             # 直接将解析器提供的原始参数传递给动作函数。
             # 具体的参数求值（如 set_var）应在动作函数内部处理。
             await action_func(*action.args)
