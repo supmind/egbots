@@ -8,6 +8,9 @@ from typing import List, Any, Optional, Union
 # AST (Abstract Syntax Tree) 是解析过程的核心产物。
 # 它将纯文本的规则脚本，转换成一种程序可以轻松理解和处理的、结构化的对象。
 # 这种分层结构使得后续的条件评估（在 Executor 中）和动作执行变得逻辑清晰、可靠。
+#
+# RuleParserError: 一个自定义的异常类，用于在解析失败时，能够同时报告错误信息和错误所在的行号，
+# 极大地提升了用户编写和调试规则脚本的体验。
 
 # --- 条件逻辑 AST 节点 ---
 # 这部分节点专门用于表示 IF 语句中复杂的条件判断逻辑。
@@ -82,112 +85,132 @@ class ParsedRule:
 
 # =================== 规则解析器类 =================== #
 
+@dataclass
+class Token:
+    """一个包含了值、行号和列号的词法单元 (Token)。"""
+    value: str
+    line: int
+    column: int
+
+class RuleParserError(Exception):
+    """自定义解析器异常，包含了行号信息，便于调试。"""
+    def __init__(self, message: str, line: int):
+        self.message = message
+        self.line = line
+        super().__init__(f"解析错误 (第 {line} 行): {message}")
+
 class RuleParser:
     """
     一个强大的、用于规则脚本的解析器。
     它负责将纯文本格式的规则脚本，通过词法分析和语法分析，转换为结构化的 `ParsedRule` AST。
     该解析器支持复杂的条件逻辑 (AND, OR, NOT)、括号优先级，以及完整的 IF/ELSE IF/ELSE/END 块。
+    现在它还能在错误消息中提供准确的行号。
     """
     def __init__(self, script: str):
-        # 预处理：按行分割，并移除所有空行和注释行。
-        self.lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith('#')]
-        self.line_idx = 0  # 当前正在处理的行索引
+        # 预处理：存储每一行的内容及其原始行号，并移除注释和空行。
+        self.lines = []
+        for i, line_text in enumerate(script.splitlines(), 1):
+            stripped_line = line_text.strip()
+            if stripped_line and not stripped_line.startswith('#'):
+                self.lines.append((i, stripped_line)) # 存储 (行号, 内容)
+        self.line_idx = 0  # 当前正在处理的行元组的索引
+
+    def _current_line_num(self) -> int:
+        """获取当前正在处理的原始行号。"""
+        if self.line_idx < len(self.lines):
+            return self.lines[self.line_idx][0]
+        return len(self.lines)
 
     def parse(self) -> ParsedRule:
         """
         主解析方法：将整个脚本解析成一个 ParsedRule AST。
         这是一个高层调度方法，它按照规则的结构依次调用各个子解析方法。
         """
-        rule = ParsedRule()
-        self._parse_metadata(rule)          # 1. 解析元数据 (RuleName, priority)
-        self._parse_when(rule)              # 2. 解析 WHEN 触发器
-        self._parse_if_else_structure(rule) # 3. 解析核心的 IF-ELSE 逻辑结构
-        return rule
+        try:
+            rule = ParsedRule()
+            self._parse_metadata(rule)          # 1. 解析元数据 (RuleName, priority)
+            self._parse_when(rule)              # 2. 解析 WHEN 触发器
+            self._parse_if_else_structure(rule) # 3. 解析核心的 IF-ELSE 逻辑结构
+            return rule
+        except ValueError as e:
+            # 捕获通用的 ValueError 并将其包装成带有行号的 RuleParserError
+            raise RuleParserError(str(e), self._current_line_num()) from e
 
     def _parse_metadata(self, rule: ParsedRule):
         """解析脚本头部的 'RuleName' 和 'priority' 元数据。"""
         while self.line_idx < len(self.lines):
-            line = self.lines[self.line_idx].strip()
-            if match := re.match(r'RuleName:\s*(.*)', line, re.IGNORECASE):
+            _, line_content = self.lines[self.line_idx]
+            if match := re.match(r'RuleName:\s*(.*)', line_content, re.IGNORECASE):
                 rule.name = match.group(1).strip()
                 self.line_idx += 1
-            elif match := re.match(r'priority:\s*(\d+)', line, re.IGNORECASE):
+            elif match := re.match(r'priority:\s*(\d+)', line_content, re.IGNORECASE):
                 rule.priority = int(match.group(1))
                 self.line_idx += 1
             else:
-                # 一旦遇到非元数据的行，立即停止。
                 break
 
     def _parse_when(self, rule: ParsedRule):
         """解析 'WHEN' 事件触发器。"""
         if self.line_idx < len(self.lines):
-            line = self.lines[self.line_idx].strip()
-            # 修改正则表达式以正确匹配 schedule("...") 格式
-            if match := re.match(r'WHEN\s+(schedule\s*\(.*\)|[a-z_]+)', line, re.IGNORECASE):
+            _, line_content = self.lines[self.line_idx]
+            if match := re.match(r'WHEN\s+(schedule\s*\(.*\)|[a-z_]+)', line_content, re.IGNORECASE):
                 rule.when_event = match.group(1).strip()
                 self.line_idx += 1
 
     def _parse_if_else_structure(self, rule: ParsedRule):
-        """解析整个 IF...ELSE IF...ELSE...END 块。这是解析器的核心逻辑之一。"""
-        # 检查是否存在 IF 语句。如果不存在，可能是一个简单的 WHEN...THEN 规则。
-        if self.line_idx >= len(self.lines) or not re.match(r'IF\s+', self.lines[self.line_idx], re.IGNORECASE):
+        """解析整个 IF...ELSE IF...ELSE...END 块。"""
+        if self.line_idx >= len(self.lines) or not re.match(r'IF\s+', self.lines[self.line_idx][1], re.IGNORECASE):
             self._parse_simple_then(rule)
             return
 
-        # 1. 处理第一个 IF 块
-        if_line = self.lines[self.line_idx]
-        if_match = re.match(r'IF\s+(.*)', if_line, re.IGNORECASE)
+        line_num, line_content = self.lines[self.line_idx]
+        if_match = re.match(r'IF\s+(.*)', line_content, re.IGNORECASE)
         condition_str = if_match.group(1).strip()
-        condition_ast = self._parse_condition_string(condition_str)  # 递归解析条件字符串
+        condition_ast = self._parse_condition_string(condition_str, line_num)
         self.line_idx += 1
         actions = self._parse_then_block()
         rule.if_blocks.append(IfBlock(condition=condition_ast, actions=actions))
 
-        # 2. 循环处理所有 ELSE IF 块
-        while self.line_idx < len(self.lines) and re.match(r'ELSE\s+IF\s+', self.lines[self.line_idx], re.IGNORECASE):
-            elseif_line = self.lines[self.line_idx]
-            elseif_match = re.match(r'ELSE\s+IF\s+(.*)', elseif_line, re.IGNORECASE)
+        while self.line_idx < len(self.lines) and re.match(r'ELSE\s+IF\s+', self.lines[self.line_idx][1], re.IGNORECASE):
+            line_num, line_content = self.lines[self.line_idx]
+            elseif_match = re.match(r'ELSE\s+IF\s+(.*)', line_content, re.IGNORECASE)
             condition_str = elseif_match.group(1).strip()
-            condition_ast = self._parse_condition_string(condition_str)
+            condition_ast = self._parse_condition_string(condition_str, line_num)
             self.line_idx += 1
             actions = self._parse_then_block()
             rule.if_blocks.append(IfBlock(condition=condition_ast, actions=actions))
 
-        # 3. 处理最后的 ELSE 块
-        if self.line_idx < len(self.lines) and re.match(r'ELSE', self.lines[self.line_idx], re.IGNORECASE):
-            self.line_idx += 1  # 消耗 'ELSE'
-            if self.line_idx < len(self.lines) and re.match(r'THEN', self.lines[self.line_idx], re.IGNORECASE):
-                 self.line_idx += 1 # 消耗 'THEN'
+        if self.line_idx < len(self.lines) and re.match(r'ELSE', self.lines[self.line_idx][1], re.IGNORECASE):
+            self.line_idx += 1
+            if self.line_idx < len(self.lines) and re.match(r'THEN', self.lines[self.line_idx][1], re.IGNORECASE):
+                self.line_idx += 1
             actions = self._parse_action_block()
             rule.else_block = ElseBlock(actions=actions)
 
-        # 4. 消耗最后的 'END' 关键字
-        if self.line_idx < len(self.lines) and re.match(r'END', self.lines[self.line_idx], re.IGNORECASE):
+        if self.line_idx < len(self.lines) and re.match(r'END', self.lines[self.line_idx][1], re.IGNORECASE):
             self.line_idx += 1
 
     def _parse_simple_then(self, rule: ParsedRule):
         """处理没有 IF 条件，只有 WHEN...THEN 的简单规则。"""
-        if self.line_idx < len(self.lines) and re.match(r'THEN', self.lines[self.line_idx], re.IGNORECASE):
-            # 创建一个没有条件的 IfBlock，其条件被视作永远为真。
+        if self.line_idx < len(self.lines) and re.match(r'THEN', self.lines[self.line_idx][1], re.IGNORECASE):
             if_block = IfBlock(condition=None, actions=self._parse_then_block())
             rule.if_blocks.append(if_block)
 
     def _parse_then_block(self) -> List[Action]:
         """解析 'THEN' 关键字及其后的动作块。"""
-        if self.line_idx < len(self.lines) and re.match(r'THEN', self.lines[self.line_idx], re.IGNORECASE):
+        if self.line_idx < len(self.lines) and re.match(r'THEN', self.lines[self.line_idx][1], re.IGNORECASE):
             self.line_idx += 1
             return self._parse_action_block()
         return []
 
     def _parse_action_block(self) -> List[Action]:
-        """循环解析多行动作，直到遇到块结束关键字 (ELSE 或 END)。"""
+        """循环解析多行动作，直到遇到块结束关键字。"""
         actions = []
         while self.line_idx < len(self.lines):
-            line = self.lines[self.line_idx].strip()
-            if re.match(r'ELSE\s+IF|ELSE|END', line, re.IGNORECASE):
-                break  # 遇到下一个逻辑块的开始，停止解析当前动作块
-
-            if action := self._parse_action(line):
+            _, line_content = self.lines[self.line_idx]
+            if re.match(r'ELSE\s+IF|ELSE|END', line_content, re.IGNORECASE):
+                break
+            if action := self._parse_action(line_content):
                 actions.append(action)
             self.line_idx += 1
         return actions
@@ -223,159 +246,169 @@ class RuleParser:
         return Action(name=name, args=args)
 
     # =================== 条件表达式的递归下降解析器 =================== #
-    # 这是解析器技术含量最高的部分。它采用经典的“递归下降”算法，
-    # 将一个复杂的条件字符串 (e.g., "user.is_admin AND (msg.text contains 'foo' OR NOT user.is_bot)")
-    # 分解成一个结构化的条件 AST，并能正确处理 AND/OR 的优先级和括号。
 
-    def _parse_condition_string(self, condition_str: str) -> ConditionNode:
+    def _parse_condition_string(self, condition_str: str, line_num: int) -> ConditionNode:
         """
         将条件字符串解析为条件AST的入口。
+        这是解析器技术含量最高的部分，采用经典的“递归下降”算法。
         """
-        # 1. 词法分析 (Tokenization): 将整个条件字符串分解成一个 token 列表。
-        # 这个正则表达式是实现语法的核心。它必须能识别出所有合法的语言元素：
-        # - 括号: ( ) { } ,
-        # - 变量路径: user.id, message.text
-        # - 运算符: ==, !=, >=, <=, >, <, contains, matches, startswith, endswith, in, is, and, or, not
-        # - Cloudflare 别名: eq, ne, gt, lt, ge, le
-        # - 字面量: "带引号的字符串", '带引号的字符串', 数字, true, false, null
+        try:
+            # 1. 词法分析 (Tokenization): 将字符串分解成带位置信息的 Token 列表
+            self.cond_tokens = self._tokenize_condition(condition_str, line_num)
+            self.cond_idx = 0
+            # 2. 语法分析 (Parsing): 从最低优先级的 OR 运算开始，递归地构建 AST
+            parsed_node = self._parse_or()
+
+            # 3. 验证: 确保所有 token 都已被消耗
+            if self.cond_idx < len(self.cond_tokens):
+                remaining_token = self.cond_tokens[self.cond_idx]
+                raise ValueError(f"在成功解析一个条件后，发现多余的 token: '{remaining_token.value}'")
+
+            return parsed_node
+        except ValueError as e:
+            # 将内部的 ValueError 包装成带行号的 RuleParserError，以便上层捕获
+            raise RuleParserError(str(e), line_num) from e
+
+    def _tokenize_condition(self, text: str, line_num: int) -> List[Token]:
+        """
+        一个健壮的词法分析器，使用命名捕获组的正则表达式将条件字符串转换为 Token 列表。
+        它能识别所有合法的语言元素，并报告任何无法识别的字符。
+        """
         operators = [
-            '==', '!=', '>=', '<=', '>', '<',
-            'contains', 'matches', 'startswith', 'endswith', 'in', 'is',
+            '==', '!=', '>=', '<=', '>', '<', 'is not', 'is',
+            'contains', 'matches', 'startswith', 'endswith', 'in',
             'eq', 'ne', 'gt', 'lt', 'ge', 'le',
             'and', 'or', 'not'
         ]
-        # 为了让 re.findall 优先匹配更长的操作符（例如 `==` 而不是 `=`），我们需要按长度降序排序
+        # 按长度降序排序，以确保优先匹配 'is not' 而不是 'is'
         operators.sort(key=len, reverse=True)
         op_pattern = '|'.join(re.escape(op) for op in operators)
 
-        # 完整的 Tokenizer 正则表达式
-        token_pattern_str = '|'.join([
-            r'\(|\)|\{|\}|,',           # 括号, 花括号, 逗号
-            r'\w+(?:\.\w+)*',         # 变量路径
-            r'"[^"]*"|\'[^\']*\'',     # 带引号的字符串
-            op_pattern,               # 所有操作符
-            r'[\w\.\-]+'              # 无引号的字面量和数字
-        ])
+        # 使用命名捕获组来识别不同类型的 Token
+        token_pattern = re.compile(
+            '|'.join([
+                r'(?P<PAREN>[\(\)\{\},])',           # 括号和逗号
+                r'(?P<STRING>"[^"]*"|\'[^\']*\')',     # 带引号的字符串
+                r'(?P<OPERATOR>' + op_pattern + ')',  # 所有操作符
+                r'(?P<VARIABLE>\b\w+(?:\.\w+)+\b)',  # 变量路径 (e.g., user.id)
+                r'(?P<LITERAL>[\w\.\-]+)',           # 无引号的字面量和数字
+                r'(?P<WHITESPACE>\s+)',               # 空白符
+                r'(?P<MISMATCH>.)',                   # 任何不匹配上述规则的字符
+            ]),
+            re.IGNORECASE
+        )
 
-        token_pattern = re.compile(token_pattern_str, re.IGNORECASE)
+        tokens = []
+        for match in token_pattern.finditer(text):
+            kind = match.lastgroup
+            value = match.group()
+            column = match.start()
+            if kind == 'WHITESPACE':
+                continue
+            if kind == 'MISMATCH':
+                # 如果发现无法识别的字符，立即抛出错误
+                raise ValueError(f"在 {column} 列发现无效字符: '{value}'")
+            tokens.append(Token(value=value, line=line_num, column=column))
+        return tokens
 
-        # 使用 findall 获取所有匹配的 token，并过滤掉空字符串
-        tokens = token_pattern.findall(condition_str)
-        self.cond_tokens = [token for token in tokens if token and token.strip()]
-        self.cond_idx = 0
 
-        # 2. 语法分析 (Parsing): 从最低优先级的 OR 运算开始，递归地构建 AST。
-        return self._parse_or()
-
-    def _consume(self, expected_type: Optional[str] = None) -> str:
-        """消耗并返回当前 token，然后将指针向前移动一位。可以选择性地检查 token 类型是否符合预期。"""
+    def _consume(self, expected_type: Optional[str] = None) -> Token:
+        """消耗并返回当前 token，然后将指针向前移动一位。"""
         if self.cond_idx >= len(self.cond_tokens):
             if expected_type:
-                raise ValueError(f"语法错误：期望 token '{expected_type}'，但已到达条件末尾。")
-            raise ValueError("语法错误：意外的条件结尾。")
+                raise ValueError(f"期望得到 '{expected_type}'，但已到达条件末尾。")
+            raise ValueError("意外的条件结尾。")
 
         token = self.cond_tokens[self.cond_idx]
         self.cond_idx += 1
 
-        if expected_type and token.upper() != expected_type.upper():
-            raise ValueError(f"语法错误：期望 token '{expected_type}' 但得到 '{token}'。")
+        if expected_type and token.value.upper() != expected_type.upper():
+            raise ValueError(f"期望得到 '{expected_type}' 但得到 '{token.value}'。")
 
         return token
 
-    def _peek(self) -> Optional[str]:
-        """查看下一个 token 但不消耗它。这对于决定下一步的解析路径至关重要（例如，判断循环是否继续）。"""
-        if self.cond_idx < len(self.cond_tokens):
-            # 返回大写形式以进行不区分大小写的比较
-            return self.cond_tokens[self.cond_idx].upper()
-        return None
+    def _peek(self) -> Optional[Token]:
+        """查看下一个 token 但不消耗它。"""
+        return self.cond_tokens[self.cond_idx] if self.cond_idx < len(self.cond_tokens) else None
 
     def _parse_or(self) -> ConditionNode:
         """解析 OR 表达式 (最低优先级)。"""
-        node = self._parse_and()  # 先解析更高优先级的 AND
-        while self._peek() == 'OR':
+        node = self._parse_and()
+        peeked = self._peek()
+        while peeked and peeked.value.upper() == 'OR':
             self._consume('OR')
             right = self._parse_and()
-            # 如果左侧节点已是 OR 节点, 直接将新条件加入，避免不必要的嵌套
             if isinstance(node, OrCondition):
                 node.conditions.append(right)
             else:
-                # 否则，创建一个新的 OR 节点
                 node = OrCondition(conditions=[node, right])
+            peeked = self._peek()
         return node
 
     def _parse_and(self) -> ConditionNode:
         """解析 AND 表达式。"""
-        node = self._parse_not()  # 先解析更高优先级的 NOT
-        while self._peek() == 'AND':
+        node = self._parse_not()
+        peeked = self._peek()
+        while peeked and peeked.value.upper() == 'AND':
             self._consume('AND')
             right = self._parse_not()
             if isinstance(node, AndCondition):
                 node.conditions.append(right)
             else:
                 node = AndCondition(conditions=[node, right])
+            peeked = self._peek()
         return node
 
     def _parse_not(self) -> ConditionNode:
         """解析 NOT 表达式。"""
-        if self._peek() == 'NOT':
+        peeked = self._peek()
+        if peeked and peeked.value.upper() == 'NOT':
             self._consume('NOT')
-            # NOT 后面可以跟任何更高优先级的表达式
             return NotCondition(condition=self._parse_not())
-        return self._parse_parentheses() # 解析更高优先级的括号
+        return self._parse_parentheses()
 
     def _parse_parentheses(self) -> ConditionNode:
         """解析括号以提升优先级。"""
-        if self._peek() == '(':
+        peeked = self._peek()
+        if peeked and peeked.value == '(':
             self._consume('(')
-            # 括号内的表达式可以从最低优先级的 OR 开始重新解析
             node = self._parse_or()
             self._consume(')')
             return node
-        return self._parse_base_condition() # 解析最高优先级的基础条件
+        return self._parse_base_condition()
 
     def _parse_base_condition(self) -> Condition:
         """
         解析最基础的 `LHS op RHS` 条件。这是递归解析的终点。
-        这个方法现在也支持 `LHS in { val1, val2, ... }` 这种新的集合语法。
         """
-        left = self._consume()
-        op = self._consume()
-
-        # 特殊处理组合操作符 'IS NOT'
-        if op.upper() == 'IS' and self._peek() == 'NOT':
-            self._consume('NOT')  # 消耗 'NOT' token
-            op = 'IS NOT'         # 将操作符合并为一个 token 'IS NOT'
+        left_token = self._consume()
+        op_token = self._consume()
+        op_val = op_token.value.upper()
 
         # 对右操作数 (RHS) 进行解析
         right: Any
-        if op.upper() == 'IN':
-            # --- 解析 `in` 操作符的集合语法 ---
+        if op_val == 'IN':
             self._consume('{')
             values = []
-            # 循环直到遇到 '}'
-            if self._peek() != '}':
+            peeked = self._peek()
+            if peeked and peeked.value != '}':
                 while True:
-                    # 解析并转换集合中的每一个值
                     val_token = self._consume()
-                    values.append(self._convert_literal(val_token))
-                    # 如果下一个 token 是逗号，则消耗它并继续循环
-                    if self._peek() == ',':
+                    values.append(self._convert_literal(val_token.value))
+                    peeked = self._peek()
+                    if peeked and peeked.value == ',':
                         self._consume(',')
-                    # 如果是 '}'，说明集合结束
-                    elif self._peek() == '}':
+                    elif peeked and peeked.value == '}':
                         break
                     else:
-                        raise ValueError(f"语法错误：在集合中期望得到 ',' 或 '}}'，但得到 '{self._peek()}'")
-
-            self._consume('}') # 消耗最后的 '}'
+                        raise ValueError(f"在集合中期望得到 ',' 或 '}}'，但得到 '{peeked.value if peeked else 'EOF'}'")
+            self._consume('}')
             right = values
         else:
-            # --- 解析普通操作符的右侧值 ---
             right_token = self._consume()
-            # 在这里，我们直接将 token 转换为其最具体的类型
-            right = self._convert_literal(right_token)
+            right = self._convert_literal(right_token.value)
 
-        return Condition(left=left, operator=op.upper(), right=right)
+        return Condition(left=left_token.value, operator=op_val, right=right)
 
     def _convert_literal(self, token: str) -> Any:
         """

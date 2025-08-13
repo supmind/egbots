@@ -1,7 +1,7 @@
 # tests/test_parser.py
 
 import unittest
-from src.core.parser import RuleParser, ParsedRule, Action, Condition, AndCondition, OrCondition, NotCondition, IfBlock
+from src.core.parser import RuleParser, ParsedRule, Action, Condition, AndCondition, OrCondition, NotCondition, IfBlock, RuleParserError
 
 class TestRuleParser(unittest.TestCase):
     """
@@ -185,6 +185,26 @@ class TestRuleParser(unittest.TestCase):
                 self.assertEqual(condition_node.left, exp_left)
                 self.assertEqual(condition_node.operator, exp_op)
                 self.assertEqual(condition_node.right, exp_right)
+
+    def test_line_number_in_error(self):
+        """测试解析器是否能在错误消息中报告正确的行号。"""
+        script = """
+        # Line 1: Comment
+        RuleName: Error test
+
+        # Line 4: WHEN clause
+        WHEN message
+
+        # Line 7: Bad IF condition
+        IF user.id is not not valid
+        THEN
+            reply("This should not happen")
+        END
+        """
+        parser = RuleParser(script)
+        # 我们期望一个 RuleParserError，其消息应包含 "第 7 行"
+        with self.assertRaisesRegex(RuleParserError, r"第 7 行"):
+            parser.parse()
 
 if __name__ == '__main__':
     unittest.main()

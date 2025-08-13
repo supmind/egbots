@@ -9,11 +9,13 @@ class ExpressionEvaluator:
     """
     一个用于 `set_var` 动作的、安全且具备类型容错能力的表达式求值器。
 
-    此求值器严格遵循设计文档中的要求 (FR 2.2.2, FR 2.2.3):
-    - 支持算术运算 (`+`, `-`) 和字符串拼接 (`+`)。
+    此求值器具备以下特性:
+    - 支持加法 (`+`)、减法 (`-`) 和字符串拼接 (`+`)。
     - 能够引用上下文变量 (通过注入的 `variable_resolver_func`)。
-    - 在算术运算中，当变量不存在 (解析为 None) 时，能安全地将其当作 0 处理。
-    - 在遇到类型不匹配的运算时，会记录警告并返回 None，而不是抛出异常导致规则崩溃。
+    - **高容错性**:
+        - 在算术运算中，当变量不存在 (解析为 None) 时，能安全地将其当作 0 处理。
+        - 在字符串拼接中，当变量不存在 (解析为 None) 时，会将其视为空字符串 `''`。
+        - 在遇到类型不匹配的运算 (如 `5 + "hello"`) 时，会记录警告并返回 None，而不是抛出异常导致规则崩溃。
     """
     def __init__(self, variable_resolver_func: Callable[[str], Awaitable[Any]]):
         """
@@ -51,13 +53,26 @@ class ExpressionEvaluator:
                 rhs = await self._evaluate_operand(rhs_str)
 
                 # --- 智能类型处理与高容错性 (FR 2.2.3) ---
-                # 在算术运算中，将不存在的变量 (None) 视为 0。
+                # 根据操作符和操作数类型，智能地处理 None 值
                 is_arithmetic = isinstance(lhs, (int, float)) or isinstance(rhs, (int, float))
-                if is_arithmetic:
-                    if lhs is None: lhs = 0
-                    if rhs is None: rhs = 0
+                is_string_concat = isinstance(lhs, str) or isinstance(rhs, str)
 
-                # 如果仍然有 None (例如，在字符串拼接中)，则无法继续。
+                if is_arithmetic and op_char == '-': # 减法
+                    lhs = lhs if lhs is not None else 0
+                    rhs = rhs if rhs is not None else 0
+                elif is_string_concat and op_char == '+': # 字符串拼接
+                    lhs = lhs if lhs is not None else ''
+                    rhs = rhs if rhs is not None else ''
+                else: # 默认为加法
+                    if is_arithmetic:
+                        lhs = lhs if lhs is not None else 0
+                        rhs = rhs if rhs is not None else 0
+                    # 如果 lhs 或 rhs 中有一个是字符串，则都视为空字符串
+                    elif is_string_concat:
+                        lhs = lhs if lhs is not None else ''
+                        rhs = rhs if rhs is not None else ''
+
+                # 如果在转换后仍然有 None（不应该发生，但作为安全检查），则中止
                 if lhs is None or rhs is None:
                     logger.warning(f"无法对 None 操作数执行运算: '{expression}'")
                     return None

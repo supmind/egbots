@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 
 from src.utils import session_scope, generate_math_image
-from src.core.parser import RuleParser
+from src.core.parser import RuleParser, RuleParserError
 from src.core.executor import RuleExecutor, StopRuleProcessing
 from src.database import Rule, Verification
 
@@ -249,8 +249,12 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
                 for db_rule in rules_from_db:
                     try:
                         parsed_rules.append(RuleParser(db_rule.script).parse())
-                    except Exception as e:
+                    except RuleParserError as e:
+                        # 捕获带有行号的特定解析错误
                         logger.error(f"解析规则ID {db_rule.id} ('{db_rule.name}') 失败: {e}")
+                    except Exception as e:
+                        # 捕获其他意外的解析错误
+                        logger.error(f"解析规则ID {db_rule.id} ('{db_rule.name}') 时发生未知错误: {e}")
                 rule_cache[chat_id] = parsed_rules
                 logger.info(f"已为群组 {chat_id} 缓存 {len(parsed_rules)} 条规则。")
 
@@ -501,11 +505,9 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
     #    b. 如果次数 < 3, 发送新的问题
     #    c. 如果次数 >= 3, 踢出用户并删除验证记录
     query = update.callback_query
-    await query.answer() # 必须先应答回调
-    logger.info(f"收到来自用户 {query.from_user.id} 的验证回调: {query.data}")
-    await query.edit_message_text(text=f"您选择了: {query.data}")
-    query = update.callback_query
+    # 必须先应答回调，以防止客户端显示加载状态
     await query.answer()
+    logger.info(f"收到来自用户 {query.from_user.id} 的验证回调: {query.data}")
 
     # 1. 解析回调数据
     try:

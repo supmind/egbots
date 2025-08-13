@@ -205,40 +205,41 @@ class RuleExecutor:
             if not (self.update.effective_message and self.update.effective_message.text): return False
             return bool(re.search(r'https?://\S+', self.update.effective_message.text))
 
-        # --- 优先级 4: 命令参数变量 ---
+        # --- 命令参数变量 (command.*) ---
         if path_lower.startswith('command.'):
-            # 首次请求命令参数时，解析并缓存它们
+            # 首次请求命令参数时，才进行解析并缓存结果，以优化性能。
             if '_command_parts' not in self.per_request_cache:
                 if not (self.update.effective_message and self.update.effective_message.text):
                     self.per_request_cache['_command_parts'] = []
                 else:
-                    # 使用 shlex.split 来正确处理带引号的参数
+                    # 使用 shlex.split 来正确处理带引号的参数 (e.g., /ban "user" "some reason")
                     try:
                         self.per_request_cache['_command_parts'] = shlex.split(self.update.effective_message.text)
                     except ValueError:
-                        # 如果解析失败（例如引号不匹配），则退回到简单的空格分割
+                        # 如果解析失败（例如引号不匹配），则安全地退回到简单的空格分割
                         self.per_request_cache['_command_parts'] = self.update.effective_message.text.split()
 
-            parts = self.per_request_cache['_command_parts']
+            parts = self.per_request_cache.get('_command_parts', [])
 
-            # command.full_args: 返回除命令外的所有参数，作为一个字符串
             if path_lower == 'command.full_args':
+                # 返回除命令本身外的所有参数，合并为一个字符串
                 return ' '.join(parts[1:]) if len(parts) > 1 else ""
 
-            # command.arg_count: 返回参数的总数 (包括命令本身)
             if path_lower == 'command.arg_count':
+                # 返回参数的总数 (包括命令本身)
                 return len(parts)
 
-            # command.arg[N]: 返回第 N 个参数
             match = re.match(r'command\.arg\[(\d+)\]', path_lower)
             if match:
                 arg_index = int(match.group(1))
-                # arg[0] 是第一个参数，对应 parts[1]
-                if 0 <= arg_index < len(parts) - 1:
-                    return parts[arg_index + 1]
-                return None # 索引越界
+                # command.arg[0] 对应 parts[1] (第一个参数)
+                # command.arg[1] 对应 parts[2] (第二个参数), etc.
+                actual_index = arg_index + 1
+                if actual_index < len(parts):
+                    return parts[actual_index]
+                return None # 索引越界时返回 None
 
-            return None # 未知的 command 变量
+            return None # 未知的 command.* 变量
 
         base_obj, path_to_resolve = self.update, path
         if path_lower.startswith('user.'):
@@ -281,10 +282,24 @@ class RuleExecutor:
 
     @action("kick_user")
     async def kick_user(self, user_id: Any = 0):
+        """
+        动作：将一个用户从群组中踢出。
+        根据 Telegram 的 API，这通过一个“封禁并立即解封”的操作来实现，
+        这会将用户从群组移除，但允许他们立即重新加入。
+        默认目标是触发规则的用户。
+        """
         chat_id = self.update.effective_chat.id
+        # 优先使用提供的 user_id，否则回退到触发事件的用户 ID
         target_user_id = int(user_id) if user_id else self.update.effective_user.id
-        if chat_id and target_user_id:
+        if not (chat_id and target_user_id):
+            return
+
+        try:
+            await self.context.bot.ban_chat_member(chat_id=chat_id, user_id=target_user_id)
             await self.context.bot.unban_chat_member(chat_id=chat_id, user_id=target_user_id)
+            logger.info(f"用户 {target_user_id} 已被从群组 {chat_id} 中踢出。")
+        except Exception as e:
+            logger.error(f"执行 'kick_user' 失败: {e}")
 
     @action("ban_user")
     async def ban_user(self, user_id: Any = 0, reason: str = ""):
@@ -323,9 +338,12 @@ class RuleExecutor:
     @action("start_verification")
     async def start_verification(self):
         """
-        动作：开始一个通用的用户验证流程。
-        1. 永久禁言用户。
-        2. 发送一个带有按钮的消息，引导用户去私聊机器人以完成验证。
+        动作：为触发事件的用户启动入群验证流程。
+        此动作会自动执行以下三步：
+        1. 将用户永久禁言 (通过 `mute_user` 实现)。
+        2. 在当前群组发送一条公开消息，其中包含一个按钮。
+        3. 该按钮是一个特殊的 deep-linking 链接，可以引导用户到机器人的私聊窗口，
+           并携带开始验证所需的信息 (群组ID和用户ID)。
         """
         if not self.update.effective_user or not self.update.effective_chat:
             return
@@ -358,9 +376,7 @@ class RuleExecutor:
         )
 
         try:
-            await self.send_message(text)
-            # The above call uses `send_message`, which is another action. We need to call the PTB method directly
-            # to attach the keyboard.
+            # 直接调用 bot 的 send_message 方法来发送带内联键盘的消息
             await self.context.bot.send_message(
                 chat_id=chat_id,
                 text=text,
