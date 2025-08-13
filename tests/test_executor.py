@@ -162,6 +162,36 @@ class TestRuleExecutor(AsyncTestCase):
         query_mock.filter_by.assert_called_once_with(group_id=1001, name='warnings')
         filter_by_group_mock.filter_by.assert_called_once_with(user_id=123)
 
+    def test_is_admin_check_is_cached(self):
+        """测试 user.is_admin 的检查在一次请求中是否被缓存。"""
+        # 1. 准备
+        # - 定义一个多次检查 is_admin 的规则
+        script = """
+        WHEN message
+        IF user.is_admin == true AND user.is_admin == true
+        THEN
+            reply("Welcome admin!")
+        END
+        """
+        # - 模拟 get_chat_member API 调用
+        mock_admin = MagicMock()
+        mock_admin.status = 'administrator'
+        self.context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+
+        parsed_rule = RuleParser(script).parse()
+        executor = RuleExecutor(self.update, self.context, self.db_session)
+
+        # 2. 执行
+        self.run_async(executor.execute_rule(parsed_rule))
+
+        # 3. 断言
+        # - 尽管规则中检查了两次，API 方法应该只被调用一次
+        self.context.bot.get_chat_member.assert_called_once_with(
+            chat_id=self.update.effective_chat.id,
+            user_id=self.update.effective_user.id
+        )
+
+
 class TestNewKeywordExecution(AsyncTestCase):
     """
     针对所有新的和已有的关键字，进行全面的执行逻辑测试。

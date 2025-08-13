@@ -351,9 +351,9 @@ class RuleParser:
             # 循环直到遇到 '}'
             if self._peek() != '}':
                 while True:
-                    # 解析集合中的每一个值
+                    # 解析并转换集合中的每一个值
                     val_token = self._consume()
-                    values.append(self._strip_quotes(val_token))
+                    values.append(self._convert_literal(val_token))
                     # 如果下一个 token 是逗号，则消耗它并继续循环
                     if self._peek() == ',':
                         self._consume(',')
@@ -368,9 +368,47 @@ class RuleParser:
         else:
             # --- 解析普通操作符的右侧值 ---
             right_token = self._consume()
-            right = self._strip_quotes(right_token)
+            # 在这里，我们直接将 token 转换为其最具体的类型
+            right = self._convert_literal(right_token)
 
         return Condition(left=left, operator=op.upper(), right=right)
+
+    def _convert_literal(self, token: str) -> Any:
+        """
+        尝试将一个 token 字符串转换为其最具体的 Python 类型。
+        顺序: Null, Boolean, Integer, Float, String.
+        """
+        # 剥离引号
+        clean_token = self._strip_quotes(token)
+
+        # 如果剥离后的 token 和原 token 不一样，说明它原本是带引号的字符串，直接返回
+        if clean_token is not token:
+            return clean_token
+
+        # 检查 Null
+        if clean_token.lower() in ('null', 'none'):
+            return None
+
+        # 检查 Boolean
+        if clean_token.lower() == 'true':
+            return True
+        if clean_token.lower() == 'false':
+            return False
+
+        # 检查 Integer
+        try:
+            return int(clean_token)
+        except ValueError:
+            pass
+
+        # 检查 Float
+        try:
+            return float(clean_token)
+        except ValueError:
+            pass
+
+        # 如果都不是，它就是一个无引号的字符串
+        return clean_token
 
     def _strip_quotes(self, value: str) -> str:
         """一个辅助函数，用于剥离字符串两端可能存在的单引号或双引号。"""

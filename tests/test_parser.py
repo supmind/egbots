@@ -145,6 +145,8 @@ class TestRuleParser(unittest.TestCase):
     def test_all_new_operators_parsing(self):
         """测试所有新增的及别名的运算符是否都能被正确解析。"""
         # 定义一系列测试用例，每个用例包含脚本、预期的左操作数、操作符和右操作数
+        # 注意：由于解析器现在会自动转换类型，预期的右操作数应为正确的 Python 类型（int, str 等），
+        # 而不是全部为字符串。
         test_cases = [
             # --- String operators ---
             ("message.text contains 'http'", "message.text", "CONTAINS", "http"),
@@ -153,21 +155,21 @@ class TestRuleParser(unittest.TestCase):
             ("message.text matches '.*'", "message.text", "MATCHES", ".*"),
 
             # --- Set operator 'in' ---
-            ("user.id in {123, 456}", "user.id", "IN", ["123", "456"]),
+            ("user.id in {123, 456}", "user.id", "IN", [123, 456]),
             ("user.name in {'a', 'b'}", "user.name", "IN", ["a", "b"]),
             ("user.id in {}", "user.id", "IN", []),
 
             # --- Equality aliases ---
-            ("user.id eq 123", "user.id", "EQ", "123"),
-            ("user.id ne 123", "user.id", "NE", "123"),
-            ("user.id is 123", "user.id", "IS", "123"),
-            ("user.id is not 123", "user.id", "IS NOT", "123"),
+            ("user.id eq 123", "user.id", "EQ", 123),
+            ("user.id ne 123", "user.id", "NE", 123),
+            ("user.id is 123", "user.id", "IS", 123),
+            ("user.id is not 123", "user.id", "IS NOT", 123),
 
             # --- Comparison aliases ---
-            ("user.karma gt 10", "user.karma", "GT", "10"),
-            ("user.karma lt 10", "user.karma", "LT", "10"),
-            ("user.karma ge 10", "user.karma", "GE", "10"),
-            ("user.karma le 10", "user.karma", "LE", "10"),
+            ("user.karma gt 10", "user.karma", "GT", 10),
+            ("user.karma lt 10", "user.karma", "LT", 10),
+            ("user.karma ge 10", "user.karma", "GE", 10),
+            ("user.karma le 10", "user.karma", "LE", 10),
         ]
 
         for script_condition, exp_left, exp_op, exp_right in test_cases:

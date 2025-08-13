@@ -16,7 +16,8 @@ from src.bot.handlers import (
     user_join_handler,
     user_leave_handler,
     edited_message_handler,
-    scheduled_job_handler
+    scheduled_job_handler,
+    reload_rules_handler
 )
 from src.models import Base, Rule
 from src.core.parser import RuleParser
@@ -83,7 +84,7 @@ async def load_scheduled_rules(application: Application):
 
 
 async def main():
-    """Initializes and runs the Telegram bot."""
+    """初始化并运行 Telegram 机器人。"""
     load_dotenv()
 
     token = os.getenv("TELEGRAM_TOKEN")
@@ -125,6 +126,9 @@ async def main():
     # --- 注册事件处理器 ---
     logger.info("正在注册事件处理器...")
     # 1. 命令处理器
+    # 1a. 注册专门的 /reload_rules 命令处理器
+    application.add_handler(CommandHandler("reload_rules", reload_rules_handler))
+    # 1b. 注册通用的命令处理器，用于处理规则中定义的命令
     application.add_handler(CommandHandler(filters.COMMAND, command_handler))
     # 2. 消息处理器 (处理文本、加入/离开消息等)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))

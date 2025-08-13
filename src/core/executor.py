@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -49,6 +49,10 @@ class RuleExecutor:
         self.update = update
         self.context = context
         self.db_session = db_session
+        # 为此 Executor 实例创建一个一次性的缓存。
+        # 这对于缓存高成本的计算（如 API 调用）非常重要，例如 user.is_admin。
+        # 缓存的生命周期与 Executor 实例相同，即处理单个事件。
+        self.per_request_cache = {}
         # 初始化表达式求值器，并传入核心的 _resolve_path 方法作为其变量解析器。
         # 这是一种优秀的设计，将求值器与上下文解析的逻辑解耦。
         self.evaluator = ExpressionEvaluator(variable_resolver_func=self._resolve_path)
@@ -123,8 +127,9 @@ class RuleExecutor:
         # 1. 解析左操作数 (LHS)，这通常是一个变量路径，如 'user.id'
         lhs_value = await self._resolve_path(condition.left)
 
-        # 2. 解析右操作数 (RHS)，这可以是一个单独的值，也可以是一个值的列表（用于 'IN' 操作符）
-        rhs_value = self._parse_literal(condition.right)
+        # 2. 获取右操作数 (RHS)
+        # 由于解析器现在负责类型转换，我们直接从 AST 中获取已转换好的值。
+        rhs_value = condition.right
 
         # --- 特殊处理 `IN` 操作符 ---
         # `IN` 操作符的 RHS 是一个值的列表，LHS 的类型需要和列表内元素的类型逐个匹配。
@@ -196,42 +201,6 @@ class RuleExecutor:
 
         logger.warning(f"执行器遇到未知的操作符: '{condition.operator}'")
         return False
-
-    def _parse_literal(self, literal: Any) -> Any:
-        """
-        将来自解析器的字面量（或字面量列表）转换为对应的 Python 对象。
-        支持: 字符串, 布尔, None, 数字, 以及这些类型的列表。
-        """
-        # 如果是列表 (来自 'IN' 操作符), 递归地处理列表中的每一个元素。
-        if isinstance(literal, list):
-            return [self._parse_literal(item) for item in literal]
-
-        # 如果已经不是字符串（例如，来自测试），直接返回
-        if not isinstance(literal, str):
-            return literal
-
-        # --- 单个值的解析 ---
-        literal = literal.strip()
-
-        # 布尔和 null 字面量
-        lit_lower = literal.lower()
-        if lit_lower == 'true': return True
-        if lit_lower == 'false': return False
-        if lit_lower in ('null', 'none'): return None
-
-        # 数字字面量 (整数或浮点数)
-        # 必须先尝试匹配更具体的浮点数，再尝试整数
-        if '.' in literal:
-            try:
-                return float(literal)
-            except ValueError:
-                pass # 不是浮点数，继续往下走
-        try:
-            return int(literal)
-        except ValueError:
-            # 如果以上都不是，则它就是一个普通的无引号字符串。
-            # 这允许 `user.name == Jules` 这样的写法。
-            return literal
 
     async def _execute_action(self, action: Action):
         """
@@ -316,15 +285,28 @@ class RuleExecutor:
 
         # 2. 处理需要计算的“虚拟变量”
         if path_lower == 'user.is_admin':
-            if not (self.update.effective_chat and self.update.effective_user): return False
+            if not (self.update.effective_chat and self.update.effective_user):
+                return False
+
+            # --- 性能优化：使用请求级缓存 ---
+            # 为避免在单个事件处理中重复调用 get_chat_member API，我们使用缓存。
+            cache_key = f"is_admin_{self.update.effective_user.id}"
+            if cache_key in self.per_request_cache:
+                return self.per_request_cache[cache_key]
+
             try:
                 member = await self.context.bot.get_chat_member(
                     chat_id=self.update.effective_chat.id,
                     user_id=self.update.effective_user.id
                 )
-                return member.status in ['creator', 'administrator']
+                is_admin = member.status in ['creator', 'administrator']
+                # 将结果存入缓存
+                self.per_request_cache[cache_key] = is_admin
+                return is_admin
             except Exception as e:
                 logger.error(f"获取用户 {self.update.effective_user.id} 权限失败: {e}")
+                # 即使失败，也缓存结果，避免在同一请求中重试失败的API调用
+                self.per_request_cache[cache_key] = False
                 return False
 
         if path_lower == 'message.contains_url':
@@ -428,7 +410,7 @@ class RuleExecutor:
             logger.error("在 bot_data 中未找到调度器实例。")
             return
 
-        run_date = datetime.utcnow() + duration
+        run_date = datetime.now(timezone.utc) + duration
         from src.bot.handlers import scheduled_action_handler
         scheduler.add_job(
             scheduled_action_handler,
@@ -445,7 +427,7 @@ class RuleExecutor:
     async def _action_mute_user(self, duration: str = "0", user_id: Any = 0):
         """
         动作：禁言用户。默认为触发规则的用户。
-        支持时长，如 "30m", "1h", "2d"。若时长为 "0" 或无效，则为永久禁言/解禁。
+        支持时长，如 "30m", "1h", "2d"。若时长为 "0"、格式无效或未提供，则视为永久禁言。
         """
         chat_id = self.update.effective_chat.id
         target_user_id = int(user_id) if user_id else self.update.effective_user.id
@@ -509,12 +491,10 @@ class RuleExecutor:
             variable.value = str(new_value)
             self.db_session.add(variable)
 
-        # 6. 提交数据库事务
-        try:
-            self.db_session.commit()
-        except Exception as e:
-            logger.error(f"提交 set_var 数据库事务失败: {e}")
-            self.db_session.rollback()
+        # 6. 将更改暂存到会话中
+        # 注意：事务的提交(commit)和回滚(rollback)已被移至更高层的 handler 中处理，
+        # 以确保单个事件的所有数据库操作的原子性。
+        # 这里只负责将对象添加到会话中。
 
     async def _action_stop(self):
         """动作：立即停止处理当前事件的后续所有规则。"""
