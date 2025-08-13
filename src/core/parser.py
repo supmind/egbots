@@ -80,8 +80,8 @@ class ActionCallExpr(Expr):
 class Stmt: pass
 
 @dataclass
-class Assignment(Stmt):
-    """赋值语句节点，例如: x = 10;"""
+class Assignment(Expr): # 继承自 Expr 而不是 Stmt
+    """赋值表达式节点，例如: x = 10"""
     variable: Expr  # 左值可以是变量、属性访问或下标访问
     expression: Expr
 
@@ -248,7 +248,11 @@ class RuleParser:
         return StatementBlock(statements=statements)
 
     def _parse_statement(self) -> Stmt:
-        """解析单条语句，并分派到相应的子解析器。"""
+        """
+        解析单条语句。
+        在重构后，语句可以是一条独立的表达式（例如赋值或动作调用），
+        也可以是特定的语句关键字（如 if, foreach）。
+        """
         if self._peek_value('if'):
             return self._parse_if_statement()
         if self._peek_value('foreach'):
@@ -262,33 +266,20 @@ class RuleParser:
             self._consume('SEMICOLON')
             return ContinueStmt()
 
-        # 通过向前探查来区分赋值语句和动作调用语句
-        if self._peek_type('IDENTIFIER'):
-            if self._is_assignment():
-                stmt = self._parse_assignment_statement()
-            else:
-                call_expr = self._parse_action_call_expression()
-                stmt = ActionCallStmt(call=call_expr)
-        else:
-            token = self._current_token()
-            raise RuleParserError(f"非预期的 token '{token.value}'，此处应为一条语句。", token.line, token.column)
-
+        # 将赋值和动作调用都作为表达式来解析
+        expr = self._parse_expression()
         self._consume('SEMICOLON')
-        return stmt
 
-    def _is_assignment(self) -> bool:
-        """向前探查 token 流，以判断下一条语句是否为赋值语句。"""
-        i = 0
-        # 扫描直到找到 '=' 或 ';'
-        while True:
-            if self.pos + i >= len(self.tokens): return False
-            token_type = self.tokens[self.pos + i].type
-            if token_type == 'SEMICOLON': return False
-            if token_type == 'EQUALS': return True
-            # 如果先遇到左括号，它更可能是一个函数/动作调用，而不是赋值。
-            if token_type == 'LPAREN': return False
-            i += 1
-        return False
+        # 如果表达式是一个动作调用，将其包装在 ActionCallStmt 中
+        if isinstance(expr, ActionCallExpr):
+            return ActionCallStmt(call=expr)
+
+        # 允许赋值语句独立存在
+        if isinstance(expr, Assignment):
+            return expr # 它本身既是表达式也是语句
+
+        token = self._current_token()
+        raise RuleParserError(f"表达式 '{expr}' 的结果不能作为一条独立的语句。", token.line, token.column)
 
     def _parse_foreach_statement(self) -> ForEachStmt:
         """解析 'foreach (var in collection) { ... }'"""
@@ -320,18 +311,6 @@ class RuleParser:
 
         return IfStmt(condition=condition, then_block=then_block, else_block=else_block)
 
-    def _parse_assignment_statement(self) -> Assignment:
-        """解析 'variable = expression;'"""
-        target_expr = self._parse_accessor_expression()
-        # 赋值语句的左侧必须是一个可以被赋值的表达式
-        if not isinstance(target_expr, (Variable, PropertyAccess, IndexAccess)):
-            token = self._current_token()
-            raise RuleParserError("赋值语句的左侧必须是变量、属性或下标。", token.line, token.column)
-
-        self._consume('EQUALS')
-        expression = self._parse_expression()
-        return Assignment(variable=target_expr, expression=expression)
-
     def _parse_action_call_expression(self) -> ActionCallExpr:
         """解析 'action_name(arg1, arg2, ...)'"""
         action_name = self._consume('IDENTIFIER').value
@@ -353,26 +332,35 @@ class RuleParser:
         while True:
             if self._is_at_end(): break
             op_token = self._current_token()
-            if op_token.type not in ('ARITH_OP', 'COMPARE_OP', 'LOGIC_OP'): break
+            if op_token.type not in ('ARITH_OP', 'COMPARE_OP', 'LOGIC_OP', 'EQUALS'): break
 
             precedence = self._get_operator_precedence(op_token)
             if precedence < min_precedence: break
 
             self.pos += 1
-            rhs = self._parse_expression(precedence + 1)
-            lhs = BinaryOp(left=lhs, op=op_token.value, right=rhs)
+            # 赋值运算符是右结合的
+            if op_token.type == 'EQUALS':
+                rhs = self._parse_expression(precedence)
+                if not isinstance(lhs, (Variable, PropertyAccess, IndexAccess)):
+                    raise RuleParserError("赋值表达式的左侧必须是变量、属性或下标。", self._current_token().line)
+                lhs = Assignment(variable=lhs, expression=rhs)
+            else:
+                rhs = self._parse_expression(precedence + 1)
+                lhs = BinaryOp(left=lhs, op=op_token.value, right=rhs)
 
         return lhs
 
     def _get_operator_precedence(self, token: Token) -> int:
         """返回二元运算符的优先级。"""
         op = token.value.lower()
+        if token.type == 'EQUALS':
+            return 1
         if token.type == 'LOGIC_OP':
-            return 1 if op == 'or' else 2
+            return 2 if op == 'or' else 3
         if token.type == 'COMPARE_OP':
-            return 3
+            return 4
         if token.type == 'ARITH_OP':
-            return 4 if op in ('+', '-') else 5
+            return 5 if op in ('+', '-') else 6
         return 0
 
     def _parse_unary_expression(self) -> Expr:

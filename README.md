@@ -10,9 +10,9 @@
 
 ---
 
-## 2. 规则脚本语言指南 (v2.3)
+## 2. 规则脚本语言指南 (v3.0)
 
-本机器人由一个强大、灵活的嵌入式脚本语言驱动。它允许您编写复杂的规则来自动化管理您的群组。
+本机器人由一个强大、灵活、经过全面重构的嵌入式脚本语言驱动。它允许您编写复杂的规则来自动化管理您的群组。
 
 ### 2.1. 核心概念
 
@@ -56,7 +56,12 @@ END
 2.  **上下文变量 (只读)**: 由系统提供，包含了当前触发事件的所有信息。
     *   `user.*`: 触发事件的用户信息。 e.g., `user.id`, `user.is_admin`。
     *   `message.*`: 触发事件的消息信息。 e.g., `message.text`, `message.reply_to_message`。
-    *   `command.*`: 当 `WHEN command` 时可用，提供对命令参数的访问。 e.g., `command.full_args`。
+    *   `command.*`: 当 `WHEN command` 时可用，提供对命令参数的访问。
+        *   `command.name`: 命令的名称 (不含 `/`)。例如, 对于 `/kick user1`，值为 `"kick"`。
+        *   `command.text`: `command.name` 的别名。
+        *   `command.full_args`: 包含所有参数的单个字符串。
+        *   `command.arg_count`: 参数的数量。
+        *   `command.arg[N]`: 访问第N个参数 (从0开始)。
 3.  **持久化变量 (读写)**: 跨规则、跨时间存在的变量，存储在数据库中。
     *   `vars.group.my_var`: 群组作用域的变量。
     *   `vars.user.my_var`: 用户在特定群组内的作用域变量。
@@ -98,15 +103,15 @@ END
 
 | 动作 | 描述 |
 | :--- | :--- |
-| `reply(text)` | 回复触发消息。 |
+| `reply(text)` | 回复触发当前规则的消息。 |
 | `send_message(text)` | 在当前群组发送一条新消息。 |
 | `delete_message()` | 删除触发当前规则的消息。 |
-| `ban_user(user_id, reason)` | 永久封禁用户。`user_id` 和 `reason` 都是可选的。 |
-| `kick_user(user_id)` | 将用户踢出群组（可重新加入）。 |
-| `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。 |
+| `ban_user(user_id, reason)` | 永久封禁用户。`user_id` 和 `reason` 是可选的。 |
+| `kick_user(user_id)` | 将用户踢出群组（可重新加入）。`user_id` 是可选的。 |
+| `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。`user_id` 是可选的。 |
 | `set_var(name, value)` | 设置一个持久化变量 (例如 `"group.my_var"`)。 |
-| `stop()` | 立即停止执行，且不再处理后续规则。 |
 | `start_verification()` | 对新用户启动人机验证流程。 |
+| `stop()` | 立即停止执行当前规则，且不再处理后续规则。 |
 
 ---
 
