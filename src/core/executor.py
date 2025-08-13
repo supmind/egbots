@@ -2,6 +2,7 @@
 
 import logging
 import re
+import shlex
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Dict, Callable, Coroutine
 
@@ -211,8 +212,12 @@ class RuleExecutor:
                 if not (self.update.effective_message and self.update.effective_message.text):
                     self.per_request_cache['_command_parts'] = []
                 else:
-                    # 使用 shlex.split 可以正确处理带引号的参数，但为了保持简单，我们先用空格分割
-                    self.per_request_cache['_command_parts'] = self.update.effective_message.text.split()
+                    # 使用 shlex.split 来正确处理带引号的参数
+                    try:
+                        self.per_request_cache['_command_parts'] = shlex.split(self.update.effective_message.text)
+                    except ValueError:
+                        # 如果解析失败（例如引号不匹配），则退回到简单的空格分割
+                        self.per_request_cache['_command_parts'] = self.update.effective_message.text.split()
 
             parts = self.per_request_cache['_command_parts']
 
@@ -220,9 +225,9 @@ class RuleExecutor:
             if path_lower == 'command.full_args':
                 return ' '.join(parts[1:]) if len(parts) > 1 else ""
 
-            # command.arg_count: 返回参数的数量
+            # command.arg_count: 返回参数的总数 (包括命令本身)
             if path_lower == 'command.arg_count':
-                return len(parts) - 1 if len(parts) > 0 else 0
+                return len(parts)
 
             # command.arg[N]: 返回第 N 个参数
             match = re.match(r'command\.arg\[(\d+)\]', path_lower)
