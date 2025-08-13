@@ -163,52 +163,146 @@ class TestRuleExecutor(AsyncTestCase):
         filter_by_group_mock.filter_by.assert_called_once_with(user_id=123)
 
 class TestNewKeywordExecution(AsyncTestCase):
-    """针对新关键字 (CONTAINS, IS, IS NOT) 的执行逻辑测试。"""
+    """
+    针对所有新的和已有的关键字，进行全面的执行逻辑测试。
+    这个测试类的主要职责是验证 _evaluate_base_condition 方法的行为是否正确。
+    """
     def setUp(self):
         """设置通用的 mock 对象。"""
         self.context = MagicMock()
         self.db_session = MagicMock()
         self.update = MagicMock()
+
         user_mock = MagicMock(id=123, first_name="Jules", is_bot=False)
         self.update.effective_user = user_mock
-        message_mock = MagicMock(text="This is a test message with a link: https://example.com")
+
+        message_mock = MagicMock(text="This is a test message with a link: https://example.com and some text.")
+        # 为 message mock 添加一个整数类型的属性用于测试
+        message_mock.id = 98765
         self.update.effective_message = message_mock
 
-    @patch('src.core.executor.RuleExecutor._action_delete_message', new_callable=AsyncMock)
-    async def test_contains_keyword_true(self, mock_action):
-        """测试 CONTAINS 条件为真时，动作被执行。"""
-        script = "IF message.text CONTAINS 'https://' THEN delete_message() END"
-        rule = RuleParser(script).parse()
+    async def _run_test_with_script(self, script: str, mock_action: AsyncMock, should_be_called: bool = True):
+        """一个辅助方法，用于运行基于脚本的测试，避免代码重复。"""
+        # 增加一个 when 和 end 关键字，让它成为一个完整的、可解析的规则
+        full_script = f"WHEN message\nIF {script}\nTHEN\n reply('test')\nEND"
+        rule = RuleParser(full_script).parse()
         executor = RuleExecutor(self.update, self.context, self.db_session)
         await executor.execute_rule(rule)
+
+        if should_be_called:
+            mock_action.assert_called_once()
+        else:
+            mock_action.assert_not_called()
+
+    @patch('src.core.executor.RuleExecutor._action_reply', new_callable=AsyncMock)
+    def test_string_operators(self, mock_action):
+        """测试所有字符串比较运算符: CONTAINS, STARTSWITH, ENDSWITH, MATCHES"""
+        # CONTAINS
+        self.run_async(self._run_test_with_script("message.text contains 'https://'", mock_action))
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.text contains 'spam'", mock_action, should_be_called=False))
+        mock_action.reset_mock()
+
+        # STARTSWITH
+        self.run_async(self._run_test_with_script("message.text startswith 'This is'", mock_action))
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.text startswith 'is a test'", mock_action, should_be_called=False))
+        mock_action.reset_mock()
+
+        # ENDSWITH
+        self.run_async(self._run_test_with_script("message.text endswith 'text.'", mock_action))
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.text endswith 'some text'", mock_action, should_be_called=False))
+        mock_action.reset_mock()
+
+        # MATCHES (正则表达式)
+        self.run_async(self._run_test_with_script(r"message.text matches 'https?://\S+'", mock_action))
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script(r"message.text matches '^\d+$'", mock_action, should_be_called=False))
+        mock_action.reset_mock()
+
+    @patch('src.core.executor.RuleExecutor._action_reply', new_callable=AsyncMock)
+    def test_in_operator(self, mock_action):
+        """测试 'IN' 运算符，包括字符串和数字集合"""
+        # 字符串
+        self.run_async(self._run_test_with_script("user.first_name in {'Jules', 'Admin'}", mock_action))
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("user.first_name in {'Guest', 'Bot'}", mock_action, should_be_called=False))
+        mock_action.reset_mock()
+
+        # 数字
+        self.run_async(self._run_test_with_script("user.id in {123, 456, 789}", mock_action))
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("user.id in {404, 500}", mock_action, should_be_called=False))
+        mock_action.reset_mock()
+
+        # 空集合
+        self.run_async(self._run_test_with_script("user.id in {}", mock_action, should_be_called=False))
+        mock_action.reset_mock()
+
+    @patch('src.core.executor.RuleExecutor._action_reply', new_callable=AsyncMock)
+    def test_equality_operators_and_aliases(self, mock_action):
+        """测试所有相等/不等运算符及其别名: ==, !=, IS, IS NOT, EQ, NE"""
+        # ==, IS, EQ
+        self.run_async(self._run_test_with_script("user.id == 123", mock_action))
         mock_action.assert_called_once()
+        mock_action.reset_mock()
 
-    @patch('src.core.executor.RuleExecutor._action_delete_message', new_callable=AsyncMock)
-    async def test_contains_keyword_false(self, mock_action):
-        """测试 CONTAINS 条件为假时，动作不被执行。"""
-        script = "IF message.text CONTAINS 'spam' THEN delete_message() END"
-        rule = RuleParser(script).parse()
-        executor = RuleExecutor(self.update, self.context, self.db_session)
-        await executor.execute_rule(rule)
-        mock_action.assert_not_called()
+        self.run_async(self._run_test_with_script("user.id is 123", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+
+        self.run_async(self._run_test_with_script("user.id eq 123", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+
+        # !=, IS NOT, NE
+        self.run_async(self._run_test_with_script("user.id != 999", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+
+        self.run_async(self._run_test_with_script("user.id is not 999", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+
+        self.run_async(self._run_test_with_script("user.id ne 999", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
 
     @patch('src.core.executor.RuleExecutor._action_reply', new_callable=AsyncMock)
-    async def test_is_keyword_true(self, mock_action):
-        """测试 IS 条件为真时 (等同于 ==)，动作被执行。"""
-        script = "IF user.first_name IS 'Jules' THEN reply('Correct user') END"
-        rule = RuleParser(script).parse()
-        executor = RuleExecutor(self.update, self.context, self.db_session)
-        await executor.execute_rule(rule)
-        mock_action.assert_called_once_with('Correct user')
+    def test_comparison_operators_and_aliases(self, mock_action):
+        """测试所有大小比较运算符及其别名: >, <, >=, <=, GT, LT, GE, LE"""
+        # > / GT
+        self.run_async(self._run_test_with_script("message.id > 10000", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.id gt 10000", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
 
-    @patch('src.core.executor.RuleExecutor._action_reply', new_callable=AsyncMock)
-    async def test_is_not_keyword_true(self, mock_action):
-        """测试 IS NOT 条件为真时 (等同于 !=)，动作被执行。"""
-        script = "IF user.first_name IS NOT 'Bot' THEN reply('Not a bot') END"
-        rule = RuleParser(script).parse()
-        executor = RuleExecutor(self.update, self.context, self.db_session)
-        await executor.execute_rule(rule)
-        mock_action.assert_called_once_with('Not a bot')
+        # < / LT
+        self.run_async(self._run_test_with_script("message.id < 100000", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.id lt 100000", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+
+        # >= / GE
+        self.run_async(self._run_test_with_script("message.id >= 98765", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.id ge 98765", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+
+        # <= / LE
+        self.run_async(self._run_test_with_script("message.id <= 98765", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.id le 98765", mock_action))
+        mock_action.assert_called_once()
+        mock_action.reset_mock()
 
 if __name__ == '__main__':
     unittest.main()

@@ -142,35 +142,47 @@ class TestRuleParser(unittest.TestCase):
         rule = parser.parse()
         self.assertEqual(rule.when_event, 'schedule("* * * * *")')
 
-    def test_new_keywords_parsing(self):
-        """测试新的条件关键字 (CONTAINS, IS, IS NOT) 是否能被正确解析。"""
-        test_cases = {
-            "contains": "IF message.text CONTAINS 'http' THEN delete_message() END",
-            "is": "IF user.is_bot IS false THEN reply('not a bot') END",
-            "is_not": "IF user.is_admin IS NOT true THEN kick_user() END"
-        }
+    def test_all_new_operators_parsing(self):
+        """测试所有新增的及别名的运算符是否都能被正确解析。"""
+        # 定义一系列测试用例，每个用例包含脚本、预期的左操作数、操作符和右操作数
+        test_cases = [
+            # --- String operators ---
+            ("message.text contains 'http'", "message.text", "CONTAINS", "http"),
+            ("message.text startswith '/cmd'", "message.text", "STARTSWITH", "/cmd"),
+            ("message.text endswith '!'", "message.text", "ENDSWITH", "!"),
+            ("message.text matches '.*'", "message.text", "MATCHES", ".*"),
 
-        # 测试 'CONTAINS'
-        rule_contains = RuleParser(test_cases["contains"]).parse()
-        cond_contains = rule_contains.if_blocks[0].condition
-        self.assertIsInstance(cond_contains, Condition)
-        self.assertEqual(cond_contains.left, "message.text")
-        self.assertEqual(cond_contains.operator, "CONTAINS")
-        self.assertEqual(cond_contains.right, "http")
+            # --- Set operator 'in' ---
+            ("user.id in {123, 456}", "user.id", "IN", ["123", "456"]),
+            ("user.name in {'a', 'b'}", "user.name", "IN", ["a", "b"]),
+            ("user.id in {}", "user.id", "IN", []),
 
-        # 测试 'IS'
-        rule_is = RuleParser(test_cases["is"]).parse()
-        cond_is = rule_is.if_blocks[0].condition
-        self.assertIsInstance(cond_is, Condition)
-        self.assertEqual(cond_is.operator, "IS")
-        self.assertEqual(cond_is.right, "false")
+            # --- Equality aliases ---
+            ("user.id eq 123", "user.id", "EQ", "123"),
+            ("user.id ne 123", "user.id", "NE", "123"),
+            ("user.id is 123", "user.id", "IS", "123"),
+            ("user.id is not 123", "user.id", "IS NOT", "123"),
 
-        # 测试 'IS NOT'
-        rule_is_not = RuleParser(test_cases["is_not"]).parse()
-        cond_is_not = rule_is_not.if_blocks[0].condition
-        self.assertIsInstance(cond_is_not, Condition)
-        self.assertEqual(cond_is_not.operator, "IS NOT")
-        self.assertEqual(cond_is_not.right, "true")
+            # --- Comparison aliases ---
+            ("user.karma gt 10", "user.karma", "GT", "10"),
+            ("user.karma lt 10", "user.karma", "LT", "10"),
+            ("user.karma ge 10", "user.karma", "GE", "10"),
+            ("user.karma le 10", "user.karma", "LE", "10"),
+        ]
+
+        for script_condition, exp_left, exp_op, exp_right in test_cases:
+            # 将每个条件片段包装成一个完整的、可解析的规则
+            full_script = f"IF {script_condition} THEN reply('ok') END"
+
+            with self.subTest(condition=script_condition):
+                rule = RuleParser(full_script).parse()
+                condition_node = rule.if_blocks[0].condition
+
+                # 断言解析出的 AST 节点符合预期
+                self.assertIsInstance(condition_node, Condition)
+                self.assertEqual(condition_node.left, exp_left)
+                self.assertEqual(condition_node.operator, exp_op)
+                self.assertEqual(condition_node.right, exp_right)
 
 if __name__ == '__main__':
     unittest.main()

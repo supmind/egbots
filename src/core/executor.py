@@ -25,18 +25,26 @@ class StopRuleProcessing(Exception):
 
 class RuleExecutor:
     """
-    规则执行器。
-    这是规则引擎的大脑，负责接收 Parser 输出的 AST，
-    结合 PTB 的实时上下文 (Update, Context)，评估条件并执行相应的动作。
+    规则执行器 (RuleExecutor)
+    ======================
+    这是规则引擎的大脑。它负责接收由 `RuleParser` 生成的 AST (抽象语法树)，
+    并结合来自 Telegram 的实时事件上下文 (`Update`, `Context`)，
+    来最终评估规则条件 (`IF...`) 并执行相应的动作 (`THEN...`)。
+
+    主要职责:
+    1.  **执行规则**: `execute_rule` 是主入口，负责遍历规则的 `IF/ELSE IF/ELSE` 块。
+    2.  **评估条件**: `_evaluate_ast_node` 递归地评估复杂的条件逻辑。
+    3.  **解析变量**: `_resolve_path` 是连接脚本与实时数据的桥梁，能从 `Update` 对象或数据库中获取变量值。
+    4.  **执行动作**: `_execute_action` 调用具体的 `_action_*` 方法来执行 Telegram API 操作。
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session):
         """
-        初始化执行器。
+        初始化执行器实例。
 
         Args:
-            update: PTB 提供的 Update 对象，包含了事件的所有信息。
-            context: PTB 提供的 Context 对象，用于执行机器人动作。
-            db_session: 数据库会话，用于查询和修改持久化变量。
+            update (Update): PTB 提供的 `Update` 对象，包含了触发事件的所有信息 (如消息、用户、聊天等)。
+            context (ContextTypes.DEFAULT_TYPE): PTB 提供的 `Context` 对象，用于执行机器人动作 (如发送消息)。
+            db_session (Session): SQLAlchemy 的数据库会话对象，用于查询和修改持久化状态变量。
         """
         self.update = update
         self.context = context
@@ -108,64 +116,102 @@ class RuleExecutor:
     async def _evaluate_base_condition(self, condition: Condition) -> bool:
         """
         评估最基础的 `LHS op RHS` 条件。
+        这是所有条件判断的最终执行点，包含了所有比较运算符的逻辑。
         """
-        # 1. 解析左操作数 (通常是变量路径)
+        op = condition.operator.upper()
+
+        # 1. 解析左操作数 (LHS)，这通常是一个变量路径，如 'user.id'
         lhs_value = await self._resolve_path(condition.left)
-        # 2. 解析右操作数 (通常是字面量)
+
+        # 2. 解析右操作数 (RHS)，这可以是一个单独的值，也可以是一个值的列表（用于 'IN' 操作符）
         rhs_value = self._parse_literal(condition.right)
 
-        # 3. 智能类型转换：尝试将右侧值转换为左侧值的类型。
-        # 这极大提升了易用性，例如允许 `user.id == "123456"` 这样的写法，
-        # 即使 `user.id` 是整数类型。
+        # --- 特殊处理 `IN` 操作符 ---
+        # `IN` 操作符的 RHS 是一个值的列表，LHS 的类型需要和列表内元素的类型逐个匹配。
+        if op == 'IN':
+            if not isinstance(rhs_value, list):
+                logger.warning(f"操作符 'IN' 的右侧必须是一个集合 (e.g., {{'a', 'b'}})，但实际得到: {rhs_value}")
+                return False
+            # 智能类型转换：尝试将集合中的每个值都转换为 LHS 的类型
+            coerced_rhs_list = []
+            if lhs_value is not None:
+                for item in rhs_value:
+                    try:
+                        coerced_rhs_list.append(type(lhs_value)(item))
+                    except (ValueError, TypeError):
+                        coerced_rhs_list.append(item) # 转换失败则保留原样
+            else:
+                coerced_rhs_list = rhs_value
+            return lhs_value in coerced_rhs_list
+
+        # --- 处理所有其他操作符 ---
+        # 3. 智能类型转换：对于非 `IN` 操作符，尝试将 RHS 的类型转换为 LHS 的类型。
+        # 这极大地提升了易用性，例如允许 `user.id == "123456"` 这样的写法，即使 `user.id` 是整数。
         if lhs_value is not None and rhs_value is not None:
             try:
-                # 特殊处理：如果左值为布尔型，尝试将右值也转为布尔型
+                # 特殊处理：如果左值为布尔型，尝试将右值也转为布尔型 ('true', '1', 'false', '0')
                 if isinstance(lhs_value, bool):
-                    if str(rhs_value).lower() in ('true', '1'):
-                        rhs_value = True
-                    elif str(rhs_value).lower() in ('false', '0'):
-                        rhs_value = False
+                    rhs_str = str(rhs_value).lower()
+                    if rhs_str in ('true', '1'): rhs_value = True
+                    elif rhs_str in ('false', '0'): rhs_value = False
+                # 否则，直接尝试用左值的类型来构造右值
                 else:
-                    coerced_rhs = type(lhs_value)(rhs_value)
-                    rhs_value = coerced_rhs
+                    rhs_value = type(lhs_value)(rhs_value)
             except (ValueError, TypeError):
                 # 转换失败，说明类型不兼容，多数情况下比较应为 False。
                 pass
 
         # 4. 执行比较
-        op = condition.operator.upper()
-        if op == '==' or op == 'IS':
+        # --- 相等性比较 ---
+        if op in ('==', 'IS', 'EQ'):
             return lhs_value == rhs_value
-        if op == '!=' or op == 'IS NOT':
+        if op in ('!=', 'IS NOT', 'NE'):
             return lhs_value != rhs_value
-        if op == 'CONTAINS':
-            return str(rhs_value) in str(lhs_value)
 
-        # 对于大小比较，如果类型不一致，直接返回 False 避免运行时错误。
+        # --- 字符串操作 ---
+        # 为确保健壮性，在进行字符串操作前，都转换为字符串类型。
+        lhs_str, rhs_str = str(lhs_value), str(rhs_value)
+        if op == 'CONTAINS':
+            return rhs_str in lhs_str
+        if op == 'STARTSWITH':
+            return lhs_str.startswith(rhs_str)
+        if op == 'ENDSWITH':
+            return lhs_str.endswith(rhs_str)
+        if op == 'MATCHES':
+            try:
+                return bool(re.search(rhs_str, lhs_str))
+            except re.error as e:
+                logger.warning(f"正则表达式错误 in MATCHES: '{rhs_str}', error: {e}")
+                return False
+
+        # --- 大小比较 ---
+        # 如果此时类型仍然不一致，大小比较没有意义，直接返回 False 以避免运行时错误。
         if type(lhs_value) != type(rhs_value):
             return False
 
-        if op == '>': return lhs_value > rhs_value
-        if op == '<': return lhs_value < rhs_value
-        if op == '>=': return lhs_value >= rhs_value
-        if op == '<=': return lhs_value <= rhs_value
+        if op in ('>', 'GT'): return lhs_value > rhs_value
+        if op in ('<', 'LT'): return lhs_value < rhs_value
+        if op in ('>=', 'GE'): return lhs_value >= rhs_value
+        if op in ('<=', 'LE'): return lhs_value <= rhs_value
 
+        logger.warning(f"执行器遇到未知的操作符: '{condition.operator}'")
         return False
 
     def _parse_literal(self, literal: Any) -> Any:
         """
-        将来自规则脚本的字面量字符串转换为对应的 Python 对象。
-        支持字符串（带引号）、布尔值、None 和数字。
+        将来自解析器的字面量（或字面量列表）转换为对应的 Python 对象。
+        支持: 字符串, 布尔, None, 数字, 以及这些类型的列表。
         """
+        # 如果是列表 (来自 'IN' 操作符), 递归地处理列表中的每一个元素。
+        if isinstance(literal, list):
+            return [self._parse_literal(item) for item in literal]
+
+        # 如果已经不是字符串（例如，来自测试），直接返回
         if not isinstance(literal, str):
-            return literal # 如果已经不是字符串（例如，来自测试），直接返回
+            return literal
 
+        # --- 单个值的解析 ---
         literal = literal.strip()
-
-        # 字符串字面量: "hello" or 'hello'
-        if (literal.startswith('"') and literal.endswith('"')) or \
-           (literal.startswith("'") and literal.endswith("'")):
-            return literal[1:-1]
 
         # 布尔和 null 字面量
         lit_lower = literal.lower()
@@ -173,22 +219,28 @@ class RuleExecutor:
         if lit_lower == 'false': return False
         if lit_lower in ('null', 'none'): return None
 
-        # 数字字面量
-        try:
-            return int(literal)
-        except ValueError:
+        # 数字字面量 (整数或浮点数)
+        # 必须先尝试匹配更具体的浮点数，再尝试整数
+        if '.' in literal:
             try:
                 return float(literal)
             except ValueError:
-                # 如果都不是，则将其视为一个无引号的字符串。
-                # 这允许 `user.name == Jules` 这样的写法。
-                return literal
+                pass # 不是浮点数，继续往下走
+        try:
+            return int(literal)
+        except ValueError:
+            # 如果以上都不是，则它就是一个普通的无引号字符串。
+            # 这允许 `user.name == Jules` 这样的写法。
+            return literal
 
     async def _execute_action(self, action: Action):
         """
-        通过动作映射表查找并执行指定的动作。
-        将映射表定义在此方法内部，可以确保在测试中 patch 的 mock 对象能够被正确使用。
+        根据动作名称，分派并执行相应的 `_action_*` 方法。
+
+        Args:
+            action (Action): 从 AST 中解析出的动作对象。
         """
+        # 动作映射表：将脚本中的动作名称（不区分大小写）映射到具体的实现方法。
         action_map = {
             "delete_message": self._action_delete_message,
             "reply": self._action_reply,
@@ -204,25 +256,30 @@ class RuleExecutor:
         action_name_lower = action.name.lower()
         if action_name_lower in action_map:
             action_func = action_map[action_name_lower]
-            # 直接将解析器提供的原始参数传递给动作函数。
-            # 具体的参数求值（如 set_var）应在动作函数内部处理。
+            # 直接将解析器提供的原始参数列表解包并传递给动作函数。
+            # 具体的参数求值（例如 `set_var` 中的表达式）应在各自的动作函数内部进行。
             await action_func(*action.args)
         else:
-            logger.warning(f"警告：在规则中发现未知动作 '{action.name}'")
+            logger.warning(f"警告：在规则中发现未知动作 '{action.name}'，将忽略该动作。")
 
     async def _resolve_path(self, path: str) -> Any:
         """
-        动态地从 PTB 上下文或数据库变量中获取值。
-        这是连接规则引擎和 Telegram 实时数据的桥梁，是系统的核心功能之一。
-        完全符合 FR 2.1.3 的设计要求。
+        动态地根据路径字符串，从 PTB 上下文或数据库中获取相应的值。
+        这是连接规则引擎与 Telegram 实时数据的核心桥梁。
 
         路径解析规则:
-        - `user.first_name` -> update.effective_user.first_name
-        - `message.text`    -> update.effective_message.text
-        - `vars.user.warnings` -> 从数据库查询该用户的 'warnings' 变量
-        - `vars.group.welcome_message` -> 从数据库查询该群组的 'welcome_message' 变量
-        - `user.is_admin` -> 调用 getChatMember API 进行实时检查
-        - `message.contains_url` -> 检查消息文本是否包含 URL
+        - **上下文变量**: `user.first_name` -> `update.effective_user.first_name`
+        - **上下文变量**: `message.text`    -> `update.effective_message.text`
+        - **数据库变量**: `vars.user.warnings` -> 从数据库查询该用户的 'warnings' 变量
+        - **数据库变量**: `vars.group.welcome_message` -> 从数据库查询该群组的 'welcome_message' 变量
+        - **计算型变量**: `user.is_admin` -> 调用 `getChatMember` API 进行实时检查
+        - **计算型变量**: `message.contains_url` -> 通过正则表达式检查消息文本是否包含 URL
+
+        Args:
+            path (str): 需要解析的变量路径。
+
+        Returns:
+            Any: 解析得到的值。如果路径无效或找不到值，则返回 `None`。
         """
         path_lower = path.lower()
 

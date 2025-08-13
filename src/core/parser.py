@@ -4,90 +4,100 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Any, Optional, Union
 
-# ------------------- 抽象语法树 (AST) 节点定义 ------------------- #
-# AST 是将规则脚本的文本形式，转换为程序可以理解的、结构化的对象表示。
-# 这使得后续的逻辑评估（在 Executor 中）变得简单和可靠。
+# =================== 抽象语法树 (AST) 节点定义 =================== #
+# AST (Abstract Syntax Tree) 是解析过程的核心产物。
+# 它将纯文本的规则脚本，转换成一种程序可以轻松理解和处理的、结构化的对象。
+# 这种分层结构使得后续的条件评估（在 Executor 中）和动作执行变得逻辑清晰、可靠。
 
-# --- 条件逻辑的 AST 节点 ---
-# 这部分节点用于表示 IF 语句中的复杂条件判断。
+# --- 条件逻辑 AST 节点 ---
+# 这部分节点专门用于表示 IF 语句中复杂的条件判断逻辑。
 
 @dataclass
 class Condition:
-    """表示一个基础条件，例如 `user.id == 12345`。"""
+    """
+    表示一个基础的比较条件，这是条件逻辑的最基本单元。
+    例如：`user.id == 12345` 或 `message.text contains "hello"`
+    """
     left: str      # 左操作数 (e.g., 'user.id')
-    operator: str  # 操作符 (e.g., '==')
-    right: Any     # 右操作数 (e.g., '12345')
+    operator: str  # 操作符 (e.g., '==', 'contains')
+    right: Any     # 右操作数 (e.g., 12345, 'hello', ['a', 'b'])
 
 @dataclass
 class NotCondition:
-    """表示对一个条件的 NOT (非) 运算。"""
+    """表示对一个条件的 NOT (逻辑非) 运算。"""
     condition: Union['AndCondition', 'OrCondition', 'Condition']
 
 @dataclass
 class AndCondition:
-    """表示由 AND (与) 连接的一系列条件。"""
+    """表示由 AND (逻辑与) 连接的一系列条件。"""
     conditions: List[Union['AndCondition', 'OrCondition', 'NotCondition', 'Condition']]
 
 @dataclass
 class OrCondition:
-    """表示由 OR (或) 连接的一系列条件。"""
+    """表示由 OR (逻辑或) 连接的一系列条件。"""
     conditions: List[Union['AndCondition', 'OrCondition', 'NotCondition', 'Condition']]
 
-# 定义一个类型别名，代表任何有效的条件节点。
+# ConditionNode 是一个类型别名，代表任何一个有效的条件节点。
+# 在类型提示中使用它可以增加代码的可读性。
 ConditionNode = Union[AndCondition, OrCondition, NotCondition, Condition]
 
 
-# --- 规则结构的 AST 节点 ---
-# 这部分节点用于表示整个规则的宏观结构，如 WHEN, IF, THEN, ELSE 等。
+# --- 规则结构 AST 节点 ---
+# 这部分节点用于表示整个规则的宏观结构，例如 WHEN, IF, THEN, ELSE 等。
 
 @dataclass
 class Action:
-    """表示一个要执行的动作，例如 `reply("hello")`。"""
+    """表示一个要执行的动作，例如 `reply("hello")` 或 `set_var('x', 1)`。"""
     name: str                        # 动作名称 (e.g., 'reply')
-    args: List[Any] = field(default_factory=list)  # 参数列表 (e.g., ['hello'])
+    args: List[Any] = field(default_factory=list)  # 动作的参数列表 (e.g., ['hello'])
 
 @dataclass
 class IfBlock:
-    """表示一个 IF 或 ELSE IF 块，包含其条件和动作列表。"""
-    condition: Optional[ConditionNode]  # 条件的AST。对于无条件的 WHEN-THEN 规则，可以为 None。
+    """表示一个 IF 或 ELSE IF 块，它包含一个条件和一系列动作。"""
+    condition: Optional[ConditionNode]  # 条件部分的 AST。对于无条件的 WHEN-THEN 规则，此项为 None。
     actions: List[Action] = field(default_factory=list)
 
 @dataclass
 class ElseBlock:
-    """表示最终的 ELSE 块及其动作列表。"""
+    """表示最终的 ELSE 块，它只包含一系列动作。"""
     actions: List[Action] = field(default_factory=list)
 
 @dataclass
 class ParsedRule:
     """
-    表示一个被完全解析的规则脚本的最终AST。
-    这是解析器的最终输出，包含了规则的所有信息，可以直接被 Executor 执行。
+    代表一个被完全解析的规则。
+    这是解析器的最终输出，它将整个规则脚本的所有信息（元数据、触发器、条件、动作）
+    都封装在一个结构化对象中，准备交给执行器（Executor）处理。
     """
     name: Optional[str] = "Untitled Rule"
     priority: int = 0
     when_event: Optional[str] = None
-    if_blocks: List[IfBlock] = field(default_factory=list)  # 存储所有 IF 和 ELSE IF 块
+    if_blocks: List[IfBlock] = field(default_factory=list)  # 存储所有的 IF 和 ELSE IF 块
     else_block: Optional[ElseBlock] = None
 
 
-# ------------------- 规则解析器类 ------------------- #
+# =================== 规则解析器类 =================== #
 
 class RuleParser:
     """
-    一个强大的规则语言解析器。它负责将纯文本的规则脚本转换为结构化的 `ParsedRule` AST。
+    一个强大的、用于规则脚本的解析器。
+    它负责将纯文本格式的规则脚本，通过词法分析和语法分析，转换为结构化的 `ParsedRule` AST。
     该解析器支持复杂的条件逻辑 (AND, OR, NOT)、括号优先级，以及完整的 IF/ELSE IF/ELSE/END 块。
     """
     def __init__(self, script: str):
-        # 预处理：按行分割，移除空行和注释行。
+        # 预处理：按行分割，并移除所有空行和注释行。
         self.lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith('#')]
         self.line_idx = 0  # 当前正在处理的行索引
 
     def parse(self) -> ParsedRule:
-        """主解析方法：将整个脚本解析成一个 ParsedRule AST。"""
+        """
+        主解析方法：将整个脚本解析成一个 ParsedRule AST。
+        这是一个高层调度方法，它按照规则的结构依次调用各个子解析方法。
+        """
         rule = ParsedRule()
-        self._parse_metadata(rule)  # 1. 解析元数据 (RuleName, priority)
-        self._parse_when(rule)      # 2. 解析 WHEN 事件
-        self._parse_if_else_structure(rule)  # 3. 解析核心的 IF-ELSE 结构
+        self._parse_metadata(rule)          # 1. 解析元数据 (RuleName, priority)
+        self._parse_when(rule)              # 2. 解析 WHEN 触发器
+        self._parse_if_else_structure(rule) # 3. 解析核心的 IF-ELSE 逻辑结构
         return rule
 
     def _parse_metadata(self, rule: ParsedRule):
@@ -208,35 +218,70 @@ class RuleParser:
 
         return Action(name=name, args=args)
 
-    # ------------------- 条件表达式的递归下降解析器 ------------------- #
-    # 这是解析器技术含量最高的部分。它将一个复杂的条件字符串
-    # (e.g., "user.is_admin AND (message.text == 'foo' OR NOT message.contains_url)")
-    # 分解成一个结构化的条件 AST，正确处理了 AND/OR 的优先级和括号。
+    # =================== 条件表达式的递归下降解析器 =================== #
+    # 这是解析器技术含量最高的部分。它采用经典的“递归下降”算法，
+    # 将一个复杂的条件字符串 (e.g., "user.is_admin AND (msg.text contains 'foo' OR NOT user.is_bot)")
+    # 分解成一个结构化的条件 AST，并能正确处理 AND/OR 的优先级和括号。
 
     def _parse_condition_string(self, condition_str: str) -> ConditionNode:
         """
         将条件字符串解析为条件AST的入口。
         """
-        # 1. 词法分析 (Tokenization): 将字符串分解成一个 token 列表。
-        # 这个正则表达式非常关键，它能识别出所有操作符、括号、变量路径和字面量。
-        # 添加了 'contains' 和 'is' 作为新的操作符。
-        tokens = re.findall(r'\(|\)|\w+(?:\.\w+)*|==|!=|>=|<=|>|<|contains|is|and|or|not|"[^"]*"|\'[^\']*\'|[\w\.\-]+', condition_str, re.IGNORECASE)
-        self.cond_tokens = tokens
+        # 1. 词法分析 (Tokenization): 将整个条件字符串分解成一个 token 列表。
+        # 这个正则表达式是实现语法的核心。它必须能识别出所有合法的语言元素：
+        # - 括号: ( ) { } ,
+        # - 变量路径: user.id, message.text
+        # - 运算符: ==, !=, >=, <=, >, <, contains, matches, startswith, endswith, in, is, and, or, not
+        # - Cloudflare 别名: eq, ne, gt, lt, ge, le
+        # - 字面量: "带引号的字符串", '带引号的字符串', 数字, true, false, null
+        operators = [
+            '==', '!=', '>=', '<=', '>', '<',
+            'contains', 'matches', 'startswith', 'endswith', 'in', 'is',
+            'eq', 'ne', 'gt', 'lt', 'ge', 'le',
+            'and', 'or', 'not'
+        ]
+        # 为了让 re.findall 优先匹配更长的操作符（例如 `==` 而不是 `=`），我们需要按长度降序排序
+        operators.sort(key=len, reverse=True)
+        op_pattern = '|'.join(re.escape(op) for op in operators)
+
+        # 完整的 Tokenizer 正则表达式
+        token_pattern_str = '|'.join([
+            r'\(|\)|\{|\}|,',           # 括号, 花括号, 逗号
+            r'\w+(?:\.\w+)*',         # 变量路径
+            r'"[^"]*"|\'[^\']*\'',     # 带引号的字符串
+            op_pattern,               # 所有操作符
+            r'[\w\.\-]+'              # 无引号的字面量和数字
+        ])
+
+        token_pattern = re.compile(token_pattern_str, re.IGNORECASE)
+
+        # 使用 findall 获取所有匹配的 token，并过滤掉空字符串
+        tokens = token_pattern.findall(condition_str)
+        self.cond_tokens = [token for token in tokens if token and token.strip()]
         self.cond_idx = 0
-        # 2. 语法分析 (Parsing): 从最高优先级的 OR 运算开始递归解析。
+
+        # 2. 语法分析 (Parsing): 从最低优先级的 OR 运算开始，递归地构建 AST。
         return self._parse_or()
 
     def _consume(self, expected_type: Optional[str] = None) -> str:
-        """消耗并返回下一个 token，可以选择性地检查其类型是否符合预期。"""
+        """消耗并返回当前 token，然后将指针向前移动一位。可以选择性地检查 token 类型是否符合预期。"""
+        if self.cond_idx >= len(self.cond_tokens):
+            if expected_type:
+                raise ValueError(f"语法错误：期望 token '{expected_type}'，但已到达条件末尾。")
+            raise ValueError("语法错误：意外的条件结尾。")
+
         token = self.cond_tokens[self.cond_idx]
         self.cond_idx += 1
+
         if expected_type and token.upper() != expected_type.upper():
-            raise ValueError(f"语法错误：期望 token '{expected_type}' 但得到 '{token}'")
+            raise ValueError(f"语法错误：期望 token '{expected_type}' 但得到 '{token}'。")
+
         return token
 
     def _peek(self) -> Optional[str]:
-        """查看下一个 token 但不消耗它，用于决定下一步的解析路径。"""
+        """查看下一个 token 但不消耗它。这对于决定下一步的解析路径至关重要（例如，判断循环是否继续）。"""
         if self.cond_idx < len(self.cond_tokens):
+            # 返回大写形式以进行不区分大小写的比较
             return self.cond_tokens[self.cond_idx].upper()
         return None
 
@@ -285,21 +330,53 @@ class RuleParser:
         return self._parse_base_condition() # 解析最高优先级的基础条件
 
     def _parse_base_condition(self) -> Condition:
-        """解析基础的 'LHS op RHS' 条件，例如 `user.id == 123`。这是递归的终点。"""
+        """
+        解析最基础的 `LHS op RHS` 条件。这是递归解析的终点。
+        这个方法现在也支持 `LHS in { val1, val2, ... }` 这种新的集合语法。
+        """
         left = self._consume()
         op = self._consume()
 
-        # 特殊处理 'IS NOT' 组合
+        # 特殊处理组合操作符 'IS NOT'
         if op.upper() == 'IS' and self._peek() == 'NOT':
             self._consume('NOT')  # 消耗 'NOT' token
-            op = 'IS NOT'         # 将操作符合并为 'IS NOT'
+            op = 'IS NOT'         # 将操作符合并为一个 token 'IS NOT'
 
-        right = self._consume()
+        # 对右操作数 (RHS) 进行解析
+        right: Any
+        if op.upper() == 'IN':
+            # --- 解析 `in` 操作符的集合语法 ---
+            self._consume('{')
+            values = []
+            # 循环直到遇到 '}'
+            if self._peek() != '}':
+                while True:
+                    # 解析集合中的每一个值
+                    val_token = self._consume()
+                    values.append(self._strip_quotes(val_token))
+                    # 如果下一个 token 是逗号，则消耗它并继续循环
+                    if self._peek() == ',':
+                        self._consume(',')
+                    # 如果是 '}'，说明集合结束
+                    elif self._peek() == '}':
+                        break
+                    else:
+                        raise ValueError(f"语法错误：在集合中期望得到 ',' 或 '}}'，但得到 '{self._peek()}'")
 
-        # 对右操作数进行预处理，去除可能存在的多余引号
-        if isinstance(right, str) and right.startswith("'") and right.endswith("'"):
-            right = right[1:-1]
-        if isinstance(right, str) and right.startswith('"') and right.endswith('"'):
-            right = right[1:-1]
+            self._consume('}') # 消耗最后的 '}'
+            right = values
+        else:
+            # --- 解析普通操作符的右侧值 ---
+            right_token = self._consume()
+            right = self._strip_quotes(right_token)
 
         return Condition(left=left, operator=op.upper(), right=right)
+
+    def _strip_quotes(self, value: str) -> str:
+        """一个辅助函数，用于剥离字符串两端可能存在的单引号或双引号。"""
+        if isinstance(value, str):
+            if value.startswith("'") and value.endswith("'"):
+                return value[1:-1]
+            if value.startswith('"') and value.endswith('"'):
+                return value[1:-1]
+        return value

@@ -34,7 +34,7 @@
 │       └── variable.py     # 状态变量模型
 └── tests/
     ├── test_parser.py      # 解析器单元测试
-    ├── test_executor.py    # 执行器单元测试 (当前存在问题)
+    ├── test_executor.py    # 执行器单元测试
     └── test_scheduler.py   # 调度器集成测试
 ```
 
@@ -60,8 +60,45 @@
 
 ---
 
-## 3. 规则语法示例
+## 3. 规则语法
 
+规则语言的核心是 `IF ... THEN ... END` 结构，它允许您根据特定条件执行动作。
+
+### 3.1. 条件语句 (`IF`)
+
+条件语句 (`IF`) 是规则的决策中心。一个条件由三部分组成：**变量**、**运算符**和**值**。
+
+```
+IF <变量> <运算符> <值>
+```
+
+-   **变量**: 代表事件中的动态数据，例如 `user.id` 或 `message.text`。
+-   **运算符**: 用于比较变量和值，例如 `==`, `contains`, `matches`。
+-   **值**: 您希望与变量进行比较的静态数据，例如数字 `12345` 或字符串 `"hello"`。
+
+您可以使用 `AND`, `OR`, `NOT` 将多个条件组合起来，并用括号 `()` 控制它们的优先级。
+
+### 3.2. 比较运算符
+
+为了提供最大的灵活性和易用性，引擎支持多种比较运算符，包括仿照 Cloudflare® Rules 的别名。
+
+| 类别 | 运算符 | 别名 | 描述 | 示例 |
+| :--- | :--- | :--- | :--- | :--- |
+| **相等性** | `==` | `is`, `eq` | **等于** | `user.id == 12345` |
+| | `!=` | `is not`, `ne` | **不等于** | `user.is_bot != true` |
+| **比较** | `>` | `gt` | **大于** | `vars.user.warnings > 5` |
+| | `<` | `lt` | **小于** | `message.forward_count < 2` |
+| | `>=` | `ge` | **大于等于** | `vars.group.members >= 100` |
+| | `<=` | `le` | **小于等于** | `user.karma <= 0` |
+| **字符串** | `contains` | | **包含子字符串** | `message.text contains "http"` |
+| | `startswith` | | **以...开头** | `message.text startswith "/cmd"` |
+| | `endswith` | | **以...结尾** | `user.username endswith "bot"` |
+| | `matches` | | **匹配正则表达式** | `message.text matches "^\d+$"` |
+| **集合** | `in` | | **是集合成员之一** | `user.id in {123, 456, 789}` |
+
+### 3.3. 语法示例
+
+**示例 1: 欢迎新成员**
 ```
 # 规则元数据：名称和优先级（可选，越高越先执行）
 RuleName: 欢迎新成员
@@ -78,6 +115,7 @@ THEN
     set_var('user.join_time', '2023-10-27')
 ```
 
+**示例 2: 使用高级运算符删除广告**
 ```
 # 规则元数据
 RuleName: 删除广告链接
@@ -85,13 +123,13 @@ RuleName: 删除广告链接
 # 触发器：当收到消息时
 WHEN message
 
-# 条件块：如果消息包含URL 并且 用户不是管理员
-IF message.contains_url == true AND user.is_admin == false
+# 条件块：如果消息包含 "http" 并且用户不是管理员，也不是白名单成员
+IF (message.text contains "http" OR message.text contains "www.") AND user.is_admin == false AND user.id not in {12345, 67890}
 THEN
     # 先删除消息，再发送警告
     delete_message()
     reply("请不要在本群发送链接！")
-    # 增加用户警告次数
+    # 增加用户警告次数 (这是一个原子操作)
     set_var('user.warnings', vars.user.warnings + 1)
 # 结束条件块
 END
