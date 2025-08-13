@@ -194,14 +194,14 @@ class RuleParser:
         if raw_args is not None:
             # 使用一个更健壮的正则表达式来分割参数，它可以正确处理带引号的字符串。
             arg_pattern = re.compile(r'''
-                # This pattern matches unquoted args, or args in double/single quotes
-                ([^\s,"']+) |  # 1: Unquoted, avoids quotes
-                "([^"]*)"    |  # 2: Double-quoted
-                '([^']*)'      # 3: Single-quoted
+                # 这个模式可以匹配无引号的参数，或者在双引号/单引号内的参数
+                ([^\s,"']+) |  # 1: 无引号, 避免匹配引号
+                "([^"]*)"    |  # 2: 双引号
+                '([^']*)'      # 3: 单引号
             ''', re.VERBOSE)
             for arg_match in arg_pattern.finditer(raw_args):
-                # The argument will be in one of the 3 capture groups
-                # The groups are mutually exclusive, so only one will have a value.
+                # 参数会落在三个捕获组中的一个。
+                # 这三个组是互斥的，因此只有一个会有值。
                 arg = next((g for g in arg_match.groups() if g is not None), None)
                 if arg is not None:
                     args.append(arg)
@@ -288,4 +288,9 @@ class RuleParser:
         left = self._consume()
         op = self._consume()
         right = self._consume()
+        # 对右操作数进行预处理，去除可能存在的多余引号
+        if isinstance(right, str) and right.startswith("'") and right.endswith("'"):
+            right = right[1:-1]
+        if isinstance(right, str) and right.startswith('"') and right.endswith('"'):
+            right = right[1:-1]
         return Condition(left=left, operator=op, right=right)

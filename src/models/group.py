@@ -13,6 +13,7 @@ class Group(Base):
     # 核心字段：Telegram 群组的唯一 chat ID。
     # 使用 BigInteger 以支持 Telegram 巨大的 ID 范围。
     # 这是主键，但不是自增的，因为它的值由 Telegram API 提供。
+    # `comment` 参数用于在数据库层面添加字段注释，便于数据库维护。
     id = Column(BigInteger, primary_key=True, autoincrement=False, comment="Telegram 群组的唯一 Chat ID")
 
     def __repr__(self):

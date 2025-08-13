@@ -22,6 +22,7 @@ class ExpressionEvaluator:
         Args:
             variable_resolver_func: 一个异步函数，负责解析变量路径并返回值。
                                   通常这是 Executor._resolve_path 方法。
+                                  这种依赖注入的设计，使得求值器可以独立于执行器进行测试。
         """
         self._resolve = variable_resolver_func
 
@@ -33,11 +34,11 @@ class ExpressionEvaluator:
         expression = expression.strip()
 
         # 简单的实现，只支持单个操作符。更复杂的求值器需要使用 Shunting-yard 等算法。
-        op = None
-        op_char = ''
-        if '+' in expression:
+        # 对于核心版，这个实现已经足够。
+        op_char = None
+        if ' + ' in expression:
             op_char = '+'
-        elif '-' in expression:
+        elif ' - ' in expression:
             op_char = '-'
 
         if op_char:
@@ -45,7 +46,7 @@ class ExpressionEvaluator:
             if len(parts) == 2:
                 lhs_str, rhs_str = parts
 
-                # 并发地解析左右两个操作数
+                # 顺序解析左右两个操作数
                 lhs = await self._evaluate_operand(lhs_str)
                 rhs = await self._evaluate_operand(rhs_str)
 
@@ -66,9 +67,14 @@ class ExpressionEvaluator:
                     if op_char == '+':
                         return lhs + rhs
                     else:  # op_char == '-'
-                        return lhs - rhs
+                        # 仅当两者都为数字时才支持减法
+                        if isinstance(lhs, (int, float)) and isinstance(rhs, (int, float)):
+                            return lhs - rhs
+                        else:
+                            logger.warning(f"表达式 '{expression}' 中的减法操作数类型不兼容。")
+                            return None
                 except TypeError:
-                    # 类型不匹配 (e.g., 5 - "hello")，安全回退。
+                    # 类型不匹配 (e.g., 5 + "hello")，安全回退。
                     logger.warning(f"表达式 '{expression}' 中存在类型错误。")
                     return None
 
@@ -80,15 +86,7 @@ class ExpressionEvaluator:
         异步地评估单个操作数。
         操作数可能是一个字面量（数字、字符串、null），也可能是一个需要解析的变量路径。
         """
-        # 尝试将操作数解析为字面量。
-        # 注意：这里不使用 _parse_literal，因为它无法区分无引号字符串和变量路径。
-        try:
-            return int(operand_str)
-        except ValueError:
-            try:
-                return float(operand_str)
-            except ValueError:
-                pass  # 不是数字
+        operand_str = operand_str.strip()
 
         # 检查字符串字面量
         if (operand_str.startswith('"') and operand_str.endswith('"')) or \
@@ -98,6 +96,21 @@ class ExpressionEvaluator:
         # 检查 null 字面量 (用于删除变量)
         if operand_str.lower() == 'null':
             return None
+
+        # 检查布尔值
+        if operand_str.lower() == 'true':
+            return True
+        if operand_str.lower() == 'false':
+            return False
+
+        # 尝试将操作数解析为数字字面量
+        try:
+            return int(operand_str)
+        except ValueError:
+            try:
+                return float(operand_str)
+            except ValueError:
+                pass  # 如果不是数字，则继续判断是否为变量
 
         # 如果不是任何类型的字面量，则假定它是一个变量路径，并进行解析。
         return await self._resolve(operand_str)

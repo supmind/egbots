@@ -3,6 +3,7 @@
 from sqlalchemy import Column, Integer, String, Text, BigInteger, ForeignKey
 from sqlalchemy.orm import relationship
 from src.models.base import Base
+from src.models.group import Group
 
 class Rule(Base):
     """
@@ -17,7 +18,7 @@ class Rule(Base):
     group_id = Column(BigInteger, ForeignKey('groups.id'), nullable=False, index=True, comment="关联的群组ID")
 
     # 规则的元数据，对应设计文档 FR 2.1.1
-    name = Column(String(255), nullable=False, comment="规则名称 (RuleName)")
+    name = Column(String(255), nullable=False, server_default="Untitled Rule", comment="规则名称 (RuleName)")
     priority = Column(Integer, default=0, nullable=False, comment="执行优先级 (priority)，值越大优先级越高")
 
     # 存储原始的、未经解析的规则脚本。
@@ -33,6 +34,5 @@ class Rule(Base):
 
 # 动态地向 Group 类添加反向关系。
 # 这使得我们可以通过一个 Group 实例，轻松访问其下所有的 Rule 实例 (例如 `my_group.rules`)。
-# 这种把关系定义分散在两个文件中的写法虽然可行，但将所有关系定义集中在模型类内部通常更清晰。
-from src.models.group import Group
+# `cascade="all, delete-orphan"` 确保当一个 Group 被删除时，其下所有关联的 Rule 也会被自动删除。
 Group.rules = relationship("Rule", order_by=Rule.id, back_populates="group", cascade="all, delete-orphan")

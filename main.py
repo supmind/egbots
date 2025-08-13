@@ -9,28 +9,35 @@ from sqlalchemy.orm import sessionmaker
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
-from telegram.ext import Application, MessageHandler, filters
-from src.bot.handlers import message_handler, scheduled_job_handler
+from telegram.ext import Application, MessageHandler, CommandHandler, ChatMemberHandler, filters, CallbackQueryHandler
+from src.bot.handlers import (
+    message_handler,
+    command_handler,
+    user_join_handler,
+    user_leave_handler,
+    edited_message_handler,
+    scheduled_job_handler
+)
 from src.models import Base, Rule
 from src.core.parser import RuleParser
 
-# Set up structured logging
+# 设置结构化日志
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-# Reduce APScheduler's verbose logging
+# 减少 APScheduler 的冗长日志
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 def setup_database(db_url: str):
-    """Initializes the database connection and creates tables if they don't exist."""
+    """初始化数据库连接并根据模型创建表。"""
     logger.info("正在设置数据库连接...")
     engine = create_engine(db_url)
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     logger.info("数据库设置完成。")
-    return Session() # Return an instance of the session
+    return Session()
 
 async def load_scheduled_rules(application: Application):
     """
@@ -106,15 +113,27 @@ async def main():
     logger.info("正在启动机器人应用...")
     application = Application.builder().token(token).build()
 
-    # 将数据库会话和调度器实例存入 bot_data，以便在 handler 中全局访问
+    # --- 全局上下文设置 ---
+    # 将数据库会话、调度器实例和规则缓存存入 bot_data，以便在 handler 中全局访问。
     application.bot_data['db_session'] = db_session
     application.bot_data['scheduler'] = scheduler
+    application.bot_data['rule_cache'] = {}  # 初始化规则缓存
 
-    # 在启动时加载数据库中已有的计划任务
+    # 在应用启动时加载数据库中已有的计划任务
     await load_scheduled_rules(application)
 
-    # 注册主消息处理器，处理所有非命令的文本消息
+    # --- 注册事件处理器 ---
+    logger.info("正在注册事件处理器...")
+    # 1. 命令处理器
+    application.add_handler(CommandHandler(filters.COMMAND, command_handler))
+    # 2. 消息处理器 (处理文本、加入/离开消息等)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, user_join_handler))
+    application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, user_leave_handler))
+    # 3. 编辑消息处理器
+    application.add_handler(MessageHandler(filters.EDITED, edited_message_handler))
+    # 4. 用户状态变化处理器 (更通用的方式)
+    application.add_handler(ChatMemberHandler(user_join_handler, ChatMemberHandler.CHAT_MEMBER))
 
     logger.info("机器人已启动并开始轮询更新。")
     await application.run_polling()
