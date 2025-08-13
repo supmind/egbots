@@ -4,3 +4,8 @@ sqlalchemy
 psycopg2-binary
 apscheduler
 python-dotenv
+
+# Testing Dependencies
+pytest
+pytest-asyncio
+pytest-mock

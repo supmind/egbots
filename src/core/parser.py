@@ -75,6 +75,10 @@ class ParsedRule:
     if_blocks: List[IfBlock] = field(default_factory=list)  # 存储所有的 IF 和 ELSE IF 块
     else_block: Optional[ElseBlock] = None
 
+    def __repr__(self) -> str:
+        return (f"ParsedRule(name='{self.name}', priority={self.priority}, event='{self.when_event}', "
+                f"if_blocks={len(self.if_blocks)}, has_else={self.else_block is not None})")
+
 
 # =================== 规则解析器类 =================== #
 
