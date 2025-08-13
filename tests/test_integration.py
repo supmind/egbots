@@ -115,6 +115,51 @@ async def test_set_and_read_various_variable_types(mock_update, mock_context, te
     mock_update.effective_message.delete.assert_called_once()
 
 
+# =================== Action Tests ===================
+
+async def test_ban_user_action(mock_update, mock_context, test_db_session_factory):
+    """测试 ban_user 动作是否能正确调用 bot 的 API。"""
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        db.add(Rule(
+            group_id=-1001,
+            name="Ban Rule",
+            script="""WHEN command WHERE command.name == 'ban' THEN { ban_user(12345, "test reason"); } END"""
+        ))
+        db.commit()
+
+    mock_update.message.text = "/ban"
+    await process_event("command", mock_update, mock_context)
+
+    mock_context.bot.ban_chat_member.assert_called_once_with(
+        chat_id=-1001,
+        user_id=12345
+    )
+
+async def test_mute_user_action(mock_update, mock_context, test_db_session_factory):
+    """测试 mute_user 动作是否能正确解析时长并调用 bot 的 API。"""
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        db.add(Rule(
+            group_id=-1001,
+            name="Mute Rule",
+            script="""WHEN command WHERE command.name == 'mute' THEN { mute_user("1h", 54321); } END"""
+        ))
+        db.commit()
+
+    mock_update.message.text = "/mute"
+    await process_event("command", mock_update, mock_context)
+
+    mock_context.bot.restrict_chat_member.assert_called_once()
+    _, kwargs = mock_context.bot.restrict_chat_member.call_args
+    assert kwargs['chat_id'] == -1001
+    assert kwargs['user_id'] == 54321
+    assert not kwargs['permissions'].can_send_messages
+    # 检查禁言的截止时间是否在未来大约1小时
+    assert isinstance(kwargs['until_date'], datetime)
+    assert (kwargs['until_date'] - datetime.now(timezone.utc)) > timedelta(minutes=59)
+
+
 # =================== Verification Flow Tests ===================
 
 async def test_user_join_triggers_verification(mock_update, mock_context, test_db_session_factory):

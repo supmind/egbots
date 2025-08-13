@@ -404,6 +404,120 @@ class RuleExecutor:
         if self.update.effective_message:
             await self.update.effective_message.reply_text(str(text))
 
+    @action("send_message")
+    async def send_message(self, text: Any):
+        """动作：在当前群组发送一条新消息。"""
+        if self.update.effective_chat:
+            await self.context.bot.send_message(
+                chat_id=self.update.effective_chat.id,
+                text=str(text)
+            )
+
+def _parse_duration(duration_str: str) -> Optional[timedelta]:
+    """将 '1m', '2h', '3d' 这样的字符串解析为 timedelta 对象。"""
+    if not isinstance(duration_str, str):
+        return None
+
+    match = re.match(r"(\d+)\s*([mhd])", duration_str.lower())
+    if not match:
+        return None
+
+    value, unit = int(match.group(1)), match.group(2)
+    if unit == 'm':
+        return timedelta(minutes=value)
+    elif unit == 'h':
+        return timedelta(hours=value)
+    elif unit == 'd':
+        return timedelta(days=value)
+    return None
+
+
+    @action("ban_user")
+    async def ban_user(self, user_id: Any = None, reason: str = ""):
+        """动作：永久封禁一个用户。"""
+        if not self.update.effective_chat:
+            return
+
+        target_user_id = user_id
+        if target_user_id is None:
+            if self.update.effective_message and self.update.effective_message.reply_to_message:
+                target_user_id = self.update.effective_message.reply_to_message.from_user.id
+            elif self.update.effective_user:
+                target_user_id = self.update.effective_user.id
+
+        if not target_user_id:
+            logger.warning("ban_user 动作无法确定目标用户ID。")
+            return
+
+        try:
+            await self.context.bot.ban_chat_member(
+                chat_id=self.update.effective_chat.id,
+                user_id=target_user_id
+            )
+            logger.info(f"用户 {target_user_id} 已在群组 {self.update.effective_chat.id} 中被封禁。原因: {reason}")
+        except Exception as e:
+            logger.error(f"封禁用户 {target_user_id} 失败: {e}")
+
+    @action("kick_user")
+    async def kick_user(self, user_id: Any = None):
+        """动作：将用户踢出群组（可重新加入）。"""
+        if not self.update.effective_chat:
+            return
+
+        target_user_id = user_id
+        if target_user_id is None:
+            if self.update.effective_message and self.update.effective_message.reply_to_message:
+                target_user_id = self.update.effective_message.reply_to_message.from_user.id
+            elif self.update.effective_user:
+                target_user_id = self.update.effective_user.id
+
+        if not target_user_id:
+            logger.warning("kick_user 动作无法确定目标用户ID。")
+            return
+
+        try:
+            # 踢出用户是通过 ban + unban 实现的
+            await self.context.bot.ban_chat_member(chat_id=self.update.effective_chat.id, user_id=target_user_id)
+            await self.context.bot.unban_chat_member(chat_id=self.update.effective_chat.id, user_id=target_user_id)
+            logger.info(f"用户 {target_user_id} 已从群组 {self.update.effective_chat.id} 中被踢出。")
+        except Exception as e:
+            logger.error(f"踢出用户 {target_user_id} 失败: {e}")
+
+    @action("mute_user")
+    async def mute_user(self, duration: str, user_id: Any = None):
+        """动作：禁言一个用户一段时间。"""
+        if not self.update.effective_chat:
+            return
+
+        target_user_id = user_id
+        if target_user_id is None:
+            if self.update.effective_message and self.update.effective_message.reply_to_message:
+                target_user_id = self.update.effective_message.reply_to_message.from_user.id
+            elif self.update.effective_user:
+                target_user_id = self.update.effective_user.id
+
+        if not target_user_id:
+            logger.warning("mute_user 动作无法确定目标用户ID。")
+            return
+
+        delta = _parse_duration(duration)
+        if not delta:
+            logger.warning(f"无效的时长格式: '{duration}'")
+            return
+
+        until_date = datetime.now(timezone.utc) + delta
+
+        try:
+            await self.context.bot.restrict_chat_member(
+                chat_id=self.update.effective_chat.id,
+                user_id=target_user_id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date
+            )
+            logger.info(f"用户 {target_user_id} 在群组 {self.update.effective_chat.id} 中已被禁言至 {until_date}。")
+        except Exception as e:
+            logger.error(f"禁言用户 {target_user_id} 失败: {e}")
+
     @action("set_var")
     async def set_var(self, variable_path: str, value: Any):
         """
