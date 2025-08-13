@@ -1,6 +1,6 @@
 import re
 import logging
-from typing import Any
+from typing import Any, Optional
 from sqlalchemy.orm import Session
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -37,54 +37,87 @@ class RuleExecutor:
 
     async def execute_rule(self, rule: ParsedRule):
         """
-        Executes a single parsed rule.
-
-        This involves evaluating the IF condition and then running the
-        actions in the THEN block if the condition is met.
+        Executes a parsed rule by evaluating its IF/ELSE IF/ELSE blocks.
+        It finds the first block whose condition is met, executes its actions,
+        and then stops.
         """
-        condition_met = await self._evaluate_condition(rule.if_condition)
-        if not condition_met:
-            return
+        block_executed = False
+        # Evaluate all the IF and ELSE IF blocks
+        for if_block in rule.if_blocks:
+            condition_met = await self._evaluate_ast_node(if_block.condition)
+            if condition_met:
+                logger.debug(f"Condition met for a block in rule '{rule.name}'. Executing actions.")
+                for action in if_block.actions:
+                    await self._execute_action(action)
+                block_executed = True
+                break # Exit after the first successful block
 
-        for action in rule.then_actions:
-            await self._execute_action(action)
+        # If no IF/ELSE IF block was executed, check for an ELSE block
+        if not block_executed and rule.else_block:
+            logger.debug(f"No preceding IF/ELSE IF conditions met. Executing ELSE block for rule '{rule.name}'.")
+            for action in rule.else_block.actions:
+                await self._execute_action(action)
 
-    async def _evaluate_condition(self, condition: str | None) -> bool:
+    async def _evaluate_ast_node(self, node: Optional[Any]) -> bool:
         """
-        Evaluates the IF condition string by parsing it, resolving its parts,
-        and performing a comparison. Supports '==' and '!='.
+        Recursively evaluates a condition AST node.
         """
-        if condition is None:
-            # A rule with no IF condition is always considered true.
+        if node is None:
+            # A block with no condition (e.g., simple WHEN...THEN) is always true.
             return True
 
-        # Regex to parse a simple condition: "LHS operator RHS"
-        match = re.match(r'^\s*([\w\.]+)\s*(==|!=)\s*(.*)\s*$', condition.strip())
-        if not match:
-            print(f"WARNING: Could not parse malformed condition: '{condition}'")
+        from src.core.parser import Condition, AndCondition, OrCondition, NotCondition
+
+        if isinstance(node, Condition):
+            return self._evaluate_base_condition(node)
+
+        if isinstance(node, AndCondition):
+            for cond in node.conditions:
+                if not await self._evaluate_ast_node(cond):
+                    return False
+            return True
+
+        if isinstance(node, OrCondition):
+            for cond in node.conditions:
+                if await self._evaluate_ast_node(cond):
+                    return True
             return False
 
-        lhs_path, operator, rhs_literal = match.groups()
+        if isinstance(node, NotCondition):
+            return not await self._evaluate_ast_node(node.condition)
 
-        lhs_value = self._resolve_path(lhs_path)
-        rhs_value = self._parse_literal(rhs_literal)
+        logger.warning(f"Unknown AST node type encountered: {type(node)}")
+        return False
+
+    def _evaluate_base_condition(self, condition: Any) -> bool:
+        """
+        Evaluates a simple, single Condition object (LHS op RHS).
+        """
+        lhs_value = self._resolve_path(condition.left)
+        rhs_value = self._parse_literal(condition.right)
 
         # Attempt to coerce the RHS value to the type of the LHS value for
         # more user-friendly comparisons (e.g., user.id == "12345").
         if lhs_value is not None and rhs_value is not None:
             try:
-                # Cast RHS to the type of LHS (e.g., int("123"))
                 coerced_rhs = type(lhs_value)(rhs_value)
                 rhs_value = coerced_rhs
             except (ValueError, TypeError):
-                # Coercion failed. They are different types, so they can't be
-                # equal. For '!=', this will work as expected.
+                # Coercion failed. They are different types.
                 pass
 
-        if operator == '==':
-            return lhs_value == rhs_value
-        elif operator == '!=':
-            return lhs_value != rhs_value
+        op = condition.operator
+        if op == '==': return lhs_value == rhs_value
+        if op == '!=': return lhs_value != rhs_value
+
+        # For other operators, ensure we don't compare across incompatible types
+        if type(lhs_value) != type(rhs_value):
+            return False
+
+        if op == '>': return lhs_value > rhs_value
+        if op == '<': return lhs_value < rhs_value
+        if op == '>=': return lhs_value >= rhs_value
+        if op == '<=': return lhs_value <= rhs_value
 
         return False
 

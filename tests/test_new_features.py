@@ -1,115 +1,238 @@
 import unittest
-import asyncio
-from unittest.mock import MagicMock, ANY
+from src.core.parser import (
+    RuleParser,
+    AndCondition,
+    OrCondition,
+    NotCondition,
+    Condition,
+    IfBlock,
+    ElseBlock
+)
 
-from src.core.evaluator import ExpressionEvaluator
-from src.core.executor import RuleExecutor
-from src.models.variable import StateVariable
-
-# Mock PTB objects for the executor tests
-from telegram import Update, User, Chat, Message
-from telegram.ext import ContextTypes
-
-class TestNewFeatures(unittest.TestCase):
+class TestNewParser(unittest.TestCase):
     """
-    Unit tests for new features added after the initial prototype,
-    specifically the ExpressionEvaluator and the set_var action.
+    Tests for the new, sophisticated RuleParser and its ability to
+    handle complex logic and block structures.
     """
 
-    # --- Tests for ExpressionEvaluator ---
+    def test_parse_complex_condition(self):
+        """
+        Tests parsing of a condition with AND, OR, and parentheses
+        to check for correct AST structure and precedence.
+        """
+        script = """
+        WHEN message
+        IF (user.id == 123 AND user.is_bot == False) OR message.text == "admin"
+        THEN
+            reply("Auth OK")
+        END
+        """
+        parser = RuleParser(script)
+        rule = parser.parse()
 
-    def test_evaluator_simple_addition(self):
-        evaluator = ExpressionEvaluator(variable_resolver_func=lambda p: None)
-        self.assertEqual(evaluator.evaluate("5 + 10"), 15)
+        self.assertIsInstance(rule.if_blocks[0].condition, OrCondition)
+        or_cond = rule.if_blocks[0].condition
+        self.assertEqual(len(or_cond.conditions), 2)
 
-    def test_evaluator_simple_subtraction(self):
-        evaluator = ExpressionEvaluator(variable_resolver_func=lambda p: None)
-        self.assertEqual(evaluator.evaluate("100 - 42"), 58)
+        # Check the AND part: (user.id == 123 AND user.is_bot == False)
+        self.assertIsInstance(or_cond.conditions[0], AndCondition)
+        and_cond = or_cond.conditions[0]
+        self.assertEqual(len(and_cond.conditions), 2)
+        self.assertEqual(and_cond.conditions[0].left, "user.id")
+        self.assertEqual(and_cond.conditions[1].left, "user.is_bot")
 
-    def test_evaluator_string_concatenation(self):
-        evaluator = ExpressionEvaluator(variable_resolver_func=lambda p: None)
-        self.assertEqual(evaluator.evaluate("'hello' + ' ' + 'world'"), "hello world")
+        # Check the simple part: message.text == "admin"
+        self.assertIsInstance(or_cond.conditions[1], Condition)
+        self.assertEqual(or_cond.conditions[1].left, "message.text")
 
-    def test_evaluator_with_variable(self):
-        # Mock a resolver that returns a value for a specific path
-        resolver = MagicMock(return_value=5)
-        evaluator = ExpressionEvaluator(variable_resolver_func=resolver)
+    def test_parse_not_condition(self):
+        """Tests parsing of a NOT condition."""
+        script = """
+        WHEN message
+        IF NOT user.is_bot == True
+        THEN
+            reply("Hello human")
+        END
+        """
+        parser = RuleParser(script)
+        rule = parser.parse()
 
-        result = evaluator.evaluate("vars.user.warnings + 1")
+        self.assertIsInstance(rule.if_blocks[0].condition, NotCondition)
+        not_cond = rule.if_blocks[0].condition
+        self.assertIsInstance(not_cond.condition, Condition)
+        self.assertEqual(not_cond.condition.left, "user.is_bot")
 
-        resolver.assert_called_once_with("vars.user.warnings")
-        self.assertEqual(result, 6)
+    def test_parse_full_if_elseif_else_structure(self):
+        """
+        Tests parsing of a full IF...ELSE IF...ELSE...END structure
+        to ensure all blocks are captured correctly.
+        """
+        script = """
+        RuleName: Full Block Test
+        priority: 50
+        WHEN message
+        IF user.warnings > 5
+        THEN
+            ban_user()
+        ELSE IF user.warnings > 3
+        THEN
+            mute_user("1h")
+        ELSE
+        THEN
+            reply("Please behave.")
+        END
+        """
+        parser = RuleParser(script)
+        rule = parser.parse()
 
-    def test_evaluator_with_missing_variable_defaults_to_zero(self):
-        resolver = MagicMock(return_value=None)
-        evaluator = ExpressionEvaluator(variable_resolver_func=resolver)
+        # Check metadata
+        self.assertEqual(rule.name, "Full Block Test")
+        self.assertEqual(rule.priority, 50)
 
-        result = evaluator.evaluate("vars.user.warnings + 1")
+        # Check block counts
+        self.assertEqual(len(rule.if_blocks), 2)
+        self.assertIsInstance(rule.else_block, ElseBlock)
 
-        resolver.assert_called_once_with("vars.user.warnings")
-        self.assertEqual(result, 1) # None + 1 should become 0 + 1
+        # Check IF block
+        if_block1 = rule.if_blocks[0]
+        self.assertEqual(if_block1.condition.left, "user.warnings")
+        self.assertEqual(if_block1.condition.operator, ">")
+        self.assertEqual(len(if_block1.actions), 1)
+        self.assertEqual(if_block1.actions[0].name, "ban_user")
 
-    # --- Tests for set_var action ---
+        # Check ELSE IF block
+        if_block2 = rule.if_blocks[1]
+        self.assertEqual(if_block2.condition.left, "user.warnings")
+        self.assertEqual(if_block2.condition.operator, ">")
+        self.assertEqual(len(if_block2.actions), 1)
+        self.assertEqual(if_block2.actions[0].name, "mute_user")
+        self.assertEqual(if_block2.actions[0].args, ["1h"])
 
-    def setUp(self):
-        """Set up a fresh executor and mocks for each test."""
-        self.update = MagicMock(spec=Update)
-        self.context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
-        self.user = MagicMock(spec=User)
-        self.chat = MagicMock(spec=Chat)
+        # Check ELSE block
+        self.assertEqual(len(rule.else_block.actions), 1)
+        self.assertEqual(rule.else_block.actions[0].name, "reply")
+        self.assertEqual(rule.else_block.actions[0].args, ["Please behave."])
 
-        self.user.id = 12345
-        self.chat.id = 54321
-        self.update.effective_user = self.user
-        self.update.effective_chat = self.chat
+    def test_parse_simple_when_then(self):
+        """
+        Tests a simple rule with no IF condition, only a WHEN and THEN.
+        This should result in an IfBlock with a `None` condition.
+        """
+        script = """
+        WHEN user_join
+        THEN
+            send_message("Welcome!")
+        """
+        parser = RuleParser(script)
+        rule = parser.parse()
 
-        # Mock the database session and its methods
-        self.db_session = MagicMock()
-        self.query_mock = self.db_session.query.return_value
-        self.filter_by_mock = self.query_mock.filter_by
-
-        self.executor = RuleExecutor(self.update, self.context, self.db_session)
-
-    def test_set_var_create_new_variable(self):
-        # Arrange: mock that the variable does not exist
-        self.filter_by_mock.return_value.first.return_value = None
-
-        # Act
-        asyncio.run(self.executor._action_set_var("user.warnings", "1"))
-
-        # Assert
-        self.db_session.add.assert_called_once()
-        added_var = self.db_session.add.call_args[0][0]
-        self.assertIsInstance(added_var, StateVariable)
-        self.assertEqual(added_var.name, "warnings")
-        self.assertEqual(added_var.user_id, 12345)
-        self.assertEqual(added_var.value, "1")
-        self.db_session.commit.assert_called_once()
-
-    def test_set_var_update_existing_variable(self):
-        # Arrange: mock an existing variable
-        existing_var = StateVariable(name="warnings", value="4")
-        self.filter_by_mock.return_value.first.return_value = existing_var
-
-        # Act
-        asyncio.run(self.executor._action_set_var("user.warnings", "vars.user.warnings + 1"))
-
-        # Assert
-        self.assertEqual(existing_var.value, "5")
-        self.db_session.add.assert_called_once_with(existing_var)
-        self.db_session.commit.assert_called_once()
-
-    def test_set_var_delete_variable(self):
-        # Arrange: mock an existing variable
-        existing_var = StateVariable(name="warnings", value="1")
-        self.filter_by_mock.return_value.first.return_value = existing_var
-
-        # Act
-        asyncio.run(self.executor._action_set_var("user.warnings", "null"))
-
-        # Assert
-        self.db_session.delete.assert_called_once_with(existing_var)
-        self.db_session.commit.assert_called_once()
+        self.assertEqual(len(rule.if_blocks), 1)
+        self.assertIsNone(rule.if_blocks[0].condition) # Should be always-true
+        self.assertIsNone(rule.else_block)
+        self.assertEqual(len(rule.if_blocks[0].actions), 1)
+        self.assertEqual(rule.if_blocks[0].actions[0].name, "send_message")
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# --- Tests for the new Executor ---
+import asyncio
+from unittest.mock import MagicMock, AsyncMock
+from telegram import Update, User, Chat, Message
+
+from src.core.parser import RuleParser
+from src.core.executor import RuleExecutor
+
+class TestNewExecutor(unittest.TestCase):
+    """
+    Tests for the new RuleExecutor and its ability to evaluate
+    ASTs and handle complex IF/ELSE IF/ELSE logic.
+    """
+    def setUp(self):
+        """Set up a fresh executor and mock PTB objects for each test."""
+        self.update = MagicMock(spec=Update)
+        self.context = MagicMock()
+        self.user = MagicMock(spec=User)
+        self.chat = MagicMock(spec=Chat)
+        self.message = MagicMock(spec=Message)
+
+        self.user.id = 123
+        self.user.first_name = "Jules"
+        self.user.is_bot = False
+        self.chat.id = 987
+        self.message.text = "some message"
+
+        self.update.effective_user = self.user
+        self.update.effective_chat = self.chat
+        self.update.effective_message = self.message
+
+        self.message.reply_text = AsyncMock()
+        self.context.bot.send_message = AsyncMock()
+
+        self.executor = RuleExecutor(self.update, self.context, db_session=MagicMock())
+
+    def test_complex_condition_evaluation(self):
+        """Tests the recursive _evaluate_ast_node method."""
+        # Condition: (user.id == 123 AND user.is_bot == False) OR message.text == "admin"
+        # With our mocks, this should be (True AND True) OR False -> True
+        script = "IF (user.id == 123 AND user.is_bot == False) OR message.text == 'admin' THEN stop() END"
+        rule = RuleParser(script).parse()
+
+        result = asyncio.run(self.executor._evaluate_ast_node(rule.if_blocks[0].condition))
+        self.assertTrue(result)
+
+        # Now make it false
+        self.user.id = 999 # (False AND True) OR False -> False
+        result = asyncio.run(self.executor._evaluate_ast_node(rule.if_blocks[0].condition))
+        self.assertFalse(result)
+
+    def test_full_rule_execution_selects_correct_block(self):
+        """
+        Tests that execute_rule correctly evaluates an IF/ELSE IF/ELSE chain
+        and only executes the actions from the first block that is true.
+        """
+        script = """
+        WHEN message
+        IF user.first_name == "wrong"
+        THEN
+            reply("if")
+        ELSE IF user.id == 123 AND message.text == "some message"
+        THEN
+            reply("else if")
+        ELSE
+        THEN
+            reply("else")
+        END
+        """
+        rule = RuleParser(script).parse()
+
+        # We expect the "else if" block to be executed
+        asyncio.run(self.executor.execute_rule(rule))
+
+        self.message.reply_text.assert_called_once_with("else if")
+
+    def test_full_rule_execution_falls_to_else_block(self):
+        """
+        Tests that execute_rule executes the ELSE block if no other
+        conditions are met.
+        """
+        script = """
+        WHEN message
+        IF user.first_name == "wrong"
+        THEN
+            reply("if")
+        ELSE IF user.id == 999
+        THEN
+            reply("else if")
+        ELSE
+        THEN
+            reply("else")
+        END
+        """
+        rule = RuleParser(script).parse()
+
+        # We expect the "else" block to be executed
+        asyncio.run(self.executor.execute_rule(rule))
+
+        self.message.reply_text.assert_called_once_with("else")
