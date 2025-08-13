@@ -10,7 +10,9 @@ from sqlalchemy import (
     BigInteger,
     ForeignKey,
     UniqueConstraint,
+    DateTime,
 )
+from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.engine import Engine
 
@@ -110,6 +112,27 @@ class StateVariable(Base):
         """提供一个清晰的、可调试的对象表示形式，并明确指出变量的作用域。"""
         scope = f"user={self.user_id}" if self.user_id else "group"
         return f"<StateVariable(name='{self.name}', scope={scope}, group_id={self.group_id})>"
+
+
+class Verification(Base):
+    """
+    模型类：存储一个待处理的用户入群验证请求。
+    """
+    __tablename__ = 'verifications'
+
+    # 复合主键
+    user_id = Column(BigInteger, primary_key=True, comment="待验证用户的ID")
+    group_id = Column(BigInteger, primary_key=True, comment="用户尝试加入的群组ID")
+
+    correct_answer = Column(String(255), nullable=False, comment="当前验证问题的正确答案")
+    attempts_made = Column(Integer, nullable=False, default=0, comment="用户已尝试的次数")
+
+    # 时间戳，用于处理超时
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False,
+                        comment="验证记录创建时间")
+
+    def __repr__(self):
+        return f"<Verification(user_id={self.user_id}, group_id={self.group_id}, attempts={self.attempts_made})>"
 
 
 # ==================== 数据库初始化函数 ====================

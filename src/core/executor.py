@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Dict, Callable, Coroutine
 
 from sqlalchemy.orm import Session
-from telegram import Update, ChatPermissions
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from src.core.parser import ParsedRule, Action, Condition, AndCondition, OrCondition, NotCondition
@@ -319,6 +319,57 @@ class RuleExecutor:
             )
         except Exception as e:
             logger.error(f"执行 'mute_user' 失败: {e}")
+
+    @action("start_verification")
+    async def start_verification(self):
+        """
+        动作：开始一个通用的用户验证流程。
+        1. 永久禁言用户。
+        2. 发送一个带有按钮的消息，引导用户去私聊机器人以完成验证。
+        """
+        if not self.update.effective_user or not self.update.effective_chat:
+            return
+
+        user_to_verify = self.update.effective_user
+        chat_id = self.update.effective_chat.id
+        bot_username = self.context.bot.username
+
+        # 1. 永久禁言用户
+        try:
+            await self.mute_user(user_id=user_to_verify.id)
+            logger.info(f"用户 {user_to_verify.id} 在群组 {chat_id} 中被禁言以进行验证。")
+        except Exception as e:
+            logger.error(f"为验证禁言用户 {user_to_verify.id} 失败: {e}")
+            return
+
+        # 2. 发送带有验证按钮的消息
+        # 构建一个 deep-linking URL，将群组和用户信息传递给 /start 命令
+        payload = f"verify_{chat_id}_{user_to_verify.id}"
+        verification_url = f"https://t.me/{bot_username}?start={payload}"
+
+        keyboard = [
+            [InlineKeyboardButton("➡️ 点击这里开始验证", url=verification_url)]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        text = (
+            f"欢迎, {user_to_verify.mention_html()}!\n\n"
+            "为确保本群质量，您需要完成一个简单的验证才能发言。请点击下方按钮与我私聊以完成验证。"
+        )
+
+        try:
+            await self.send_message(text)
+            # The above call uses `send_message`, which is another action. We need to call the PTB method directly
+            # to attach the keyboard.
+            await self.context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"发送验证消息到群组 {chat_id} 失败: {e}")
+
 
     @action("schedule_action")
     async def schedule_action(self, duration_str: str, action_script: str):

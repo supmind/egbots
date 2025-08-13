@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from telegram.ext import Application, MessageHandler, CommandHandler, ChatMemberHandler, filters
+from telegram.ext import Application, MessageHandler, CommandHandler, ChatMemberHandler, filters, CallbackQueryHandler
 
 # --- 内部模块导入 ---
 from src.database import init_database, get_session_factory, Rule
@@ -28,6 +28,8 @@ from src.bot.handlers import (
     photo_handler,
     video_handler,
     document_handler,
+    start_handler,
+    verification_callback_handler,
 )
 
 # ==================== 日志配置 ====================
@@ -160,6 +162,12 @@ async def main():
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     # 成员状态变化处理器
     application.add_handler(ChatMemberHandler(user_join_handler, ChatMemberHandler.CHAT_MEMBER))
+
+    # --- 新增：验证流程处理器 ---
+    # 处理 /start verify_... 命令
+    application.add_handler(CommandHandler("start", start_handler))
+    # 处理用户点击答案按钮的回调
+    application.add_handler(CallbackQueryHandler(verification_callback_handler))
 
     # --- 8. 启动机器人 ---
     logger.info("机器人已完成启动，开始轮询接收更新...")

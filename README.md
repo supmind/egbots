@@ -110,6 +110,7 @@
 | `set_var`| `set_var('user.warnings', vars.user.warnings + 1)` | 设置或修改一个持久化变量。 |
 | `stop` | `stop()` | 停止处理后续规则。 |
 | `schedule_action`| `schedule_action("5m", "reply('提醒')")` | 在指定延迟后执行一个动作。 |
+| `start_verification`| `start_verification()` | 对触发规则的用户启动人机验证流程。|
 
 ### 3.5. 语法示例
 
@@ -170,6 +171,21 @@ THEN
 
     # (可选) 发送一条操作成功的确认消息
     reply("操作成功！")
+END
+```
+
+**入群验证**
+```
+RuleName: 新用户入群验证
+priority: 1000 # 最高优先级
+
+# 触发器：当有新用户加入时
+WHEN user_join
+
+# 动作:
+THEN
+    # 对新用户启动验证流程
+    start_verification()
 END
 ```
 

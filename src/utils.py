@@ -1,7 +1,9 @@
 # src/utils.py
 import logging
+import io
 from contextlib import contextmanager
 from sqlalchemy.orm import Session, sessionmaker
+from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
@@ -29,3 +31,46 @@ def session_scope(session_factory: sessionmaker) -> Session:
     finally:
         session.close()
         logger.debug("数据库会话已关闭。")
+
+
+def generate_math_image(problem: str) -> io.BytesIO:
+    """
+    根据给定的数学问题字符串，生成一张图片。
+
+    Args:
+        problem: 例如 "12 + 34" 的数学问题字符串。
+
+    Returns:
+        一个包含 PNG 图片数据的 BytesIO 流，可直接用于发送。
+    """
+    # 设置图片尺寸和背景色
+    width, height = 200, 100
+    bg_color = (255, 255, 255) # 白色
+
+    # 创建图片
+    img = Image.new('RGB', (width, height), color=bg_color)
+    draw = ImageDraw.Draw(img)
+
+    # 尝试加载一个常见的开源字体
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 40)
+    except IOError:
+        # 如果找不到字体，则使用 Pillow 的默认字体
+        logger.warning("找不到 DejaVuSans.ttf 字体，将使用默认字体。")
+        font = ImageFont.load_default()
+
+    # 计算文本尺寸以使其居中
+    text_bbox = draw.textbbox((0, 0), problem, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    position = ((width - text_width) / 2, (height - text_height) / 2)
+
+    # 在图片上绘制文本
+    draw.text(position, problem, fill=(0, 0, 0), font=font) # 黑色字体
+
+    # 将图片保存到内存中的字节流
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0) # 重置流的指针到开头
+
+    return img_byte_arr

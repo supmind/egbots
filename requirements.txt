@@ -9,3 +9,6 @@ python-dotenv
 pytest
 pytest-asyncio
 pytest-mock
+
+# Image Generation
+Pillow

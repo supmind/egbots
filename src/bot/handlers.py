@@ -1,14 +1,19 @@
 # src/bot/handlers.py
 
 import logging
-from telegram import Update
+import random
+from datetime import datetime, timedelta
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import ContextTypes
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError
 
-from src.utils import session_scope
+
+from src.utils import session_scope, generate_math_image
 from src.core.parser import RuleParser
 from src.core.executor import RuleExecutor, StopRuleProcessing
-from src.database import Rule
+from src.database import Rule, Verification
 
 logger = logging.getLogger(__name__)
 
@@ -224,3 +229,207 @@ async def scheduled_action_handler(context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"执行延迟动作 (job_id: {job.id}) 时发生严重错误: {e}", exc_info=True)
+
+
+# =================== 验证流程处理器 ===================
+
+async def _send_verification_challenge(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE, db_session):
+    """一个辅助函数，用于生成并向用户发送验证问题。"""
+    # 1. 生成数学问题
+    num1 = random.randint(10, 50)
+    num2 = random.randint(10, 50)
+    correct_answer = num1 + num2
+    problem_text = f"{num1} + {num2} = ?"
+
+    # 2. 生成答案选项，确保正确答案在其中
+    options = {correct_answer}
+    while len(options) < 4:
+        options.add(random.randint(20, 100))
+
+    shuffled_options = random.sample(list(options), 4)
+
+    # 3. 更新或创建数据库记录
+    verification = db_session.query(Verification).filter_by(user_id=user_id, group_id=chat_id).first()
+    if verification:
+        verification.correct_answer = str(correct_answer)
+        verification.attempts_made += 1
+    else:
+        verification = Verification(
+            user_id=user_id,
+            group_id=chat_id,
+            correct_answer=str(correct_answer),
+            attempts_made=1
+        )
+        db_session.add(verification)
+
+    db_session.commit()
+
+    # 4. 创建内联键盘
+    keyboard = []
+    for option in shuffled_options:
+        callback_data = f"verify_{chat_id}_{user_id}_{option}"
+        keyboard.append(InlineKeyboardButton(str(option), callback_data=callback_data))
+
+    reply_markup = InlineKeyboardMarkup([keyboard])
+
+    # 5. 生成并发送图片
+    image_stream = generate_math_image(problem_text)
+    await context.bot.send_photo(
+        chat_id=user_id,
+        photo=image_stream,
+        caption="请在15分钟内回答以下问题以完成验证：",
+        reply_markup=reply_markup
+    )
+
+    # 6. 设置超时任务
+    job_id = f"verify_timeout_{chat_id}_{user_id}"
+    context.job_queue.run_once(
+        verification_timeout_handler,
+        timedelta(minutes=15),
+        chat_id=user_id,
+        data={'group_id': chat_id, 'user_id': user_id},
+        name=job_id
+    )
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理用户通过 deep-linking URL 发起的 /start 命令，开始验证流程。
+    URL 格式: https://t.me/YourBot?start=verify_{group_id}_{user_id}
+    """
+    if not update.effective_message or not context.args:
+        return
+
+    payload = context.args[0]
+    if not payload.startswith("verify_"):
+        return
+
+    try:
+        _, group_id_str, user_id_str = payload.split('_')
+        group_id = int(group_id_str)
+        user_id = int(user_id_str)
+    except (ValueError, IndexError):
+        logger.warning(f"无效的 apyload: {payload}")
+        return
+
+    # 验证发起此命令的用户是否就是被验证的用户
+    if update.effective_user.id != user_id:
+        await update.message.reply_text("错误：您不能为其他用户进行验证。")
+        return
+
+    session_factory: sessionmaker = context.bot_data.get('session_factory')
+    with session_scope(session_factory) as db_session:
+        await _send_verification_challenge(user_id, group_id, context, db_session)
+
+
+async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
+    """处理验证超时的任务。"""
+    job_data = context.job.data
+    group_id = job_data['group_id']
+    user_id = job_data['user_id']
+    logger.info(f"用户 {user_id} 在群组 {group_id} 的验证已超时。")
+    # 这里的逻辑等同于一次回答错误，所以我们可以复用/调用相同的处理逻辑
+    # 为简化，我们直接踢出用户
+    try:
+        await context.bot.kick_chat_member(chat_id=group_id, user_id=user_id)
+        await context.bot.send_message(chat_id=user_id, text=f"您在群组 {group_id} 的验证已超时，已被移出群组。")
+    except Exception as e:
+        logger.error(f"验证超时后踢出用户 {user_id} 失败: {e}")
+
+    session_factory: sessionmaker = context.bot_data.get('session_factory')
+    with session_scope(session_factory) as db_session:
+        db_session.query(Verification).filter_by(user_id=user_id, group_id=group_id).delete()
+
+
+async def verification_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理用户点击验证问题答案按钮的回调。
+    """
+    # TODO:
+    # 1. 解析回调数据 (callback_data)
+    # 2. 检查答案是否正确
+    # 3. 如果正确:
+    #    a. 解除用户在群组的禁言
+    #    b. 删除数据库中的验证记录
+    #    c. 发送成功消息
+    # 4. 如果错误:
+    #    a. 增加尝试次数
+    #    b. 如果次数 < 3, 发送新的问题
+    #    c. 如果次数 >= 3, 踢出用户并删除验证记录
+    query = update.callback_query
+    await query.answer() # 必须先应答回调
+    logger.info(f"收到来自用户 {query.from_user.id} 的验证回调: {query.data}")
+    await query.edit_message_text(text=f"您选择了: {query.data}")
+    query = update.callback_query
+    await query.answer()
+
+    # 1. 解析回调数据
+    try:
+        _, group_id_str, user_id_str, answer = query.data.split('_')
+        group_id = int(group_id_str)
+        user_id = int(user_id_str)
+    except (ValueError, IndexError):
+        logger.warning(f"无效的回调数据: {query.data}")
+        await query.edit_message_text(text="发生错误，请重试。")
+        return
+
+    # 验证点击按钮的用户是否就是被验证的用户
+    if query.from_user.id != user_id:
+        await context.bot.answer_callback_query(query.id, text="错误：您不能为其他用户进行验证。", show_alert=True)
+        return
+
+    session_factory: sessionmaker = context.bot_data.get('session_factory')
+    with session_scope(session_factory) as db_session:
+        verification = db_session.query(Verification).filter_by(user_id=user_id, group_id=group_id).first()
+
+        if not verification:
+            await query.edit_message_text(text="验证已过期或不存在。")
+            return
+
+        # 2. 取消超时任务
+        job_id = f"verify_timeout_{group_id}_{user_id}"
+        jobs = context.job_queue.get_jobs_by_name(job_id)
+        for job in jobs:
+            job.schedule_removal()
+
+        # 3. 检查答案
+        if answer == verification.correct_answer:
+            # 答案正确
+            try:
+                # 解除禁言 - 恢复所有默认群组权限
+                permissions = ChatPermissions(
+                    can_send_messages=True,
+                    can_send_media_messages=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_change_info=False,
+                    can_invite_users=True,
+                    can_pin_messages=False,
+                )
+                await context.bot.restrict_chat_member(
+                    chat_id=group_id,
+                    user_id=user_id,
+                    permissions=permissions
+                )
+                await query.edit_message_text(text="✅ 验证成功！您现在可以在群组中发言了。")
+                logger.info(f"用户 {user_id} 在群组 {group_id} 中通过了验证。")
+                # 从数据库中删除验证记录
+                db_session.delete(verification)
+            except Exception as e:
+                logger.error(f"为用户 {user_id} 解除禁言失败: {e}")
+                await query.edit_message_text(text="验证成功，但在解除禁言时发生错误。请联系管理员。")
+        else:
+            # 答案错误
+            if verification.attempts_made >= 3:
+                try:
+                    await context.bot.kick_chat_member(chat_id=group_id, user_id=user_id)
+                    await query.edit_message_text(text="❌ 验证失败次数过多，您已被移出群组。")
+                    logger.info(f"用户 {user_id} 因验证失败次数过多被踢出群组 {group_id}。")
+                    db_session.delete(verification)
+                except Exception as e:
+                    logger.error(f"踢出用户 {user_id} 失败: {e}")
+                    await query.edit_message_text(text="验证失败，但在移除您时发生错误。")
+            else:
+                # 还有尝试机会，发送新问题
+                await query.edit_message_text(text=f"回答错误！您还有 {3 - verification.attempts_made} 次机会。正在为您生成新问题...")
+                await _send_verification_challenge(user_id, group_id, context, db_session)
