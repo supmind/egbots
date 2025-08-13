@@ -62,9 +62,60 @@
 
 ## 3. 规则语法
 
-规则语言的核心是 `IF ... THEN ... END` 结构，它允许您根据特定条件执行动作。
+规则语言的核心是 `WHEN ... IF ... THEN ... END` 结构，它允许您根据特定条件执行动作。
 
-### 3.1. 条件语句 (`IF`)
+### 3.1. 触发器 (`WHEN`)
+`WHEN` 关键字定义了规则的触发时机。以下是当前支持的事件类型：
+
+| 触发器 | 描述 |
+| :--- | :--- |
+| `message` | 当任何用户发送文本消息时触发。 |
+| `command` | 当用户发送一个命令 (如 `/start`) 时触发。 |
+| `user_join` | 当一个或多个新用户加入群组时触发。 |
+| `user_leave` | 当一个用户离开或被移出群组时触发。 |
+| `photo` | 当用户发送一张图片时触发。 |
+| `video` | 当用户发送一个视频时触发。 |
+| `document` | 当用户发送一个文件时触发。 |
+| `edited_message` | 当一条消息被编辑时触发。 |
+| `schedule("...")` | 根据指定的 [Cron 表达式](https://crontab.guru/) 定时触发。 |
+
+### 3.2. 可用变量
+在 `IF` 条件中，你可以使用多种变量来获取事件的上下文信息。
+
+#### 3.2.1. 用户变量 (`user.*`)
+| 变量 | 类型 | 描述 |
+| :--- | :--- | :--- |
+| `user.id` | 整数 | 用户的唯一 Telegram ID。 |
+| `user.first_name` | 字符串 | 用户的名字。 |
+| `user.last_name` | 字符串 | 用户的姓氏 (可选)。 |
+| `user.username` | 字符串 | 用户的用户名 (可选)。 |
+| `user.is_bot` | 布尔 | 用户是否为机器人。 |
+| `user.is_admin` | 布尔 | 用户是否为群管理员或创建者 (实时检查)。 |
+
+#### 3.2.2. 消息变量 (`message.*`)
+| 变量 | 类型 | 描述 |
+| :--- | :--- | :--- |
+| `message.text` | 字符串 | 消息的文本内容。 |
+| `message.caption` | 字符串 | 媒体消息的标题/说明文字。 |
+| `message.photo` | PhotoSize | 图片对象。**注意**: 此变量自动指向最大尺寸的图片。 |
+| `message.photo.width`| 整数 | 图片宽度。 |
+| `message.photo.height`| 整数 | 图片高度。 |
+| `message.photo.file_id`| 字符串 | 图片文件ID。 |
+| `message.video` | Video | 视频对象。 |
+| `message.video.duration`| 整数 | 视频时长 (秒)。 |
+| `message.video.file_name`| 字符串 | 视频文件名。 |
+| `message.document`| Document | 文件对象。 |
+| `message.document.file_name`| 字符串 | 文件名。 |
+| `message.document.mime_type`| 字符串 | 文件的 MIME 类型。 |
+| `message.contains_url`| 布尔 | 消息文本是否包含 URL (实时计算)。 |
+
+#### 3.2.3. 状态变量 (`vars.*`)
+| 变量 | 类型 | 描述 |
+| :--- | :--- | :--- |
+| `vars.user.*` | 任意 | 读取该用户在当前群组的自定义变量。 |
+| `vars.group.*` | 任意 | 读取当前群组的自定义变量。 |
+
+### 3.3. 条件语句 (`IF`)
 
 条件语句 (`IF`) 是规则的决策中心。一个条件由三部分组成：**变量**、**运算符**和**值**。
 
@@ -78,7 +129,7 @@ IF <变量> <运算符> <值>
 
 您可以使用 `AND`, `OR`, `NOT` 将多个条件组合起来，并用括号 `()` 控制它们的优先级。
 
-### 3.2. 比较运算符
+### 3.4. 比较运算符
 
 为了提供最大的灵活性和易用性，引擎支持多种比较运算符，包括仿照 Cloudflare® Rules 的别名。
 
@@ -132,6 +183,22 @@ THEN
     # 增加用户警告次数 (这是一个原子操作)
     set_var('user.warnings', vars.user.warnings + 1)
 # 结束条件块
+END
+```
+
+**示例 3: 自动删除大尺寸图片**
+```
+RuleName: 删除大图片
+priority: 5
+
+# 触发器：当收到图片时
+WHEN photo
+
+# 条件：如果图片宽度或高度超过 2000 像素，并且发送者不是管理员
+IF (message.photo.width > 2000 OR message.photo.height > 2000) AND user.is_admin == false
+THEN
+    delete_message()
+    reply("您发送的图片尺寸过大，已被自动删除。")
 END
 ```
 

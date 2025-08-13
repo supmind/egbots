@@ -334,5 +334,45 @@ class TestNewKeywordExecution(AsyncTestCase):
         mock_action.assert_called_once()
         mock_action.reset_mock()
 
+    @patch('src.core.executor.RuleExecutor._action_reply', new_callable=AsyncMock)
+    def test_media_variable_resolution(self, mock_action):
+        """测试媒体特定变量是否能被正确解析。"""
+        # 1. 准备：创建一个包含所有媒体类型的模拟消息
+        # 照片：模拟一个包含多个尺寸的元组，最后一个是最大的
+        photo_size_1 = MagicMock(width=100, height=100, file_id="photo_id_100")
+        photo_size_2 = MagicMock(width=500, height=500, file_id="photo_id_500")
+        self.update.effective_message.photo = (photo_size_1, photo_size_2)
+
+        # 视频
+        video_mock = MagicMock(duration=15, file_name="test_video.mp4", file_id="video_id_123")
+        self.update.effective_message.video = video_mock
+
+        # 文件
+        doc_mock = MagicMock(file_name="report.pdf", mime_type="application/pdf", file_id="doc_id_123")
+        self.update.effective_message.document = doc_mock
+
+        # 标题
+        self.update.effective_message.caption = "This is a test caption"
+
+        # 2. 执行和断言
+        # 测试 `message.photo` 是否返回最大尺寸的图片
+        self.run_async(self._run_test_with_script("message.photo.width == 500", mock_action))
+        mock_action.reset_mock()
+        self.run_async(self._run_test_with_script("message.photo.file_id == 'photo_id_500'", mock_action))
+        mock_action.reset_mock()
+
+        # 测试视频变量
+        self.run_async(self._run_test_with_script("message.video.duration > 10", mock_action))
+        mock_action.reset_mock()
+
+        # 测试文件变量
+        self.run_async(self._run_test_with_script("message.document.file_name contains 'report'", mock_action))
+        mock_action.reset_mock()
+
+        # 测试标题变量
+        self.run_async(self._run_test_with_script("message.caption == 'This is a test caption'", mock_action))
+        mock_action.reset_mock()
+
+
 if __name__ == '__main__':
     unittest.main()

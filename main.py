@@ -17,7 +17,10 @@ from src.bot.handlers import (
     user_leave_handler,
     edited_message_handler,
     scheduled_job_handler,
-    reload_rules_handler
+    reload_rules_handler,
+    photo_handler,
+    video_handler,
+    document_handler,
 )
 from src.models import Base, Rule
 from src.core.parser import RuleParser
@@ -136,7 +139,11 @@ async def main():
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, user_leave_handler))
     # 3. 编辑消息处理器
     application.add_handler(MessageHandler(filters.EDITED, edited_message_handler))
-    # 4. 用户状态变化处理器 (更通用的方式)
+    # 4. 媒体消息处理器
+    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    application.add_handler(MessageHandler(filters.VIDEO, video_handler))
+    application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
+    # 5. 用户状态变化处理器 (更通用的方式)
     application.add_handler(ChatMemberHandler(user_join_handler, ChatMemberHandler.CHAT_MEMBER))
 
     logger.info("机器人已启动并开始轮询更新。")

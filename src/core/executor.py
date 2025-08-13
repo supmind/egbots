@@ -235,33 +235,18 @@ class RuleExecutor:
         """
         动态地根据路径字符串，从 PTB 上下文或数据库中获取相应的值。
         这是连接规则引擎与 Telegram 实时数据的核心桥梁。
-
-        路径解析规则:
-        - **上下文变量**: `user.first_name` -> `update.effective_user.first_name`
-        - **上下文变量**: `message.text`    -> `update.effective_message.text`
-        - **数据库变量**: `vars.user.warnings` -> 从数据库查询该用户的 'warnings' 变量
-        - **数据库变量**: `vars.group.welcome_message` -> 从数据库查询该群组的 'welcome_message' 变量
-        - **计算型变量**: `user.is_admin` -> 调用 `getChatMember` API 进行实时检查
-        - **计算型变量**: `message.contains_url` -> 通过正则表达式检查消息文本是否包含 URL
-
-        Args:
-            path (str): 需要解析的变量路径。
-
-        Returns:
-            Any: 解析得到的值。如果路径无效或找不到值，则返回 `None`。
         """
         path_lower = path.lower()
 
-        # 1. 处理 `vars.` 命名空间下的持久化变量
+        # --- 优先级 1: 持久化变量 ---
         if path_lower.startswith('vars.'):
+            # ... (代码不变，为简洁省略)
             parts = path.split('.')
             if len(parts) != 3:
                 logger.warning(f"无效的变量路径: {path}")
                 return None
-
             _, scope, var_name = parts
             query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
-
             if scope.lower() == 'user':
                 if not self.update.effective_user: return None
                 query = query.filter_by(user_id=self.update.effective_user.id)
@@ -270,10 +255,8 @@ class RuleExecutor:
             else:
                 logger.warning(f"无效的变量作用域 '{scope}' in path: {path}")
                 return None
-
             variable = query.first()
             if variable:
-                # 尝试进行智能类型转换
                 val = variable.value
                 try: return int(val)
                 except (ValueError, TypeError): pass
@@ -281,31 +264,20 @@ class RuleExecutor:
                 except (ValueError, TypeError): pass
                 if val.lower() in ('true', 'false'): return val.lower() == 'true'
                 return val
-            return None  # 变量未找到时返回 None
+            return None
 
-        # 2. 处理需要计算的“虚拟变量”
+        # --- 优先级 2: 计算型变量 ---
         if path_lower == 'user.is_admin':
-            if not (self.update.effective_chat and self.update.effective_user):
-                return False
-
-            # --- 性能优化：使用请求级缓存 ---
-            # 为避免在单个事件处理中重复调用 get_chat_member API，我们使用缓存。
+            if not (self.update.effective_chat and self.update.effective_user): return False
             cache_key = f"is_admin_{self.update.effective_user.id}"
-            if cache_key in self.per_request_cache:
-                return self.per_request_cache[cache_key]
-
+            if cache_key in self.per_request_cache: return self.per_request_cache[cache_key]
             try:
-                member = await self.context.bot.get_chat_member(
-                    chat_id=self.update.effective_chat.id,
-                    user_id=self.update.effective_user.id
-                )
+                member = await self.context.bot.get_chat_member(chat_id=self.update.effective_chat.id, user_id=self.update.effective_user.id)
                 is_admin = member.status in ['creator', 'administrator']
-                # 将结果存入缓存
                 self.per_request_cache[cache_key] = is_admin
                 return is_admin
             except Exception as e:
                 logger.error(f"获取用户 {self.update.effective_user.id} 权限失败: {e}")
-                # 即使失败，也缓存结果，避免在同一请求中重试失败的API调用
                 self.per_request_cache[cache_key] = False
                 return False
 
@@ -313,26 +285,43 @@ class RuleExecutor:
             if not (self.update.effective_message and self.update.effective_message.text): return False
             return bool(re.search(r'https?://\S+', self.update.effective_message.text))
 
-        # 3. 回退到直接访问 PTB 上下文对象属性
-        obj = self.update
-        # 路径别名处理
-        if path_lower.startswith('user.'):
-            obj = self.update.effective_user
-            path = path[len('user.'):]
-        elif path_lower.startswith('message.'):
-            obj = self.update.effective_message
-            path = path[len('message.'):]
+        # --- 优先级 3: 上下文变量 (user.*, message.*, etc.) ---
+        base_obj = self.update
+        path_to_resolve = path
 
-        # 安全地遍历路径
-        parts = path.split('.')
-        for part in parts:
-            if obj is None: return None
+        if path_lower.startswith('user.'):
+            base_obj = self.update.effective_user
+            path_to_resolve = path[len('user.'):]
+
+        elif path_lower.startswith('message.'):
+            base_obj = self.update.effective_message
+            path_to_resolve = path[len('message.'):]
+
+            # 在 message 命名空间内，特殊处理 photo
+            if path_to_resolve.lower().startswith('photo'):
+                if not (base_obj and base_obj.photo):
+                    return None
+
+                photo_obj = base_obj.photo[-1]
+                photo_sub_path = path_to_resolve[len('photo'):].lstrip('.')
+
+                if not photo_sub_path:
+                    return photo_obj
+
+                # 更新基础对象和路径，以便后续的通用解析
+                base_obj = photo_obj
+                path_to_resolve = photo_sub_path
+
+        # --- 通用属性解析 ---
+        # 基于上面确定的 base_obj 和 path_to_resolve，安全地解析属性
+        current_obj = base_obj
+        for part in path_to_resolve.split('.'):
+            if current_obj is None: return None
             try:
-                obj = getattr(obj, part)
+                current_obj = getattr(current_obj, part)
             except AttributeError:
-                # logger.warning(f"无法在路径 '{path}' 中解析属性 '{part}'。")
                 return None
-        return obj
+        return current_obj
 
     # ------------------- 动作实现 (Action Implementations) ------------------- #
     # 每个方法都直接利用 PTB context/update 对象来执行 Telegram API 调用，

@@ -167,6 +167,17 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     """处理消息编辑事件。"""
     await process_event("edited_message", update, context)
 
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理图片消息。"""
+    await process_event("photo", update, context)
+
+async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理视频消息。"""
+    await process_event("video", update, context)
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理文件消息。"""
+    await process_event("document", update, context)
 
 # --- 计划任务的处理器 ---
 
