@@ -378,10 +378,6 @@ class RuleExecutor:
         logger.warning(f"Unknown function called in expression: '{expr.action_name}'")
         return None
 
-    async def _execute_action_legacy(self, action_node: Any):
-        """Kept for reference, will be removed."""
-        pass
-
     async def _resolve_path(self, path: str) -> Any:
         """
         Resolves a variable path (e.g., 'user.id', 'vars.group.my_var', 'command.arg[0]').

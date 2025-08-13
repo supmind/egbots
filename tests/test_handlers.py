@@ -12,34 +12,6 @@ from src.utils import session_scope
 
 pytestmark = pytest.mark.asyncio
 
-@pytest.fixture(scope="function")
-def test_db_session_factory():
-    """Provides a session_factory for a clean in-memory SQLite DB."""
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    yield factory
-    Base.metadata.drop_all(engine)
-
-@pytest.fixture
-def mock_update():
-    """Fixture for a mock Update."""
-    update = MagicMock()
-    update.effective_chat.id = -1001
-    update.effective_user.id = 123
-    update.message.reply_text = AsyncMock()
-    return update
-
-@pytest.fixture
-def mock_context(test_db_session_factory):
-    """Fixture for a mock Context, pre-filled with essential data."""
-    context = MagicMock()
-    context.bot_data = {
-        'rule_cache': {},
-        'session_factory': test_db_session_factory
-    }
-    return context
-
 
 async def test_reload_rules_by_admin(mock_update, mock_context):
     """Tests that an admin can successfully reload the rule cache."""

@@ -235,13 +235,6 @@ async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"执行计划任务 (规则ID: {rule_id}) 时发生严重错误: {e}", exc_info=True)
 
-async def scheduled_action_handler(context: ContextTypes.DEFAULT_TYPE):
-    # 此动作在新的语言引擎下已失效，需要重新设计。暂时保留但功能可能不完整。
-    job = context.job
-    if not job: return
-    group_id, user_id, action_script = job.kwargs.get('group_id'), job.kwargs.get('user_id'), job.kwargs.get('action_script')
-    logger.warning(f"正在执行延迟动作 '{action_script}'，但此功能在v2引擎下可能无法正常工作。")
-    # ... 原有实现逻辑可能需要一个能解析单行动作的迷你解析器 ...
 
 async def _send_verification_challenge(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE, db_session):
     num1, num2 = random.randint(10, 50), random.randint(10, 50)
