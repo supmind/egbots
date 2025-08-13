@@ -349,13 +349,18 @@ async def scheduled_action_handler(context: ContextTypes.DEFAULT_TYPE):
     由 APScheduler 调用的处理器，用于执行由 `schedule_action` 调度的单个延迟动作。
     """
     job = context.job
-    if not job: return
+    if not job:
+        return
 
+    # 从 job 的参数中获取所需信息
     group_id = job.kwargs.get('group_id')
     user_id = job.kwargs.get('user_id')
-    action_name = job.kwargs.get('action_name')
-    action_args = job.kwargs.get('action_args', [])
-    logger.info(f"正在执行延迟动作 '{action_name}' for group {group_id}")
+    action_script = job.kwargs.get('action_script')
+    logger.info(f"正在执行延迟动作 '{action_script}' for group {group_id}")
+
+    if not action_script:
+        logger.warning(f"延迟任务 {job.id} 缺少 'action_script' 参数。")
+        return
 
     session_factory: sessionmaker = context.bot_data.get('session_factory')
     if not session_factory:
@@ -363,21 +368,23 @@ async def scheduled_action_handler(context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        # 在处理器中解析动作脚本
+        # 注意：这里的 RuleParser 实例仅用于调用其内部的 _parse_action 方法
+        parsed_action = RuleParser(action_script)._parse_action(action_script)
+        if not parsed_action:
+            raise ValueError("无法解析动作脚本")
+
         with session_scope(session_factory) as db_session:
+            # 创建一个模拟的上下文，以便 RuleExecutor 可以工作
             mock_update = MockUpdate(chat_id=group_id, user_id=user_id)
             executor = RuleExecutor(mock_update, context, db_session)
 
-            # The action methods on the executor no longer have the `_action_` prefix
-            # due to the @action decorator refactoring.
-            action_method = getattr(executor, action_name.lower(), None)
-
-            if action_method and callable(action_method):
-                await action_method(*action_args)
-            else:
-                logger.warning(f"尝试执行一个未知的延迟动作: '{action_name}'")
+            # 使用 RuleExecutor 的内部方法来执行已解析的动作
+            # 这是最直接和重用代码的方式
+            await executor._execute_action(parsed_action)
 
     except Exception as e:
-        logger.error(f"执行延迟动作 (job_id: {job.id}) 时发生严重错误: {e}", exc_info=True)
+        logger.error(f"执行延迟动作 (job_id: {job.id}, script: '{action_script}') 时发生严重错误: {e}", exc_info=True)
 
 
 # =================== 验证流程处理器 ===================
@@ -476,11 +483,13 @@ async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
     group_id = job_data['group_id']
     user_id = job_data['user_id']
     logger.info(f"用户 {user_id} 在群组 {group_id} 的验证已超时。")
-    # 这里的逻辑等同于一次回答错误，所以我们可以复用/调用相同的处理逻辑
-    # 为简化，我们直接踢出用户
+
     try:
-        await context.bot.kick_chat_member(chat_id=group_id, user_id=user_id)
+        # 使用 ban + unban 的方式来踢出用户，这允许他们重新加入
+        await context.bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+        await context.bot.unban_chat_member(chat_id=group_id, user_id=user_id)
         await context.bot.send_message(chat_id=user_id, text=f"您在群组 {group_id} 的验证已超时，已被移出群组。")
+        logger.info(f"用户 {user_id} 因验证超时被从群组 {group_id} 踢出。")
     except Exception as e:
         logger.error(f"验证超时后踢出用户 {user_id} 失败: {e}")
 
@@ -493,17 +502,6 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
     """
     处理用户点击验证问题答案按钮的回调。
     """
-    # TODO:
-    # 1. 解析回调数据 (callback_data)
-    # 2. 检查答案是否正确
-    # 3. 如果正确:
-    #    a. 解除用户在群组的禁言
-    #    b. 删除数据库中的验证记录
-    #    c. 发送成功消息
-    # 4. 如果错误:
-    #    a. 增加尝试次数
-    #    b. 如果次数 < 3, 发送新的问题
-    #    c. 如果次数 >= 3, 踢出用户并删除验证记录
     query = update.callback_query
     # 必须先应答回调，以防止客户端显示加载状态
     await query.answer()
@@ -542,17 +540,26 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
         if answer == verification.correct_answer:
             # 答案正确
             try:
-                # 解除禁言 - 恢复所有默认群组权限
-                permissions = ChatPermissions(
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_polls=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True,
-                    can_change_info=False,
-                    can_invite_users=True,
-                    can_pin_messages=False,
-                )
+                # 动态获取群组的默认权限来解除禁言
+                permissions = None
+                try:
+                    chat = await context.bot.get_chat(chat_id=group_id)
+                    if chat.permissions:
+                        permissions = chat.permissions
+                        logger.info(f"成功获取群组 {group_id} 的动态权限设置。")
+                except Exception as e:
+                    logger.warning(f"无法获取群组 {group_id} 的动态权限，将使用默认权限进行回退。错误: {e}")
+
+                if not permissions:
+                    # 回退到一组安全的默认权限
+                    permissions = ChatPermissions(
+                        can_send_messages=True,
+                        can_add_web_page_previews=True,
+                        can_change_info=False,
+                        can_invite_users=True,
+                        can_pin_messages=False,
+                    )
+
                 await context.bot.restrict_chat_member(
                     chat_id=group_id,
                     user_id=user_id,
@@ -569,7 +576,9 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
             # 答案错误
             if verification.attempts_made >= 3:
                 try:
-                    await context.bot.kick_chat_member(chat_id=group_id, user_id=user_id)
+                    # 使用 ban + unban 的方式来踢出用户
+                    await context.bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+                    await context.bot.unban_chat_member(chat_id=group_id, user_id=user_id)
                     await query.edit_message_text(text="❌ 验证失败次数过多，您已被移出群组。")
                     logger.info(f"用户 {user_id} 因验证失败次数过多被踢出群组 {group_id}。")
                     db_session.delete(verification)

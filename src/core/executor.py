@@ -391,25 +391,31 @@ class RuleExecutor:
 
     @action("schedule_action")
     async def schedule_action(self, duration_str: str, action_script: str):
+        """
+        动作：在指定的延迟后，调度执行一个单行的动作脚本。
+        """
         duration = self._parse_duration(duration_str)
-        if not duration: return logger.warning(f"无法解析时长: '{duration_str}'")
-        from src.core.parser import RuleParser
-        try:
-            parsed_action = RuleParser(action_script)._parse_action(action_script)
-            if not parsed_action: raise ValueError("无效的动作格式")
-        except Exception as e:
-            return logger.warning(f"无法解析被调度的动作 '{action_script}': {e}")
+        if not duration:
+            return logger.warning(f"无法解析时长: '{duration_str}'")
+
+        # 为了解耦，我们不在这里解析动作脚本，而是将其作为字符串直接传递给调度器。
+        # 解析的工作将由最终的处理器完成。
+        # 同时，为了避免循环导入，我们使用字符串路径来指定 APScheduler 的目标函数。
+        handler_path = 'src.bot.handlers:scheduled_action_handler'
+
         scheduler = self.context.bot_data.get('scheduler')
-        if not scheduler: return logger.error("在 bot_data 中未找到调度器实例。")
+        if not scheduler:
+            return logger.error("在 bot_data 中未找到调度器实例。")
+
         run_date = datetime.now(timezone.utc) + duration
-        from src.bot.handlers import scheduled_action_handler
         scheduler.add_job(
-            scheduled_action_handler, 'date', run_date=run_date,
+            handler_path,
+            'date',
+            run_date=run_date,
             kwargs={
                 'group_id': self.update.effective_chat.id,
                 'user_id': self.update.effective_user.id if self.update.effective_user else None,
-                'action_name': parsed_action.name,
-                'action_args': parsed_action.args
+                'action_script': action_script  # 传递完整的动作脚本
             }
         )
 

@@ -51,12 +51,13 @@ def generate_math_image(problem: str) -> io.BytesIO:
     img = Image.new('RGB', (width, height), color=bg_color)
     draw = ImageDraw.Draw(img)
 
-    # 尝试加载一个常见的开源字体
+    # 尝试加载一个通过依赖安装的 Noto CJK 字体，以确保中文字符能正确显示。
+    # 我们优先使用一个已知路径的系统字体，如果失败，则回退到默认字体。
+    font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 40)
+        font = ImageFont.truetype(font_path, 40, index=0)
     except IOError:
-        # 如果找不到字体，则使用 Pillow 的默认字体
-        logger.warning("找不到 DejaVuSans.ttf 字体，将使用默认字体。")
+        logger.warning(f"无法从 '{font_path}' 加载字体，将使用 Pillow 的默认字体。请确认 'fonts-noto-cjk' 软件包已安装。")
         font = ImageFont.load_default()
 
     # 计算文本尺寸以使其居中
