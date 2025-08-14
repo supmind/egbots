@@ -506,7 +506,7 @@ class RuleExecutor:
                 return logger.error(f"为变量 '{variable_path}' 序列化值时失败: {e}。值: {value}")
 
             if not variable:
-                variable = StateVariable(group_id=group_id, user_id=user_id, name=var_name)
+                variable = StateVariable(group_id=group_id, user_id=db_user_id, name=var_name)
             variable.value = serialized_value
             self.db_session.add(variable)
             logger.info(f"持久化变量 '{variable_path}' 已被设为: {serialized_value}")
@@ -544,29 +544,34 @@ class RuleExecutor:
         if not target_user_id:
             return logger.warning("unmute_user 动作无法确定目标用户ID。")
 
-        # 授予所有普通成员通常拥有的权限
-        permissions = ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_invite_users=True,
-        )
-
+        chat_id = self.update.effective_chat.id
         try:
+            # 优先使用群组的默认权限，以保持行为一致性
+            chat = await self.context.bot.get_chat(chat_id=chat_id)
+            permissions = chat.permissions
+            if not permissions:
+                # 如果群组没有特定权限设置，则提供一个理智的默认值
+                permissions = ChatPermissions(
+                    can_send_messages=True,
+                    can_send_audios=True,
+                    can_send_documents=True,
+                    can_send_photos=True,
+                    can_send_videos=True,
+                    can_send_video_notes=True,
+                    can_send_voice_notes=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_invite_users=True,
+                )
+
             await self.context.bot.restrict_chat_member(
-                chat_id=self.update.effective_chat.id,
+                chat_id=chat_id,
                 user_id=target_user_id,
                 permissions=permissions
             )
             logger.info(
-                f"用户 {target_user_id} 在群组 {self.update.effective_chat.id} 中已被解除禁言 "
+                f"用户 {target_user_id} 在群组 {chat_id} 中已被解除禁言 "
                 f"(由 {self._get_initiator_id()} 发起)。"
             )
         except Exception as e:
