@@ -145,8 +145,10 @@ class VariableResolver:
             member = await self.context.bot.get_chat_member(chat_id=self.update.effective_chat.id, user_id=self.update.effective_user.id)
             is_admin = member.status in ['creator', 'administrator']
             self.per_request_cache[cache_key] = is_admin
+            logger.debug(f"用户 {self.update.effective_user.id} 在群组 {self.update.effective_chat.id} 的状态为 '{member.status}'，is_admin: {is_admin}")
             return is_admin
-        except Exception:
+        except Exception as e:
+            logger.error(f"无法获取用户 {self.update.effective_user.id} 的管理员状态: {e}", exc_info=True)
             return False
 
     def _resolve_from_update_object(self, path: str) -> Any:
