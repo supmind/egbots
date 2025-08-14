@@ -16,36 +16,38 @@ from .default_rules import DEFAULT_RULES
 
 logger = logging.getLogger(__name__)
 
-# =================== 计划任务模拟对象 ===================
-# 计划任务（由 APScheduler 触发）没有用户交互，因此缺少实时的 Update 对象。
-# 为了能复用 RuleExecutor，我们创建一系列模拟（Mock）对象，
-# 它们只提供 RuleExecutor 运行所必需的最少信息（例如群组ID）。
+# =================== 计划任务模拟对象 (Mock Objects for Scheduled Jobs) ===================
+# 计划任务（由 APScheduler 在后台触发）与普通的用户消息不同，它没有实时的用户交互，
+# 因此缺少一个包含完整上下文的 `Update` 对象。
+# 为了能够复用为普通事件设计的 `RuleExecutor`，我们创建了一系列轻量级的模拟（Mock）对象。
+# 这些对象只提供了 `RuleExecutor` 运行所必需的最少信息（例如，`effective_chat.id`），
+# 从而让同一套规则执行逻辑可以同时服务于实时事件和计划任务。
 
 class MockChat:
-    """模拟的 Telegram 聊天对象，仅包含 ID。"""
+    """模拟一个 Telegram Chat 对象，仅包含 ID 属性。"""
     def __init__(self, chat_id: int):
         self.id = chat_id
 
 class MockUser:
-    """模拟的 Telegram 用户对象，仅包含 ID。"""
+    """模拟一个 Telegram User 对象，仅包含 ID 属性。"""
     def __init__(self, user_id: int):
         self.id = user_id
 
 class MockUpdate:
-    """模拟的 Telegram 更新对象，为计划任务提供一个最小化的上下文。"""
+    """模拟一个 Telegram Update 对象，为计划任务提供一个最小化的上下文。"""
     def __init__(self, chat_id: int, user_id: int = None):
         self.effective_chat = MockChat(chat_id)
         self.effective_user = MockUser(user_id) if user_id else None
-        self.effective_message = None # 计划任务没有关联消息
+        self.effective_message = None # 计划任务没有关联的触发消息
 
-# =================== 核心辅助函数 ===================
+# =================== 核心辅助函数 (Core Helpers) ===================
 
 def _seed_rules_if_new_group(group_id: int, db_session: Session):
     """
-    检查一个群组是否为新加入的。如果是，则为其预置一套默认规则。
-    这是一个提升用户初次体验的关键功能。
+    检查一个群组是否为新加入的。如果是，则为其在数据库中创建记录，并预置一套默认规则。
+    这是一个提升用户初次体验的关键功能，确保机器人在加入任何群组后都能“开箱即用”。
     """
-    from src.database import Group  # 延迟导入以避免循环依赖
+    from src.database import Group  # 延迟导入以避免可能的循环依赖
     group_exists = db_session.query(Group).filter_by(id=group_id).first()
     if not group_exists:
         logger.info(f"检测到新群组 {group_id}，正在为其安装默认规则...")
@@ -61,7 +63,10 @@ def _seed_rules_if_new_group(group_id: int, db_session: Session):
                 is_active=True
             )
             db_session.add(new_rule)
-        # 显式地将新对象刷新到当前事务中，以确保后续的查询可以立即看到它们
+        # 调用 db_session.flush() 是一个重要的优化。
+        # 它将所有新创建的对象（Group 和 Rules）的 INSERT 语句发送到数据库，
+        # 使它们在当前事务中对后续的查询可见，但并 *不* 提交事务。
+        # 这确保了如果后续操作失败，整个过程可以被回滚。
         db_session.flush()
         logger.info(f"已为群组 {group_id} 成功添加 {len(DEFAULT_RULES)} 条默认规则。")
         return True
@@ -147,65 +152,84 @@ async def toggle_rule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         new_status = "✅ 激活" if rule.is_active else "❌ 禁用"
         await update.message.reply_text(f"成功将规则 “{rule.name}” (ID: {rule.id}) 的状态更新为: {new_status}。")
 
-# =================== 通用事件处理核心 ===================
+# =================== 通用事件处理核心 (Core Event Processor) ===================
 
 async def process_event(event_type: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    一个通用的事件处理函数，是整个规则系统的入口。
-    它负责获取、解析、缓存和执行规则，并管理数据库事务。
+    一个通用的事件处理函数，是整个规则系统的核心入口。
+    无论是什么类型的事件（新消息、用户加入等），最终都会被路由到这里进行统一处理。
+
+    它的主要职责包括：
+    1.  管理数据库会话。
+    2.  为新群组植入默认规则。
+    3.  高效地管理和利用规则缓存（这是关键的性能优化）。
+    4.  按优先级顺序遍历和执行与当前事件匹配的规则。
+    5.  处理 `stop()` 动作的控制流中断。
+    6.  捕获并记录单个规则执行时发生的异常，防止其影响其他规则。
     """
     if not update.effective_chat: return
     chat_id = update.effective_chat.id
     session_factory: sessionmaker = context.bot_data['session_factory']
+    # `rule_cache` 是一个存储在 bot_data 中的字典，用于缓存已解析的规则，避免每次都从数据库加载和解析。
+    # 它的结构是 {chat_id: [parsed_rule_1, parsed_rule_2, ...]}
     rule_cache: dict = context.bot_data['rule_cache']
 
     try:
         with session_scope(session_factory) as db_session:
-            # 如果是新群组，则植入默认规则并清除缓存（以防万一）
+            # 步骤 1: 检查是否是新群组，如果是，则植入规则并强制清除缓存。
             if _seed_rules_if_new_group(chat_id, db_session):
                 if chat_id in rule_cache: del rule_cache[chat_id]
 
-            # 缓存未命中，则从数据库加载并解析规则
+            # 步骤 2: 检查缓存。如果缓存未命中，则从数据库加载并解析规则。
             if chat_id not in rule_cache:
                 logger.info(f"缓存未命中：正在为群组 {chat_id} 从数据库加载并解析规则。")
+                # 查询所有激活的规则，并按优先级降序排列
                 rules_from_db = db_session.query(Rule).filter(Rule.group_id == chat_id, Rule.is_active == True).order_by(Rule.priority.desc()).all()
                 parsed_rules = []
                 for db_rule in rules_from_db:
                     try:
+                        # 解析规则脚本，如果失败则记录错误并跳过
                         parsed_rules.append(RuleParser(db_rule.script).parse())
                     except RuleParserError as e:
                         logger.error(f"解析规则ID {db_rule.id} ('{db_rule.name}') 失败: {e}")
-                        logger.debug(f"解析失败的脚本内容:\n---\n{db_rule.script}\n---") # 诊断日志
+                        logger.debug(f"解析失败的脚本内容:\n---\n{db_rule.script}\n---") # 包含脚本的诊断日志
                 rule_cache[chat_id] = parsed_rules
-                logger.info(f"已为群组 {chat_id} 缓存 {len(parsed_rules)} 条规则。")
+                logger.info(f"已为群组 {chat_id} 缓存 {len(parsed_rules)} 条已激活规则。")
 
             rules_to_process = rule_cache.get(chat_id, [])
             if not rules_to_process:
-                logger.debug(f"[{chat_id}] No rules to process for event '{event_type}'.")
+                logger.debug(f"[{chat_id}] No active rules to process for event '{event_type}'.")
                 return
 
             logger.debug(f"[{chat_id}] Processing event '{event_type}' with {len(rules_to_process)} rules.")
-            # 遍历并执行匹配的规则
+            # 步骤 3: 遍历缓存中的规则并执行。
             for parsed_rule in rules_to_process:
-                # 检查规则的 when_event 是否与当前事件类型匹配
+                # 检查规则的 `WHEN` 子句是否与当前事件类型匹配
                 if parsed_rule.when_event and parsed_rule.when_event.lower().startswith(event_type):
                     logger.debug(f"[{chat_id}] Event '{event_type}' matches rule '{parsed_rule.name}'. Executing...")
                     try:
+                        # 为每个规则的执行创建一个新的 RuleExecutor 实例
                         executor = RuleExecutor(update, context, db_session, parsed_rule.name)
                         await executor.execute_rule(parsed_rule)
                     except StopRuleProcessing:
+                        # 如果规则执行了 `stop()` 动作，则捕获异常并立即停止处理此事件的后续规则。
                         logger.info(f"规则 '{parsed_rule.name}' 请求停止处理后续规则。")
                         break
                     except Exception as e:
+                        # 捕获执行单个规则时发生的任何其他错误，记录它，然后继续处理下一条规则。
+                        # 这确保了一个有问题的规则不会让整个机器人崩溃。
                         logger.error(f"执行规则 '{parsed_rule.name}' 时发生错误: {e}", exc_info=True)
     except Exception as e:
         logger.critical(f"为群组 {chat_id} 处理事件 {event_type} 时发生严重错误: {e}", exc_info=True)
 
-# =================== 具体事件处理器 (包装器) ===================
-# 这些处理器只是简单地调用通用的 process_event 函数，明确事件类型。
+# =================== 具体事件处理器 (Wrapper Handlers) ===================
+# 这些处理器是 `python-telegram-bot` 库的直接入口点。
+# 它们的设计非常简单，只是一个轻量级的包装器，其唯一职责是调用通用的 `process_event` 函数，
+# 并传入一个明确的、标准化的事件类型字符串（如 "message", "user_join"）。
+# 这种设计将平台相关的逻辑与核心的、平台无关的规则处理逻辑清晰地分离开来。
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理普通文本消息。"""
+    """处理所有符合 `filters.TEXT & ~filters.COMMAND` 的消息。"""
     await process_event("message", update, context)
 
 async def command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,16 +347,23 @@ async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
         db_session.query(Verification).filter_by(user_id=user_id, group_id=group_id).delete()
 
 async def verification_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理用户点击验证问题答案按钮的回调。"""
+    """
+    处理用户在私聊中点击验证问题答案按钮的回调查询（CallbackQuery）。
+    这是人机验证流程中最复杂的部分。
+    """
     query = update.callback_query
+    # 必须先 answer() 回调，否则客户端会一直显示加载状态
     await query.answer()
 
+    # 1. 解析回调数据
+    # 回调数据的格式为 "verify_{group_id}_{user_id}_{answer}"
     try:
         _, group_id_str, user_id_str, answer = query.data.split('_')
         group_id, user_id = int(group_id_str), int(user_id_str)
     except (ValueError, IndexError):
         return await query.edit_message_text(text="回调数据格式错误，请重试。")
 
+    # 2. 权限检查：确保点击按钮的人就是需要被验证的用户
     if query.from_user.id != user_id:
         return await context.bot.answer_callback_query(query.id, text="错误：您不能为其他用户进行验证。", show_alert=True)
 
@@ -342,15 +373,18 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
         if not verification:
             return await query.edit_message_text(text="验证已过期或不存在。")
 
-        # 清除超时任务
+        # 3. 清除关联的超时任务，因为用户已经做出了响应
         job_id = f"verify_timeout_{group_id}_{user_id}"
-        for job in context.job_queue.get_jobs_by_name(job_id): job.schedule_removal()
+        for job in context.job_queue.get_jobs_by_name(job_id):
+            job.schedule_removal()
 
+        # 4. 检查答案是否正确
         if answer == verification.correct_answer:
+            # --- 验证成功 ---
             try:
                 # 解除禁言，并恢复群组的默认权限
                 chat = await context.bot.get_chat(chat_id=group_id)
-                # 如果群组没有特定权限设置，则授予一些基本权限
+                # 使用群组的现有权限设置，如果不存在，则提供一个合理的默认值
                 permissions = chat.permissions or ChatPermissions(
                     can_send_messages=True,
                     can_add_web_page_previews=True,
@@ -363,12 +397,15 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
                     permissions=permissions
                 )
                 await query.edit_message_text(text="✅ 验证成功！您现在可以在群组中发言了。")
+                # 从数据库中删除验证记录
                 db_session.delete(verification)
             except Exception as e:
                 logger.error(f"为用户 {user_id} 解除禁言失败: {e}")
                 await query.edit_message_text(text="验证成功，但在解除禁言时发生错误。请联系管理员。")
         else:
+            # --- 验证失败 ---
             if verification.attempts_made >= 3:
+                # 失败次数过多，踢出用户
                 try:
                     await context.bot.ban_chat_member(chat_id=group_id, user_id=user_id)
                     await context.bot.unban_chat_member(chat_id=group_id, user_id=user_id)
@@ -377,5 +414,6 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
                 except Exception as e:
                     logger.error(f"因验证失败踢出用户 {user_id} 时出错: {e}")
             else:
+                # 还有机会，发送一个新的验证问题
                 await query.edit_message_text(text=f"回答错误！您还有 {3 - verification.attempts_made} 次机会。正在为您生成新问题...")
                 await _send_verification_challenge(user_id, group_id, context, db_session)

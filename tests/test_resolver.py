@@ -105,30 +105,56 @@ async def test_resolve_command_variable():
     assert await resolver.resolve("command.full_args") == "arg1 arg 2 with spaces"
     assert await resolver.resolve("command.arg[2]") is None # 索引越界
 
+async def test_resolve_command_variable_on_non_command():
+    """测试在非命令消息上解析 command.* 变量的行为。"""
+    mock_user = User(id=123, is_bot=False, first_name="Test")
+    mock_chat = Chat(id=-1001, type="group")
+    # 消息文本不以 "/" 开头
+    mock_message = Message(message_id=3, date=None, chat=mock_chat, text="this is not a command", from_user=mock_user)
+    mock_update_no_command = Update(update_id=1001, message=mock_message)
+
+    resolver = VariableResolver(mock_update_no_command, Mock(), Mock(), {})
+
+    # 所有 command.* 变量都应返回 None
+    assert await resolver.resolve("command.name") is None
+    assert await resolver.resolve("command.arg_count") is None
+    assert await resolver.resolve("command.arg[0]") is None
+
 async def test_resolve_persistent_variable_from_db(mock_update, test_db_session_factory):
-    """测试从数据库中解析持久化变量。"""
+    """测试从数据库中解析各种类型的持久化变量。"""
     with test_db_session_factory() as session:
-        # 准备数据
-        session.add(StateVariable(group_id=-1001, user_id=None, name="group_config", value=json.dumps({"enabled": True})))
-        session.add(StateVariable(group_id=-1001, user_id=123, name="points", value="100"))
-        session.add(StateVariable(group_id=-1001, user_id=555, name="warnings", value="3"))
+        # 准备各种数据类型
+        session.add(StateVariable(group_id=-1001, user_id=None, name="group_str", value=json.dumps("a string")))
+        session.add(StateVariable(group_id=-1001, user_id=123, name="user_bool", value=json.dumps(True)))
+        session.add(StateVariable(group_id=-1001, user_id=123, name="user_list", value=json.dumps([1, "a", False])))
+        session.add(StateVariable(group_id=-1001, user_id=555, name="user_int", value="100")) # 纯数字字符串
         session.commit()
 
         resolver = VariableResolver(mock_update, Mock(), session, {})
 
-        # 1. 解析组变量
-        assert await resolver.resolve("vars.group.group_config") == {"enabled": True}
+        # 1. 解析各种类型的变量
+        assert await resolver.resolve("vars.group.group_str") == "a string"
+        assert await resolver.resolve("vars.user.user_bool") is True
+        assert await resolver.resolve("vars.user.user_list") == [1, "a", False]
+        assert await resolver.resolve("vars.user_555.user_int") == 100
 
-        # 2. 解析当前用户的变量
-        assert await resolver.resolve("vars.user.points") == 100
-
-        # 3. 通过特定ID解析其他用户的变量
-        assert await resolver.resolve("vars.user_555.warnings") == 3
-
-        # 4. 解析不存在的变量
+        # 2. 解析不存在的变量
         assert await resolver.resolve("vars.group.non_existent") is None
         assert await resolver.resolve("vars.user.non_existent") is None
         assert await resolver.resolve("vars.user_999.non_existent") is None
+
+async def test_resolve_deeply_nested_context_variable():
+    """测试解析深层嵌套的上下文变量。"""
+    # 创建一个包含 reply_to_message 的复杂 Update 结构
+    replied_to_user = User(id=555, is_bot=False, first_name="Replied")
+    replied_to_message = Message(message_id=10, date=None, chat=Chat(id=-1001, type="group"), text="original message", from_user=replied_to_user)
+    replying_user = User(id=123, is_bot=False, first_name="Test")
+    replying_message = Message(message_id=11, date=None, chat=Chat(id=-1001, type="group"), text="a reply", from_user=replying_user, reply_to_message=replied_to_message)
+    mock_update_with_reply = Update(update_id=1002, message=replying_message)
+
+    resolver = VariableResolver(mock_update_with_reply, Mock(), Mock(), {})
+    resolved_id = await resolver.resolve("message.reply_to_message.from_user.id")
+    assert resolved_id == 555
 
 async def test_resolve_computed_is_admin_with_caching(mock_update):
     """测试 user.is_admin 计算属性的解析和缓存。"""
@@ -153,3 +179,15 @@ async def test_resolve_computed_is_admin_with_caching(mock_update):
     resolver2 = VariableResolver(mock_update, mock_context, Mock(), cache)
     assert await resolver2.resolve("user.is_admin") is True
     mock_context.bot.get_chat_member.assert_called_once() # 确认调用次数仍然未增加
+
+async def test_resolve_computed_is_admin_on_api_error(mock_update):
+    """测试当 get_chat_member API 调用失败时，user.is_admin 的回退行为。"""
+    mock_context = Mock()
+    # 模拟 API 调用引发异常
+    mock_context.bot.get_chat_member = AsyncMock(side_effect=Exception("Telegram API is down"))
+
+    resolver = VariableResolver(mock_update, mock_context, Mock(), {})
+
+    # 解析 user.is_admin，预期应安全地返回 False 而不是崩溃
+    assert await resolver.resolve("user.is_admin") is False
+    mock_context.bot.get_chat_member.assert_called_once_with(chat_id=-1001, user_id=123)

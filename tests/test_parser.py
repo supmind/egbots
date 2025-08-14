@@ -130,6 +130,88 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(len(stmt.then_block.statements), 1)
         self.assertEqual(len(stmt.else_block.statements), 1)
 
+    def test_parse_if_elif_else_chain(self):
+        """测试解析 if-elif-else 链。"""
+        script = """
+        WHEN command THEN {
+            if (x == 1) {
+                reply("one");
+            } else if (x == 2) {
+                reply("two");
+            } else {
+                reply("other");
+            }
+        }
+        """
+        rule = RuleParser(script).parse()
+        if_stmt = rule.then_block.statements[0]
+        self.assertIsInstance(if_stmt, IfStmt)
+
+        # else 块应该是一个包含另一个 IfStmt 的 StatementBlock
+        else_block = if_stmt.else_block
+        self.assertIsInstance(else_block, StatementBlock)
+        self.assertEqual(len(else_block.statements), 1)
+
+        # 嵌套的 'else if'
+        elif_stmt = else_block.statements[0]
+        self.assertIsInstance(elif_stmt, IfStmt)
+        self.assertIsInstance(elif_stmt.condition, BinaryOp)
+        self.assertEqual(elif_stmt.condition.right.value, 2)
+
+        # 最终的 'else'
+        final_else_block = elif_stmt.else_block
+        self.assertIsInstance(final_else_block, StatementBlock)
+        self.assertEqual(len(final_else_block.statements), 1)
+
+    def test_parse_with_comments_and_newlines(self):
+        """测试解析器是否能正确处理注释和多余的换行符。"""
+        script = """
+        // 这是一个顶层注释
+        WHEN command
+        // WHERE子句前的注释
+        WHERE user.id == 123 // 行尾注释
+        THEN {
+            // THEN块内的注释
+            reply("hello"); // 另一个行尾注释
+
+        } // 后面可以有空行
+
+        """
+        try:
+            RuleParser(script).parse()
+        except RuleParserError as e:
+            self.fail(f"带有注释和换行符的有效脚本解析失败: {e}")
+
+    def test_keyword_case_insensitivity(self):
+        """测试解析器对关键字的大小写不敏感。"""
+        script = 'wHeN command wHeRe true tHeN { rEpLy("ok"); } eNd'
+        try:
+            rule = RuleParser(script).parse()
+            self.assertEqual(rule.when_event, "command")
+            self.assertIsInstance(rule.where_clause, Literal)
+            self.assertIsInstance(rule.then_block.statements[0], ActionCallStmt)
+        except RuleParserError as e:
+            self.fail(f"关键字大小写不敏感测试失败: {e}")
+
+    def test_empty_statement_block(self):
+        """测试解析空的语句块。"""
+        script = 'WHEN command THEN {}'
+        try:
+            rule = RuleParser(script).parse()
+            self.assertIsInstance(rule.then_block, StatementBlock)
+            self.assertEqual(len(rule.then_block.statements), 0)
+        except RuleParserError as e:
+            self.fail(f"解析空语句块失败: {e}")
+
+    def test_mismatched_character_error(self):
+        """测试脚本中包含无效字符时是否会引发错误。"""
+        script = 'WHEN command THEN { let x = 1; # 无效字符 }'
+        try:
+            RuleParser(script).parse()
+            self.fail("解析含有无效字符的脚本时，并未按预期引发 RuleParserError。")
+        except RuleParserError as e:
+            self.assertIn("存在无效字符: #", str(e))
+
     def test_syntax_error(self):
         """测试无效语法是否能正确抛出 RuleParserError。"""
         script = 'WHEN command THEN { my_var = "hello" }' # 缺少分号
@@ -146,15 +228,14 @@ class TestNewRuleParser(unittest.TestCase):
         这个测试对于捕捉解析器或规则脚本中的回归错误至关重要。
         """
         from src.bot.default_rules import DEFAULT_RULES
-        import pytest
 
         for i, rule_data in enumerate(DEFAULT_RULES):
             script = rule_data["script"]
             try:
                 RuleParser(script).parse()
             except RuleParserError as e:
-                # 使用 pytest.fail 来提供更详细的错误输出
-                pytest.fail(
+                # 使用 unittest 自带的 self.fail() 来报告错误
+                self.fail(
                     f"默认规则 #{i} (名称: '{rule_data['name']}') 解析失败。\n"
                     f"错误: {e}\n"
                     f"脚本:\n---\n{script}\n---"

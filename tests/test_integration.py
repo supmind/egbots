@@ -312,6 +312,77 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         assert v is None
 
 
+async def test_complex_keyword_automute_scenario(mock_update, mock_context, test_db_session_factory):
+    """
+    一个复杂的端到端集成测试，模拟一个“关键词自动禁言”的系统。
+    这个测试验证了：
+    - 规则的正确交互（设置规则和触发规则）。
+    - 群组和用户级别持久化变量的读写。
+    - `if` 条件逻辑和 `contains` 运算符。
+    - 动作的正确调用 (`set_var`, `mute_user`, `reply`)。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    admin_id = 123
+    offender_id = 456
+    group_id = -1001
+
+    # 规则1: 管理员设置禁言关键词
+    set_keyword_rule = """
+    WHEN command WHERE command.name == 'set_forbidden' AND user.is_admin == true THEN {
+        set_var("group.forbidden_word", command.arg[0]);
+        reply("禁言关键词已设置为: " + command.arg[0]);
+    } END
+    """
+
+    # 规则2: 用户触发关键词，被禁言
+    automute_rule = """
+    WHEN message WHERE vars.group.forbidden_word != null THEN {
+        if (message.text contains vars.group.forbidden_word) {
+            mute_user("1m", user.id);
+            reply(user.first_name + "，你因发送违禁词已被禁言1分钟。");
+        }
+    } END
+    """
+
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Set Keyword Rule", script=set_keyword_rule, priority=10))
+        db.add(Rule(group_id=group_id, name="Automute Rule", script=automute_rule, priority=5))
+        db.commit()
+
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        # --- 2. 管理员设置关键词 ---
+        mock_update.effective_user.id = admin_id
+        # 模拟 is_admin 的 API 调用
+        mock_context.bot.get_chat_member = AsyncMock(return_value=MagicMock(status='administrator'))
+        mock_update.message.text = "/set_forbidden secret"
+        # 关键：确保为这个 update 的 message 对象设置一个 mock reply_text
+        mock_update.message.reply_text = AsyncMock()
+        await process_event("command", mock_update, mock_context)
+
+        mock_update.message.reply_text.assert_called_once_with("禁言关键词已设置为: secret")
+        mock_update.message.reply_text.reset_mock()
+
+        # --- 3. 违规用户发送消息并被禁言 ---
+        mock_update.effective_user.id = offender_id
+        mock_update.effective_user.first_name = "Offender"
+        mock_update.message.text = "I know the secret word!"
+        # 重置 mock，因为 mute_user 也会调用它
+        mock_context.bot.get_chat_member.reset_mock()
+
+        await process_event("message", mock_update, mock_context)
+
+        # 验证禁言动作
+        mock_context.bot.restrict_chat_member.assert_called_once()
+        _, kwargs = mock_context.bot.restrict_chat_member.call_args
+        assert kwargs['user_id'] == offender_id
+        assert not kwargs['permissions'].can_send_messages
+        assert (kwargs['until_date'] - datetime.now(timezone.utc)) > timedelta(seconds=50)
+
+        # 验证回复
+        mock_update.message.reply_text.assert_called_once_with("Offender，你因发送违禁词已被禁言1分钟。")
+
+
 async def test_verification_callback_wrong_user(mock_update, mock_context, test_db_session_factory):
     """
     边界测试：验证一个用户（`wrong_user_id`）试图为另一个用户（`correct_user_id`）

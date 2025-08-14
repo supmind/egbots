@@ -77,18 +77,20 @@ async def test_variable_evaluation_with_mocked_resolver():
 
     # 模拟解析器方法以隔离测试，使其能处理属性访问
     async def mock_resolve(path):
+        if path == "user.id":
+            return 12345
+        if path == "user.is_admin":
+            return True
         if path == "user":
-            # 模拟解析 'user'，返回一个可进行属性访问的对象
+            # This branch isn't strictly necessary for the current test logic
+            # but provides a more complete mock for potential future tests.
             user_mock = Mock()
             user_mock.id = 12345
-            user_mock.is_admin = True # 确保 mock 对象有 is_admin 属性
+            user_mock.is_admin = True
             return user_mock
-        if path == "user.is_admin":
-             # 模拟直接解析计算属性的场景
-            return True
         return None
     # 直接 mock 底层的 resolver 的 resolve 方法
-    executor.variable_resolver.resolve = mock_resolve
+    executor.variable_resolver.resolve = AsyncMock(side_effect=mock_resolve)
 
     # 1. 测试来自本地作用域的变量
     scope = {"x": 10}
@@ -390,3 +392,102 @@ async def test_action_log_with_rotation(test_db_session_factory):
         last_log_exists = session.query(Log).filter_by(message="日志 #499").first()
         assert last_log_exists is not None
         assert last_log_exists.tag == "loop"
+
+# =================== Built-in Function Tests ===================
+@pytest.mark.asyncio
+@pytest.mark.parametrize("func_call, scope, expected", [
+    # len()
+    ("len([1, 2, 3])", None, 3),
+    ("len('hello')", None, 5),
+    ("len({'a':1, 'b':2})", None, 2),
+    ("len(123)", None, 0), # len on invalid type
+    ("len(null)", None, 0), # len on null
+    # int()
+    ("int('123')", None, 123),
+    ("int(99.9)", None, 99),
+    ("int('abc')", None, 0), # int on invalid type
+    # str()
+    ("str(123)", None, "123"),
+    ("str(true)", None, "True"),
+    ("str([1, 2])", None, "[1, 2]"),
+])
+async def test_builtin_functions(func_call, scope, expected):
+    """测试内置函数的行为，包括边界情况。"""
+    result = await _evaluate_expression_in_where_clause(func_call, scope)
+    assert result == expected
+
+# =================== Assignment and Scope Tests ===================
+@pytest.mark.asyncio
+async def test_assignment_to_property_and_index():
+    """测试对字典属性和列表索引的赋值操作。"""
+    script = """
+    my_dict = {'key': 'old'};
+    my_list = [10, 20, 30];
+
+    my_dict.key = 'new';
+    my_list[1] = 99;
+
+    reply(my_dict.key);
+    reply(my_list[1]);
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, Mock())
+
+    # 验证 reply 被调用了两次
+    assert mock_update.effective_message.reply_text.call_count == 2
+    calls = mock_update.effective_message.reply_text.call_args_list
+    assert calls[0].args[0] == 'new'
+    assert calls[1].args[0] == "99"
+
+@pytest.mark.asyncio
+async def test_continue_statement_in_loop():
+    """测试 continue 语句能否正确地跳过当前迭代。"""
+    script = """
+    items = [1, 2, 3, 4, 5];
+    count = 0;
+    total = 0;
+    foreach (item in items) {
+        if (item == 3) {
+            continue;
+        }
+        count = count + 1;
+        total = total + item;
+    }
+    reply(count);
+    reply(total);
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, Mock())
+    # 循环体应该在 item 为 1, 2, 4, 5 时完整执行。
+    # count 应该是 4
+    # total 应该是 1+2+4+5 = 12
+    calls = mock_update.effective_message.reply_text.call_args_list
+    assert calls[0].args[0] == "4"
+    assert calls[1].args[0] == "12"
+
+@pytest.mark.asyncio
+async def test_foreach_scope_persistence():
+    """显式测试在 foreach 循环中对外部变量的修改是否能持久化。"""
+    script = """
+    counter = 10;
+    items = [1, 2, 3];
+    foreach (item in items) {
+        counter = counter + item;
+    }
+    reply(counter);
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, Mock())
+    # 最终值应为 10 + 1 + 2 + 3 = 16
+    mock_update.effective_message.reply_text.assert_called_once_with("16")
+
+@pytest.mark.asyncio
+async def test_stop_action_raises_exception():
+    """测试 stop() 动作是否能正确抛出 StopRuleProcessing 异常。"""
+    from src.core.executor import StopRuleProcessing
+    script = "stop();"
+    with pytest.raises(StopRuleProcessing):
+        await _execute_then_block(script, Mock(), Mock())

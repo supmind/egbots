@@ -14,7 +14,10 @@ def test_db_session_factory():
     提供一个基于内存的、干净的 SQLite 数据库会话工厂。
     'function' 作用域确保每个测试函数都获得一个全新的数据库。
     """
-    engine = create_engine("sqlite:///:memory:")
+    # 关键修复：为内存中的 SQLite 添加 check_same_thread=False。
+    # 这是因为 pytest-asyncio 可能会在不同的线程中运行测试和事件循环，
+    # 如果不设置此项，当从另一个线程访问数据库连接时，程序可能会挂起。
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     yield factory
@@ -50,16 +53,32 @@ def mock_context(test_db_session_factory):
 def mock_update():
     """提供一个更真实的模拟 Telegram Update 对象。"""
     update = MagicMock()
-    update.effective_chat.id = -1001
-    update.effective_user.id = 123
-    update.effective_user.mention_html.return_value = "Test User"
 
-    # 关键修复：确保 `message` 和 `effective_message` 指向同一个对象
+    # 创建核心模拟对象
+    mock_user = MagicMock()
+    mock_user.id = 123
+    mock_user.first_name = "Test"
+    mock_user.mention_html.return_value = "Test User"
+
+    mock_chat = MagicMock()
+    mock_chat.id = -1001
+
     mock_message = MagicMock()
     mock_message.reply_text = AsyncMock()
     mock_message.delete = AsyncMock()
+    mock_message.chat = mock_chat
+
+    # 关键修复：确保多个属性指向同一个、正确的模拟对象
+    update.effective_user = mock_user
+    update.user = mock_user # `user` 属性现在指向 `effective_user`
+
+    update.effective_chat = mock_chat
+    update.chat = mock_chat
+
     update.effective_message = mock_message
     update.message = mock_message
+    # 确保消息也包含正确的用户和聊天信息
+    mock_message.from_user = mock_user
 
     update.callback_query = MagicMock()
     update.callback_query.answer = AsyncMock()

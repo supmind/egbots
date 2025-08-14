@@ -105,22 +105,25 @@ class ContinueException(Exception):
 class RuleExecutor:
     """
     一个AST（抽象语法树）解释器，负责执行由 RuleParser 生成的语法树。
-    它通过访问者模式遍历AST，对表达式求值，管理变量作用域，并执行与外部世界交互的“动作”。
+    它通过“访问者模式”遍历AST，对表达式求值，管理变量作用域，并执行与外部世界交互的“动作”。
+    这是整个规则引擎的核心运行时。
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule"):
         """
         初始化规则执行器。
 
         Args:
-            update: 当前的 Telegram Update 对象。
-            context: 当前的 Telegram Context 对象。
-            db_session: 当前数据库会话。
-            rule_name: 当前正在执行的规则的名称，用于日志记录。
+            update: 当前的 Telegram Update 对象，包含了事件的所有上下文信息。
+            context: 当前的 Telegram Context 对象，用于访问机器人实例等。
+            db_session: 当前的数据库会话，用于读写持久化变量。
+            rule_name: 当前正在执行的规则的名称，主要用于日志记录，便于调试。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.rule_name = rule_name
+        # per_request_cache 用于在单次事件处理中缓存高成本计算的结果（如API调用）。
+        # 它被传递给 VariableResolver，以确保整个执行过程共享同一个缓存。
         self.per_request_cache: Dict[str, Any] = {}
         self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache)
 
@@ -192,17 +195,18 @@ class RuleExecutor:
         """
         执行 'foreach (var in collection) { ... }' 语句。
 
-        修复记录 (2025-08-14):
-        此前的实现为每次循环迭代创建了一个作用域的浅拷贝 (`loop_scope = current_scope.copy()`)。
-        这导致了一个 bug：在循环体内对变量（如计数器）的修改在下一次迭代开始时会丢失，
-        因为新的 `loop_scope` 总是从原始的 `current_scope` 复制而来。
+        此实现包含一个关于作用域管理的关键修复 (2025-08-14):
+        一个简单的实现可能会为每次循环迭代创建一个作用域的浅拷贝 (`loop_scope = current_scope.copy()`)。
+        但这会导致一个常见的 bug：在循环体内对变量（如 `count = count + 1`）的修改在下一次迭代开始时会丢失，
+        因为新的 `loop_scope` 总是从循环开始前的 `current_scope` 复制而来。
 
-        当前的实现通过直接在 `current_scope` 中操作循环变量来修复此问题。
-        这种方法确保了在多次迭代中，变量状态的修改（如 `count = count + 1`）能够被正确地保持。
-        同时，在循环结束后，会谨慎地恢复或移除循环变量，以避免对外部作用域造成污染。
+        正确的实现是直接在 `current_scope` 中操作循环变量。这确保了在多次迭代中，
+        变量状态的修改能够被正确地保持。同时，在循环结束后，必须谨慎地恢复或移除循环变量，
+        以避免对外部作用域造成污染（即“泄漏”循环变量）。
         """
         collection = await self._evaluate_expression(stmt.collection, current_scope)
 
+        # foreach 可以遍历列表和字符串
         if not isinstance(collection, (list, str)):
             logger.warning(f"foreach 循环的目标不是可迭代对象: {type(collection)}")
             return
@@ -271,47 +275,58 @@ class RuleExecutor:
             logger.warning(f"[{self.rule_name}] 调用了未知的动作: '{stmt.call.action_name}'")
 
     async def _evaluate_expression(self, expr: Expr, current_scope: Dict[str, Any]) -> Any:
-        """递归地对一个表达式节点求值并返回结果。"""
+        """
+        通过递归下降的方式对一个表达式AST节点求值并返回其结果。
+        这是解释器的核心，它将AST节点转换为实际的Python值。
+        """
         expr_type = type(expr)
 
+        # --- 基本情况 ---
         if expr_type is Literal:
             return expr.value
 
+        # --- 变量与作用域 ---
         if expr_type is Variable:
-            # 如果变量在本地作用域（例如，由 foreach 或赋值创建），则优先使用它。
+            # 作用域查找顺序：优先查找本地作用域（由赋值或 foreach 创建的变量）。
             if expr.name in current_scope:
                 return current_scope[expr.name]
-            # 否则，将其视为一个需要从机器人上下文解析的全局变量。
+            # 如果本地作用域中没有，则委托给 VariableResolver 从更广的上下文中查找（如 user.id, vars.group.x）。
             return await self._resolve_path(expr.name)
 
+        # --- 复合表达式（递归部分） ---
         if expr_type is PropertyAccess:
-            # 修复记录 (2025-08-14):
-            # 此处的逻辑比最初预想的要复杂，因此恢复到了原始实现。
             #
-            # 问题的核心在于如何处理像 `vars.user.points` 或 `user.is_admin` 这样的“命名空间式”变量。
-            # 一个简单的实现（即 `target = await self._evaluate_expression(expr.target, ...)`）会首先尝试
-            # 对 `vars.user` 求值，但这本身并不是一个有效的、独立的变量。
+            # 这是整个求值器中最复杂的逻辑之一，用于区分对“普通”对象的属性访问
+            # (例如 `my_dict.key`) 和对“魔法”上下文变量的访问 (例如 `user.is_admin`)。
             #
-            # 正确的逻辑是：
-            # 1. 尝试将整个表达式（如 `vars.user.points`）重构为一个完整的路径字符串。
-            # 2. 检查该路径的“基变量”（如 `vars`）是否为局部变量。
-            # 3. 如果基变量不是局部变量，则将完整的路径字符串（`vars.user.points`）直接交给
-            #    `VariableResolver` 处理。解析器有专门的逻辑来处理这种包含 `.` 的特殊路径。
-            # 4. 如果基变量是局部变量，则按常规方式处理：先对目标求值，再获取其属性。
+            # 问题: 一个简单的实现 `target = await self._evaluate_expression(expr.target, ...)` 会失败，
+            # 因为它会尝试对 `user` 或 `vars.user` 求值，但这些本身并不是有效的独立变量。
+            #
+            # 解决方案:
+            # 1. 将整个访问链（如 `user.is_admin`）重构为一个完整的路径字符串。
+            # 2. 检查这个路径的“基变量”（`user`）是否存在于本地作用域中。
+            # 3. 如果基变量 *不* 在本地作用域中，我们就假定这是一个需要由 VariableResolver
+            #    特殊处理的“魔法”变量，并将完整的路径字符串 (`user.is_admin`) 直接交给它。
+            # 4. 如果基变量 *在* 本地作用域中（例如 `my_dict = {"key": "val"}; ... my_dict.key`），
+            #    我们就按常规方式处理：先对 `my_dict` 求值，然后获取其 `key` 属性。
+            #
             full_path = self._try_reconstruct_path(expr)
             base_name = None
             if isinstance(expr.target, Variable):
                 base_name = expr.target.name
             elif isinstance(expr.target, PropertyAccess):
+                # 向上追溯，找到访问链的起点
                 temp_expr = expr.target
                 while isinstance(temp_expr, PropertyAccess):
                     temp_expr = temp_expr.target
                 if isinstance(temp_expr, Variable):
                     base_name = temp_expr.name
 
+            # 核心判断：如果基变量不是局部变量，则使用特殊解析器
             if base_name and base_name not in current_scope:
                 return await self._resolve_path(full_path)
 
+            # 否则，按常规方式处理
             target = await self._evaluate_expression(expr.target, current_scope)
             return target.get(expr.property) if isinstance(target, dict) else getattr(target, expr.property, None)
 
@@ -336,14 +351,19 @@ class RuleExecutor:
         """处理二元运算，包括算术、比较和逻辑运算。"""
         op = expr.op.lower()
 
-        # 为 and 和 or 实现短路求值，提高效率
+        # 为 `and` 和 `or` 实现短路求值（short-circuiting）。
+        # 这是重要的性能优化和行为修正。例如，在 `false and some_func()` 中，
+        # `some_func()` 根本不应该被执行。
         if op == 'and':
             lhs = await self._evaluate_expression(expr.left, current_scope)
+            # 只有当左侧为真时，才需要对右侧求值
             return bool(await self._evaluate_expression(expr.right, current_scope)) if lhs else False
         if op == 'or':
             lhs = await self._evaluate_expression(expr.left, current_scope)
+            # 只有当左侧为假时，才需要对右侧求值
             return True if lhs else bool(await self._evaluate_expression(expr.right, current_scope))
         if op == 'not':
+            # `not` 是一元运算，只对右侧求值
             return not bool(await self._evaluate_expression(expr.right, current_scope))
 
         lhs = await self._evaluate_expression(expr.left, current_scope)
@@ -431,9 +451,10 @@ class RuleExecutor:
 
     def _get_target_user_id(self, explicit_user_id: Any = None) -> Optional[int]:
         """
-        一个辅助方法，用于确定动作的目标用户ID。
-        逻辑: 1. 如果提供了显式的 user_id，则使用它。
-              2. 否则，总是默认使用触发规则的用户的ID。
+        一个统一的辅助方法，用于确定动作的目标用户ID，以确保行为的一致性和可预测性。
+        规则非常简单：
+        1. 如果在动作调用中显式提供了 `user_id` 参数 (例如 `ban_user(12345)`), 则永远优先使用它。
+        2. 如果未提供 `user_id` 参数 (例如 `ban_user()`), 则默认目标是触发当前规则的用户。
         """
         if explicit_user_id:
             try:
@@ -442,7 +463,7 @@ class RuleExecutor:
                 logger.warning(f"提供的 user_id '{explicit_user_id}' 不是一个有效的用户ID。")
                 return None
 
-        # 如果没有提供显式ID，则默认目标是动作的发起者自己
+        # 如果没有提供显式ID，则回退到默认目标：动作的发起者自己
         if self.update.effective_user:
             return self.update.effective_user.id
 
@@ -534,8 +555,10 @@ class RuleExecutor:
     @action("set_var")
     async def set_var(self, variable_path: str, value: Any, user_id: Any = None):
         """
-        动作：设置一个持久化变量 (例如 "user.warns" 或 "group.config")。
-        当作用域为 'user' 时，可以额外提供一个 user_id 来指定目标用户。
+        动作：设置一个持久化变量 (例如 "user.warns" 或 "group.config") 并将其存入数据库。
+        - 路径必须是 'scope.name' 的格式, scope 只能是 'user' 或 'group'。
+        - 当 scope 为 'user' 时, 可以额外提供一个 user_id 来指定目标用户。
+        - 将 value 设置为 null 会从数据库中删除该变量。
         """
         if not isinstance(variable_path, str) or '.' not in variable_path:
             return logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效，应为 'scope.name' 格式。")
@@ -543,28 +566,32 @@ class RuleExecutor:
         scope, var_name = variable_path.split('.', 1)
         if not self.update.effective_chat: return
         group_id = self.update.effective_chat.id
-        db_user_id = None  # 用于数据库查询的 user_id
+        db_user_id = None  # 这是最终要存入数据库的 user_id
 
         if scope.lower() == 'user':
-            # 如果是用户作用域，则解析目标用户ID
-            # 优先使用动作调用时显式提供的 user_id
+            # 如果是用户作用域，则使用我们的标准辅助函数来确定目标用户ID
             target_user_id = self._get_target_user_id(user_id)
             if not target_user_id:
                 return logger.warning("set_var 在 'user' 作用域下无法确定目标用户。")
             db_user_id = target_user_id
         elif scope.lower() != 'group':
             return logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
+        # 如果 scope 是 'group'，db_user_id 保持为 None
 
+        # 查找数据库中是否已存在该变量
         variable = self.db_session.query(StateVariable).filter_by(
             group_id=group_id, user_id=db_user_id, name=var_name
         ).first()
 
+        # 如果值为 null，则表示删除变量
         if value is None:
             if variable:
                 self.db_session.delete(variable)
-                logger.info(f"持久化变量 '{variable_path}' 已被删除。")
+                logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被删除。")
         else:
+            # 否则，创建或更新变量
             try:
+                # 所有值都必须序列化为 JSON 字符串才能存入数据库
                 serialized_value = json.dumps(value)
             except TypeError as e:
                 return logger.error(f"为变量 '{variable_path}' 序列化值时失败: {e}。值: {value}")
@@ -573,7 +600,7 @@ class RuleExecutor:
                 variable = StateVariable(group_id=group_id, user_id=db_user_id, name=var_name)
             variable.value = serialized_value
             self.db_session.add(variable)
-            logger.info(f"持久化变量 '{variable_path}' 已被设为: {serialized_value}")
+            logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被设为: {serialized_value}")
 
     @action("start_verification")
     async def start_verification(self):
@@ -645,8 +672,9 @@ class RuleExecutor:
     @action("log")
     async def log(self, message: str, tag: str = None):
         """
-        动作：记录一条日志，并应用轮换策略。
-        每个群组最多保留500条日志，超出时会自动删除最旧的日志。
+        动作：在数据库中为当前群组记录一条日志，并应用轮换（rotation）策略。
+        为了防止数据库无限膨胀，每个群组最多只保留最新的 500 条日志。
+        当记录第 501 条日志时，最旧的一条会自动被删除。
         """
         if not self.update.effective_chat:
             return logger.warning("log 动作无法在没有有效群组的上下文中执行。")
@@ -658,18 +686,20 @@ class RuleExecutor:
         group_id = self.update.effective_chat.id
 
         try:
-            # 1. 检查当前日志数量
+            # 1. 获取当前群组的日志总数。
+            # 注意：在 SQLAlchemy 中，`count()` 通常比 `len(query.all())` 更高效，因为它在数据库层面执行计数。
             log_count = self.db_session.query(Log).filter_by(group_id=group_id).count()
 
-            # 2. 如果达到或超过限制，则删除最旧的日志
+            # 2. 如果达到或超过限制，则查询并删除最旧的一条日志。
             if log_count >= 500:
+                # 通过时间戳升序排序并取第一个，即可找到最旧的日志。
                 oldest_log = self.db_session.query(Log).filter_by(
                     group_id=group_id
                 ).order_by(Log.timestamp.asc()).first()
                 if oldest_log:
                     self.db_session.delete(oldest_log)
 
-            # 3. 创建并添加新日志
+            # 3. 创建并添加新日志记录。
             new_log = Log(
                 group_id=group_id,
                 actor_user_id=actor_user_id,
