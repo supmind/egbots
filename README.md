@@ -154,3 +154,55 @@ END
     ```bash
     python -m pytest
     ```
+
+---
+
+## 5. 开发者工具
+
+为了方便开发者（或高级用户）在将规则部署到生产环境前验证其有效性，我们提供了一个预编译函数。
+
+### 5.1. 规则语法检查
+
+您可以调用 `precompile_rule` 函数来检查一个规则脚本的语法是否正确。这对于在外部系统（如Web界面）中集成规则编辑器非常有用。
+
+**函数位置**: `src/core/parser.py`
+
+**调用示例**:
+```python
+from src.core.parser import precompile_rule
+
+# 一个语法正确的规则
+valid_script = \"\"\"
+WHEN message
+WHERE user.id == 12345
+THEN {
+    reply("Hello, admin!");
+}
+END
+\"\"\"
+
+is_valid, error_message = precompile_rule(valid_script)
+# 结果: is_valid = True, error_message = None
+print(f"脚本有效: {is_valid}")
+
+
+# 一个语法错误的规则 (缺少分号)
+invalid_script = \"\"\"
+WHEN message
+THEN {
+    reply("This will fail")
+}
+END
+\"\"\"
+
+is_valid, error_message = precompile_rule(invalid_script)
+# 结果: is_valid = False, error_message = "解析错误 (第 4 行, 第 1 列): 期望得到 token 类型 SEMICOLON，但得到 RBRACE ('}')"
+print(f"脚本有效: {is_valid}")
+print(f"错误信息: {error_message}")
+
+```
+
+**返回值**:
+函数返回一个元组 `(bool, str | None)`:
+*   如果脚本语法完全正确，返回 `(True, None)`。
+*   如果脚本存在语法错误，返回 `(False, "包含具体行号和错误信息的字符串")`。

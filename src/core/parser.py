@@ -167,10 +167,11 @@ TOKEN_SPECIFICATION = [
     ('COMPARE_OP',   r'==|!=|>=|<=|>|<|\b(contains|CONTAINS|startswith|STARTSWITH|endswith|ENDSWITH)\b'),
     ('EQUALS',       r'='),
     ('LOGIC_OP',     r'\b(and|AND|or|OR|not|NOT)\b'),
+    # 必须将 NUMBER 放在 ARITH_OP 前面，以确保优先匹配负数，而不是将'-'解析为独立的减号
+    ('NUMBER',       r'-?\d+(\.\d*)?'),
     ('ARITH_OP',     r'\+|-|\*|/'),
     ('KEYWORD',      r'\b(WHEN|when|WHERE|where|THEN|then|END|end|IF|if|ELSE|else|FOREACH|foreach|IN|in|BREAK|break|CONTINUE|continue|TRUE|true|FALSE|false|NULL|null)\b'),
     ('STRING',       r'"[^"]*"|\'[^\']*\''),
-    ('NUMBER',       r'\d+(\.\d*)?'),
     ('IDENTIFIER',   r'[a-zA-Z_][a-zA-Z0-9_]*'),
     ('MISMATCH',     r'.'),
 ]
@@ -500,3 +501,24 @@ class RuleParser:
     def _is_at_end(self) -> bool:
         """检查是否已到达 token 流的末尾。"""
         return self.pos >= len(self.tokens)
+
+
+def precompile_rule(script: str) -> (bool, Optional[str]):
+    """
+    预编译一个规则脚本以检查其语法是否有效。
+
+    Args:
+        script: 包含单条规则的完整脚本字符串。
+
+    Returns:
+        一个元组 (is_valid, error_message)。
+        - 如果语法有效, 返回 (True, None)。
+        - 如果存在语法错误, 返回 (False, "错误信息...")。
+    """
+    if not isinstance(script, str) or not script.strip():
+        return False, "脚本不能为空。"
+    try:
+        RuleParser(script).parse()
+        return True, None
+    except RuleParserError as e:
+        return False, str(e)

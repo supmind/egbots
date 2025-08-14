@@ -4,7 +4,7 @@ import unittest
 from src.core.parser import (
     RuleParser, ParsedRule, StatementBlock, Assignment, ActionCallStmt, Literal,
     Variable, BinaryOp, PropertyAccess, IndexAccess, ForEachStmt, IfStmt,
-    RuleParserError, ListConstructor, DictConstructor
+    RuleParserError, ListConstructor, DictConstructor, precompile_rule
 )
 
 class TestNewRuleParser(unittest.TestCase):
@@ -159,6 +159,49 @@ class TestNewRuleParser(unittest.TestCase):
                     f"错误: {e}\n"
                     f"脚本:\n---\n{script}\n---"
                 )
+
+    def test_parse_negative_numbers(self):
+        """测试解析器是否能正确处理负数和负浮点数。"""
+        # 测试负整数
+        script_int = 'WHEN command THEN { x = -10; }'
+        parser_int = RuleParser(script_int)
+        rule_int = parser_int.parse()
+        stmt_int = rule_int.then_block.statements[0]
+        self.assertIsInstance(stmt_int.expression, Literal)
+        self.assertEqual(stmt_int.expression.value, -10)
+
+        # 测试负浮点数
+        script_float = 'WHEN command THEN { y = -99.5; }'
+        parser_float = RuleParser(script_float)
+        rule_float = parser_float.parse()
+        stmt_float = rule_float.then_block.statements[0]
+        self.assertIsInstance(stmt_float.expression, Literal)
+        self.assertEqual(stmt_float.expression.value, -99.5)
+
+    def test_precompile_function(self):
+        """测试新的预编译函数的功能。"""
+        # 测试一个有效的规则
+        valid_script = 'WHEN command THEN { reply("ok"); }'
+        is_valid, error = precompile_rule(valid_script)
+        self.assertTrue(is_valid)
+        self.assertIsNone(error)
+
+        # 测试一个语法无效的规则
+        invalid_script = 'WHEN command THEN { reply("ok") }' # 缺少分号
+        is_valid, error = precompile_rule(invalid_script)
+        self.assertFalse(is_valid)
+        self.assertIsNotNone(error)
+        self.assertIn("期望得到 token 类型 SEMICOLON", error)
+
+        # 测试空脚本
+        is_valid, error = precompile_rule("")
+        self.assertFalse(is_valid)
+        self.assertEqual(error, "脚本不能为空。")
+
+        # 测试只有空格的脚本
+        is_valid, error = precompile_rule("   \n\t   ")
+        self.assertFalse(is_valid)
+        self.assertEqual(error, "脚本不能为空。")
 
 if __name__ == '__main__':
     unittest.main()
