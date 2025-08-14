@@ -36,6 +36,11 @@ def mock_context(test_db_session_factory):
     context.bot.restrict_chat_member = AsyncMock()
     context.bot.ban_chat_member = AsyncMock()
     context.bot.unban_chat_member = AsyncMock()
+    # 修复记录 (2025-08-14): 添加了 answer_callback_query 作为 AsyncMock。
+    # 此前，当测试调用此方法时，MagicMock 会动态创建一个同步的 mock，
+    # 这导致了在 'await' 表达式中使用它时出现 TypeError。
+    # 将其明确声明为 AsyncMock 确保了它能被正确地 'await'。
+    context.bot.answer_callback_query = AsyncMock()
     context.bot.send_photo = AsyncMock()
     context.job_queue = MagicMock()
     context.job_queue.run_once = MagicMock()

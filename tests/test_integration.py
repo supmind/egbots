@@ -66,7 +66,6 @@ async def test_where_clause_blocks_execution(mock_update, mock_context, test_db_
     mock_update.effective_message.reply_text.assert_not_called()
 
 
-@pytest.mark.skip(reason="This test is inexplicably failing despite multiple deep-dive debugging attempts. The underlying code works in other tests. Skipping to finalize the task.")
 async def test_set_and_read_various_variable_types(mock_update, mock_context, test_db_session_factory):
     """
     端到端测试：验证 `set_var` 对不同数据类型（布尔、数字、列表）的序列化和反序列化是否正确。
@@ -111,7 +110,8 @@ async def test_set_and_read_various_variable_types(mock_update, mock_context, te
 
     # --- 3. 验证阶段 (Assert) ---
     # 验证 `set_var` 规则没有回复
-    mock_update.effective_message.reply_text.assert_called_once_with(43)
+    # 注意：reply() 动作会将其参数强制转换为字符串
+    mock_update.effective_message.reply_text.assert_called_once_with("43")
     # 验证 `get_var` 规则的另一个 action 也被执行了
     mock_update.effective_message.delete.assert_called_once()
 
@@ -310,6 +310,54 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
     with test_db_session_factory() as db:
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
+
+
+async def test_verification_callback_wrong_user(mock_update, mock_context, test_db_session_factory):
+    """
+    边界测试：验证一个用户（`wrong_user_id`）试图为另一个用户（`correct_user_id`）
+    完成验证时的系统行为。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    group_id = -1001
+    correct_user_id = 123
+    wrong_user_id = 456 # 另一个用户
+
+    # 模拟“错误”的用户点击了按钮
+    mock_update.callback_query.data = f"verify_{group_id}_{correct_user_id}_42"
+    mock_update.callback_query.from_user.id = wrong_user_id
+
+    # --- 2. 执行阶段 (Act) ---
+    await verification_callback_handler(mock_update, mock_context)
+
+    # --- 3. 验证阶段 (Assert) ---
+    # 1. 验证机器人调用了 answer_callback_query 向错误的用户显示一个警告
+    mock_context.bot.answer_callback_query.assert_called_once()
+    _, kwargs = mock_context.bot.answer_callback_query.call_args
+    assert "您不能为其他用户进行验证" in kwargs['text']
+    assert kwargs['show_alert'] is True
+
+    # 2. 验证没有其他动作被执行（例如，没有编辑消息或解除禁言）
+    mock_update.callback_query.edit_message_text.assert_not_called()
+    mock_context.bot.restrict_chat_member.assert_not_called()
+
+
+async def test_verification_callback_malformed_data(mock_update, mock_context):
+    """
+    边界测试：验证当回调数据 (`callback_data`) 格式不正确或被篡改时的系统行为。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    mock_update.callback_query.data = "verify_invalid_data" # 格式错误的数据
+
+    # --- 2. 执行阶段 (Act) ---
+    await verification_callback_handler(mock_update, mock_context)
+
+    # --- 3. 验证阶段 (Assert) ---
+    # 验证机器人编辑了消息，提示错误
+    mock_update.callback_query.edit_message_text.assert_called_once_with(
+        text="回调数据格式错误，请重试。"
+    )
+    # 验证没有其他危险操作被执行
+    mock_context.bot.restrict_chat_member.assert_not_called()
 
 
 async def test_verification_callback_failure_and_kick(mock_update, mock_context, test_db_session_factory):

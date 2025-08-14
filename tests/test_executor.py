@@ -122,6 +122,29 @@ async def test_list_and_dict_construction():
     result_dict = await _evaluate_expression_in_where_clause("{'a': 10, 'b': 'hello', 'c': x}", {"x": 99})
     assert result_dict == {'a': 10, 'b': 'hello', 'c': 99}
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expr, scope, expected", [
+    # 涉及 null 的运算
+    ("null + 5", None, 5),
+    ("5 + null", None, 5),
+    ("'a' + null", None, "a"),
+    ("null + 'b'", None, "b"),
+    ("[1] + null", None, [1, None]),
+    ("null > 5", None, False),
+    ("null == null", None, True),
+    # 混合类型运算
+    ("'val: ' + 10", None, "val: 10"),
+    ("10 + ' is val'", None, "10 is val"),
+    # 复杂逻辑
+    ("(true and false) or (true and true)", None, True),
+    ("not (false or false)", None, True),
+])
+async def test_expression_evaluation_edge_cases(expr, scope, expected):
+    """为表达式求值添加更多边界情况测试。"""
+    result = await _evaluate_expression_in_where_clause(expr, scope)
+    assert result == expected
+
 # =================== 动作执行测试 ===================
 
 @pytest.mark.asyncio
@@ -168,6 +191,86 @@ async def test_action_unmute_user_targeting():
     call_kwargs_2 = mock_context.bot.restrict_chat_member.call_args.kwargs
     assert call_kwargs_2['user_id'] == 111222  # 应针对显式提供的用户ID
 
+
+@pytest.mark.asyncio
+async def test_action_send_message():
+    """测试 send_message 动作。"""
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    mock_context = Mock()
+    mock_context.bot.send_message = AsyncMock()
+
+    await _execute_then_block("send_message('a new message');", mock_update, mock_context)
+
+    mock_context.bot.send_message.assert_called_once_with(chat_id=-1001, text='a new message')
+
+
+@pytest.mark.asyncio
+async def test_action_delete_message():
+    """测试 delete_message 动作。"""
+    mock_update = Mock()
+    mock_update.effective_message.delete = AsyncMock()
+    mock_context = Mock()
+
+    await _execute_then_block("delete_message();", mock_update, mock_context)
+
+    mock_update.effective_message.delete.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_action_kick_user():
+    """测试 kick_user 动作。"""
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    mock_context = Mock()
+    mock_context.bot.ban_chat_member = AsyncMock()
+    mock_context.bot.unban_chat_member = AsyncMock()
+
+    await _execute_then_block("kick_user(555);", mock_update, mock_context)
+
+    mock_context.bot.ban_chat_member.assert_called_once_with(-1001, 555)
+    mock_context.bot.unban_chat_member.assert_called_once_with(-1001, 555)
+
+
+@pytest.mark.asyncio
+async def test_action_set_var(test_db_session_factory):
+    """测试 set_var 动作是否能正确地在数据库中创建或更新变量。"""
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    mock_update.effective_user.id = 123
+    mock_context = Mock()
+
+    with test_db_session_factory() as session:
+        executor = RuleExecutor(mock_update, mock_context, session)
+
+        # 1. 创建一个组变量
+        await executor.set_var("group.config", {"theme": "dark"})
+        session.commit()
+
+        # 2. 创建一个用户变量
+        await executor.set_var("user.points", 100)
+        session.commit()
+
+        # 3. 为另一个用户创建变量
+        await executor.set_var("user.warnings", 1, 999)
+        session.commit()
+
+        # 4. 验证数据库状态
+        from src.database import StateVariable
+        import json
+
+        # 验证组变量
+        group_var = session.query(StateVariable).filter_by(group_id=-1001, name="config", user_id=None).one()
+        assert json.loads(group_var.value) == {"theme": "dark"}
+
+        # 验证当前用户的变量
+        user_var = session.query(StateVariable).filter_by(group_id=-1001, name="points", user_id=123).one()
+        assert json.loads(user_var.value) == 100
+
+        # 验证另一个用户的变量
+        other_user_var = session.query(StateVariable).filter_by(group_id=-1001, name="warnings", user_id=999).one()
+        assert json.loads(other_user_var.value) == 1
+
 # =================== 控制流测试 ===================
 
 @pytest.mark.asyncio
@@ -187,6 +290,54 @@ async def test_foreach_on_empty_and_null():
     # 在 null 上循环也不应执行任何操作或引发错误
     final_scope_null = await run_script("foreach (item in null) { counter = counter + 1; }")
     assert final_scope_null['counter'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value, expected_reply", [
+    (5, "low"),
+    (15, "medium"),
+    (25, "high"),
+])
+async def test_if_elif_else_chain(value, expected_reply):
+    """测试 if-elif-else 逻辑链是否能正确执行。"""
+    script = f"""
+    x = {value};
+    result = "unknown";
+    if (x < 10) {{
+        result = "low";
+    }} else if (x < 20) {{
+        result = "medium";
+    }} else {{
+        result = "high";
+    }}
+    reply(result);
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, Mock())
+    mock_update.effective_message.reply_text.assert_called_once_with(expected_reply)
+
+
+@pytest.mark.asyncio
+async def test_break_statement_in_loop():
+    """测试 break 语句能否正确地终止 foreach 循环。"""
+    script = """
+    items = [1, 2, 3, 4, 5];
+    count = 0;
+    foreach (item in items) {
+        if (item == 3) {
+            break;
+        }
+        count = count + 1;
+    }
+    reply(count);
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, Mock())
+    # 循环应该在 item 为 1 和 2 时执行，然后在 item 为 3 时中断。
+    # 因此，计数器的最终值应为 2。
+    mock_update.effective_message.reply_text.assert_called_once_with("2")
 
 
 @pytest.mark.asyncio

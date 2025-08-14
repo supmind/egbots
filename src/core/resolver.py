@@ -164,5 +164,9 @@ class VariableResolver:
                 try:
                     current_obj = getattr(current_obj, part)
                 except AttributeError:
+                    # 对于真实的 Telegram 对象，访问不存在的属性会触发 AttributeError。
+                    # 捕获这个异常并返回 None 是处理无效路径的标准做法。
+                    # 注意：在测试中，需要确保 mock 对象被正确配置（例如使用 spec），
+                    # 以便它们也能模拟这种行为，否则测试可能会得到意想不到的结果。
                     return None
         return current_obj

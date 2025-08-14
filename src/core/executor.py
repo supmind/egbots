@@ -189,24 +189,46 @@ class RuleExecutor:
             await self._execute_statement_block(stmt.else_block, current_scope)
 
     async def _visit_foreach_stmt(self, stmt: ForEachStmt, current_scope: Dict[str, Any]):
-        """执行 'foreach (var in collection) { ... }' 语句。"""
+        """
+        执行 'foreach (var in collection) { ... }' 语句。
+
+        修复记录 (2025-08-14):
+        此前的实现为每次循环迭代创建了一个作用域的浅拷贝 (`loop_scope = current_scope.copy()`)。
+        这导致了一个 bug：在循环体内对变量（如计数器）的修改在下一次迭代开始时会丢失，
+        因为新的 `loop_scope` 总是从原始的 `current_scope` 复制而来。
+
+        当前的实现通过直接在 `current_scope` 中操作循环变量来修复此问题。
+        这种方法确保了在多次迭代中，变量状态的修改（如 `count = count + 1`）能够被正确地保持。
+        同时，在循环结束后，会谨慎地恢复或移除循环变量，以避免对外部作用域造成污染。
+        """
         collection = await self._evaluate_expression(stmt.collection, current_scope)
 
         if not isinstance(collection, (list, str)):
             logger.warning(f"foreach 循环的目标不是可迭代对象: {type(collection)}")
             return
 
-        for item in collection:
-            # 为循环体创建一个新的、嵌套的作用域。
-            loop_scope = current_scope.copy()
-            loop_scope[stmt.loop_var] = item
+        # 保存循环变量可能覆盖的旧值，以便在循环结束后恢复
+        original_value = current_scope.get(stmt.loop_var)
+        had_original_value = stmt.loop_var in current_scope
 
+        for item in collection:
+            # 直接在当前作用域中设置循环变量。
+            # 这允许循环体内的修改（例如对计数器的修改）在迭代之间保持持久。
+            current_scope[stmt.loop_var] = item
             try:
-                await self._execute_statement_block(stmt.body, loop_scope)
+                await self._execute_statement_block(stmt.body, current_scope)
             except BreakException:
                 break  # 退出循环
             except ContinueException:
                 continue  # 进入下一次迭代
+
+        # 循环结束后，恢复或移除循环变量以避免污染外部作用域
+        if had_original_value:
+            current_scope[stmt.loop_var] = original_value
+        else:
+            # 如果循环变量在循环开始前不存在，则在循环结束后将其移除
+            if stmt.loop_var in current_scope:
+                del current_scope[stmt.loop_var]
 
     async def _visit_assignment(self, stmt: Assignment, current_scope: Dict[str, Any]):
         """处理对变量、属性和下标的赋值操作。"""
@@ -263,25 +285,33 @@ class RuleExecutor:
             return await self._resolve_path(expr.name)
 
         if expr_type is PropertyAccess:
-            # 对于属性访问，例如 a.b.c，我们需要区分 a 是局部变量还是全局上下文变量。
+            # 修复记录 (2025-08-14):
+            # 此处的逻辑比最初预想的要复杂，因此恢复到了原始实现。
+            #
+            # 问题的核心在于如何处理像 `vars.user.points` 或 `user.is_admin` 这样的“命名空间式”变量。
+            # 一个简单的实现（即 `target = await self._evaluate_expression(expr.target, ...)`）会首先尝试
+            # 对 `vars.user` 求值，但这本身并不是一个有效的、独立的变量。
+            #
+            # 正确的逻辑是：
+            # 1. 尝试将整个表达式（如 `vars.user.points`）重构为一个完整的路径字符串。
+            # 2. 检查该路径的“基变量”（如 `vars`）是否为局部变量。
+            # 3. 如果基变量不是局部变量，则将完整的路径字符串（`vars.user.points`）直接交给
+            #    `VariableResolver` 处理。解析器有专门的逻辑来处理这种包含 `.` 的特殊路径。
+            # 4. 如果基变量是局部变量，则按常规方式处理：先对目标求值，再获取其属性。
             full_path = self._try_reconstruct_path(expr)
             base_name = None
             if isinstance(expr.target, Variable):
                 base_name = expr.target.name
             elif isinstance(expr.target, PropertyAccess):
-                # 这是一个简化的处理，用于获取最顶层的基变量名
                 temp_expr = expr.target
                 while isinstance(temp_expr, PropertyAccess):
                     temp_expr = temp_expr.target
                 if isinstance(temp_expr, Variable):
                     base_name = temp_expr.name
 
-            # 如果基变量不在当前作用域中，则假定它是一个全局上下文变量（如 'user', 'command'），
-            # 并让 resolver 处理完整的路径。这是修复 user.is_admin 的关键。
             if base_name and base_name not in current_scope:
                 return await self._resolve_path(full_path)
 
-            # 否则，它是在一个局部变量上进行属性访问。正常求值即可。
             target = await self._evaluate_expression(expr.target, current_scope)
             return target.get(expr.property) if isinstance(target, dict) else getattr(target, expr.property, None)
 
