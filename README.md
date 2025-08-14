@@ -112,8 +112,8 @@ WHEN command WHERE command.name == 'warn' THEN {
     // 从上下文变量中获取被回复用户的ID
     target_id = message.reply_to_message.from_user.id;
 
-    // 将ID作为参数传递给动作
-    set_var("user.warnings", (vars.user(target_id).warnings or 0) + 1);
+    // 使用 'vars.user_USER_ID.var_name' 语法来读取和写入其他用户的变量
+    set_var("user.warnings", (vars.user_target_id.warnings or 0) + 1, target_id);
     kick_user(target_id);
 
     reply("用户 " + target_id + " 已被警告并踢出。");
@@ -132,7 +132,7 @@ WHEN command WHERE command.name == 'warn' THEN {
 | `kick_user(user_id)` | 将用户踢出群组（可重新加入）。`user_id` 为可选参数。 |
 | `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。`user_id` 为可选参数。 |
 | `unmute_user(user_id)` | 解除用户禁言（恢复发送消息权限）。`user_id` 为可选参数。 |
-| `set_var(name, value)` | 为**触发规则的用户**或**群组**设置一个持久化变量。 |
+| `set_var(name, value, user_id)` | 为用户或群组设置一个持久化变量。当作用域为 'user' 时，可以额外提供一个 `user_id` 参数来指定目标用户。`user_id` 为可选参数。 |
 | `log(message, tag)` | 记录一条日志。`message` 是必需的文本，`tag` 是可选的分类标签。每个群组最多保留500条日志，采用先进先出策略。 |
 | `start_verification()` | 对新用户启动人机验证流程。 |
 | `stop()` | 立即停止执行当前规则，且不再处理后续规则。 |

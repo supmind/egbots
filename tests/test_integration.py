@@ -116,6 +116,59 @@ async def test_set_and_read_various_variable_types(mock_update, mock_context, te
     mock_update.effective_message.delete.assert_called_once()
 
 
+async def test_set_var_for_specific_user(mock_update, mock_context, test_db_session_factory):
+    """
+    端到端测试：验证 set_var 可以为一个显式指定 user_id 的用户设置变量。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    admin_user_id = 123
+    target_user_id = 555
+
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        # 规则1: 管理员 (123) 为目标用户 (555) 设置一个变量
+        db.add(Rule(
+            group_id=-1001, name="Set Var For Other", priority=2,
+            script=f"""
+            WHEN command WHERE command.name == 'setit' THEN {{
+                set_var("user.points", 100, {target_user_id});
+            }} END
+            """
+        ))
+        # 规则2: 目标用户 (555) 读取自己的变量并作出回应
+        db.add(Rule(
+            group_id=-1001, name="Get Var For Self", priority=1,
+            script=f"""
+            WHEN command WHERE command.name == 'getit' THEN {{
+                reply(vars.user_{target_user_id}.points);
+            }} END
+            """
+        ))
+        db.commit()
+
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        # --- 2. 执行阶段 (Act) ---
+        # 模拟管理员 (123) 执行设置命令
+        mock_update.effective_user.id = admin_user_id
+        mock_update.message.text = "/setit"
+        mock_update.message.entities = [{'type': 'bot_command', 'offset': 0, 'length': 6}]
+        await process_event("command", mock_update, mock_context)
+
+        # 验证第一次调用没有产生回复
+        mock_update.effective_message.reply_text.assert_not_called()
+
+        # 模拟目标用户 (555) 执行读取命令
+        mock_update.effective_user.id = target_user_id
+        mock_update.message.text = "/getit"
+        mock_update.message.entities = [{'type': 'bot_command', 'offset': 0, 'length': 6}]
+        await process_event("command", mock_update, mock_context)
+
+    # --- 3. 验证阶段 (Assert) ---
+    # 验证目标用户读取到了由管理员设置的值
+    # 注意：reply() 动作会将其参数转换为字符串，因此我们断言 '100'
+    mock_update.effective_message.reply_text.assert_called_once_with(str(100))
+
+
 # =================== Action Tests ===================
 
 async def test_ban_user_action(mock_update, mock_context, test_db_session_factory):

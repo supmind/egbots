@@ -240,6 +240,12 @@ class RuleExecutor:
         expr_type = type(expr)
 
         if expr_type is Literal: return expr.value
+
+        # 尝试将表达式重构为 'a.b.c' 这样的路径，以便特殊处理 'vars.*'
+        full_path = self._try_reconstruct_path(expr)
+        if full_path and full_path.startswith('vars.'):
+            return await self._resolve_path(full_path)
+
         if expr_type is Variable:
             return current_scope.get(expr.name, await self._resolve_path(expr.name))
         if expr_type is PropertyAccess:
@@ -334,6 +340,20 @@ class RuleExecutor:
         except Exception as e:
             logger.error(f"执行内置函数 '{func_name}' 时出错: {e}")
             return None
+
+    def _try_reconstruct_path(self, expr: Expr) -> Optional[str]:
+        """
+        尝试从一个表达式AST节点（例如 PropertyAccess 链）重构出完整的点分隔路径字符串。
+        例如，将 PropertyAccess(target=Variable(name='a'), property='b') 转换为 "a.b"。
+        如果表达式不是一个简单的访问路径，则返回 None。
+        """
+        if isinstance(expr, Variable):
+            return expr.name
+        if isinstance(expr, PropertyAccess):
+            base_path = self._try_reconstruct_path(expr.target)
+            if base_path:
+                return f"{base_path}.{expr.property}"
+        return None
 
     async def _resolve_path(self, path: str) -> Any:
         """解析变量路径，委托给 VariableResolver 实例处理。"""
@@ -448,28 +468,31 @@ class RuleExecutor:
             logger.error(f"禁言用户 {target_user_id} 失败: {e}")
 
     @action("set_var")
-    async def set_var(self, variable_path: str, value: Any):
-        """动作：设置一个持久化变量 (例如 "user.warns" 或 "group.config")。"""
+    async def set_var(self, variable_path: str, value: Any, user_id: Any = None):
+        """
+        动作：设置一个持久化变量 (例如 "user.warns" 或 "group.config")。
+        当作用域为 'user' 时，可以额外提供一个 user_id 来指定目标用户。
+        """
         if not isinstance(variable_path, str) or '.' not in variable_path:
             return logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效，应为 'scope.name' 格式。")
 
         scope, var_name = variable_path.split('.', 1)
         if not self.update.effective_chat: return
         group_id = self.update.effective_chat.id
-        user_id = None
+        db_user_id = None  # 用于数据库查询的 user_id
 
         if scope.lower() == 'user':
-            # 根据新设计，'user' 作用域的目标ID由 _get_target_user_id 决定
-            # （在没有显式ID时，默认为动作发起者）
-            target_user_id = self._get_target_user_id()
+            # 如果是用户作用域，则解析目标用户ID
+            # 优先使用动作调用时显式提供的 user_id
+            target_user_id = self._get_target_user_id(user_id)
             if not target_user_id:
-                return logger.warning("set_var for 'user' scope could not determine target user.")
-            user_id = target_user_id
+                return logger.warning("set_var 在 'user' 作用域下无法确定目标用户。")
+            db_user_id = target_user_id
         elif scope.lower() != 'group':
             return logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
 
         variable = self.db_session.query(StateVariable).filter_by(
-            group_id=group_id, user_id=user_id, name=var_name
+            group_id=group_id, user_id=db_user_id, name=var_name
         ).first()
 
         if value is None:

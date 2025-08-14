@@ -89,17 +89,38 @@ class VariableResolver:
         return None
 
     def _resolve_persistent_variable(self, path: str) -> Any:
-        """解析 `vars.*` 相关的持久化变量。"""
+        """
+        解析 `vars.*` 相关的持久化变量。
+        支持 'vars.user.points' 和 'vars.user_12345.points' 两种格式。
+        """
         parts = path.split('.')
         if len(parts) != 3: return None
 
-        _, scope, var_name = parts
+        _, scope_str, var_name = parts
+        scope_parts = scope_str.split('_')
+        scope_name = scope_parts[0].lower()
+
+        target_user_id = None
+        if len(scope_parts) > 1:
+            try:
+                # 假设格式为 'user_12345'
+                target_user_id = int(''.join(scope_parts[1:]))
+            except (ValueError, TypeError):
+                logger.warning(f"在变量路径中发现无效的用户ID: {scope_str}")
+                return None
+
         query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
 
-        if scope.lower() == 'user':
-            if not self.update.effective_user: return None
-            query = query.filter_by(user_id=self.update.effective_user.id)
-        elif scope.lower() == 'group':
+        if scope_name == 'user':
+            # 如果提供了显式的 target_user_id，则使用它
+            if target_user_id:
+                query = query.filter_by(user_id=target_user_id)
+            # 否则，回退到当前上下文的用户
+            elif self.update.effective_user:
+                query = query.filter_by(user_id=self.update.effective_user.id)
+            else:
+                return None # 在没有上下文用户且未指定ID的情况下，无法解析
+        elif scope_name == 'group':
             query = query.filter(StateVariable.user_id.is_(None))
         else:
             return None
