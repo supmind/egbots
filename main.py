@@ -131,56 +131,52 @@ async def main():
         'default': SQLAlchemyJobStore(url=db_url)
     }
     scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="UTC")
-    scheduler.start()
-    logger.info("调度器已成功启动。")
 
     # --- 4. 初始化 Telegram Bot Application ---
     logger.info("正在启动机器人应用...")
     application = Application.builder().token(token).build()
 
     # --- 5. 设置全局应用上下文 (Bot Data) ---
-    # 将核心对象（如数据库会话工厂和调度器）存入 bot_data，
-    # 以便在所有 handler 中都能方便地访问它们。
     application.bot_data['session_factory'] = session_factory
     application.bot_data['scheduler'] = scheduler
-    application.bot_data['rule_cache'] = {}  # 初始化规则缓存字典
+    application.bot_data['rule_cache'] = {}
 
-    # --- 6. 启动时加载持久化的计划任务 ---
-    await load_scheduled_rules(application)
-
-    # --- 7. 注册所有事件处理器 ---
+    # --- 6. 注册所有事件处理器 ---
     logger.info("正在注册事件处理器...")
-    # 命令处理器
     application.add_handler(CommandHandler("reload_rules", reload_rules_handler))
     application.add_handler(CommandHandler("rules", rules_handler))
     application.add_handler(CommandHandler("togglerule", toggle_rule_handler))
-    # 使用 MessageHandler 和 command 过滤器来捕获所有未被明确处理的命令，以便规则引擎能够处理它们
     application.add_handler(MessageHandler(filters.COMMAND, command_handler))
-    # 消息处理器 (处理非命令的纯文本)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, user_leave_handler))
     application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, edited_message_handler))
-    # 媒体处理器
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     application.add_handler(MessageHandler(filters.VIDEO, video_handler))
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
-    # 成员状态变化处理器
     application.add_handler(ChatMemberHandler(user_join_handler, ChatMemberHandler.CHAT_MEMBER))
-
-    # --- 新增：验证流程处理器 ---
-    # 处理 /start verify_... 命令
     application.add_handler(CommandHandler("start", start_handler))
-    # 处理用户点击答案按钮的回调
     application.add_handler(CallbackQueryHandler(verification_callback_handler))
 
-    # --- 8. 启动机器人 ---
-    logger.info("机器人已完成启动，开始轮询接收更新...")
-    await application.run_polling()
-    logger.info("机器人已停止轮询。")
+    # --- 7. 启动一切 ---
+    try:
+        async with application:
+            scheduler.start()
+            logger.info("调度器已成功启动。")
+            await load_scheduled_rules(application)
+            logger.info("机器人已完成启动，开始轮询接收更新...")
+            await application.start()
+            await application.updater.start_polling()
+            # 运行直到被取消（例如，通过 Ctrl+C）
+            await asyncio.Future()
+    finally:
+        logger.info("正在关闭调度器...")
+        if scheduler.running:
+            scheduler.shutdown()
+            logger.info("调度器已关闭。")
 
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("接收到关闭信号，机器人正在优雅地关闭...")
+        logger.info("接收到关闭信号，程序正在关闭...")

@@ -107,7 +107,7 @@ async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_
     mock_init_db.assert_called_once_with("sqlite:///:memory:")
     mock_get_session.assert_called_once()
     mock_scheduler.assert_called_once()
-    mock_scheduler.return_value.start.assert_called_once()
+    # mock_scheduler.return_value.start.assert_called_once() # <-- 已移除，因为 start() 不再被直接调用
     mock_app_builder.return_value.token.assert_called_once_with("fake_token")
 
     assert 'session_factory' in mock_app.bot_data

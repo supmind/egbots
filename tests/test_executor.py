@@ -144,6 +144,11 @@ async def test_action_unmute_user_targeting():
     mock_context = Mock()
     mock_context.bot.restrict_chat_member = AsyncMock()
 
+    # unmute_user 会调用 get_chat 来获取默认权限，因此也需要 mock
+    mock_chat = Mock()
+    mock_chat.permissions = ChatPermissions(can_send_messages=True, can_send_other_messages=True)
+    mock_context.bot.get_chat = AsyncMock(return_value=mock_chat)
+
     # --- 场景1: 未提供 user_id，应作用于发起者 ---
     await _execute_then_block("unmute_user();", mock_update, mock_context)
 
