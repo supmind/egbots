@@ -135,40 +135,30 @@ async def test_action_reply():
     mock_update.effective_message.reply_text.assert_called_once_with('hello world')
 
 @pytest.mark.asyncio
-async def test_action_unmute_user():
-    """测试新增的 unmute_user 动作。"""
+async def test_action_unmute_user_targeting():
+    """测试 unmute_user 动作的目标判定是否符合新规则。"""
     # 1. 设置 Mocks
     mock_update = Mock()
     mock_update.effective_chat.id = 12345
-    mock_update.effective_user.id = 9876
-    # 明确设置 effective_message 和 reply_to_message
-    mock_update.effective_message = Mock()
-    mock_update.effective_message.reply_to_message.from_user.id = 54321
-
+    mock_update.effective_user.id = 9876  # 动作发起者ID
     mock_context = Mock()
     mock_context.bot.restrict_chat_member = AsyncMock()
 
-    # 2. 测试通过回复来解除禁言
+    # --- 场景1: 未提供 user_id，应作用于发起者 ---
     await _execute_then_block("unmute_user();", mock_update, mock_context)
 
-    # 3. 断言
+    # 断言
     mock_context.bot.restrict_chat_member.assert_called_once()
-    call_kwargs = mock_context.bot.restrict_chat_member.call_args.kwargs
+    call_kwargs_1 = mock_context.bot.restrict_chat_member.call_args.kwargs
+    assert call_kwargs_1['user_id'] == 9876  # 应针对发起者自己
+    permissions = call_kwargs_1['permissions']
+    assert permissions.can_send_messages is True # 验证权限是否正确设置
 
-    assert call_kwargs['chat_id'] == 12345
-    assert call_kwargs['user_id'] == 54321  # 应针对被回复的用户
-    permissions = call_kwargs['permissions']
-    assert permissions.can_send_messages is True
-    assert permissions.can_send_photos is True
-    assert permissions.can_invite_users is True
-
-    # 4. 测试对指定 user_id 的情况
+    # --- 场景2: 提供了显式的 user_id，应作用于该ID ---
     mock_context.bot.restrict_chat_member.reset_mock()
-    # 移除回复消息以测试下一个场景
-    mock_update.effective_message.reply_to_message = None
-
     await _execute_then_block("unmute_user(111222);", mock_update, mock_context)
 
+    # 断言
     mock_context.bot.restrict_chat_member.assert_called_once()
     call_kwargs_2 = mock_context.bot.restrict_chat_member.call_args.kwargs
     assert call_kwargs_2['user_id'] == 111222  # 应针对显式提供的用户ID

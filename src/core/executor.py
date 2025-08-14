@@ -348,7 +348,8 @@ class RuleExecutor:
     def _get_target_user_id(self, explicit_user_id: Any = None) -> Optional[int]:
         """
         一个辅助方法，用于确定动作的目标用户ID。
-        优先级顺序: 1. 显式提供的 user_id 参数 -> 2. 回复的消息中的用户ID -> 3. 触发事件的用户ID。
+        逻辑: 1. 如果提供了显式的 user_id，则使用它。
+              2. 否则，总是默认使用触发规则的用户的ID。
         """
         if explicit_user_id:
             try:
@@ -356,10 +357,11 @@ class RuleExecutor:
             except (ValueError, TypeError):
                 logger.warning(f"提供的 user_id '{explicit_user_id}' 不是一个有效的用户ID。")
                 return None
-        if self.update.effective_message and self.update.effective_message.reply_to_message:
-            return self.update.effective_message.reply_to_message.from_user.id
+
+        # 如果没有提供显式ID，则默认目标是动作的发起者自己
         if self.update.effective_user:
             return self.update.effective_user.id
+
         return None
 
     @action("reply")
@@ -457,8 +459,12 @@ class RuleExecutor:
         user_id = None
 
         if scope.lower() == 'user':
-            if not self.update.effective_user: return
-            user_id = self.update.effective_user.id
+            # 根据新设计，'user' 作用域的目标ID由 _get_target_user_id 决定
+            # （在没有显式ID时，默认为动作发起者）
+            target_user_id = self._get_target_user_id()
+            if not target_user_id:
+                return logger.warning("set_var for 'user' scope could not determine target user.")
+            user_id = target_user_id
         elif scope.lower() != 'group':
             return logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
 
