@@ -38,7 +38,7 @@ from src.bot.handlers import (
 # 配置结构化日志，便于问题排查
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG # <--- 将日志级别调整为 DEBUG 以显示所有调试信息
 )
 # APScheduler 的日志非常冗长，将其级别调整为 WARNING，以保持日志清爽
 logging.getLogger('apscheduler').setLevel(logging.WARNING)

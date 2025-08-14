@@ -252,18 +252,39 @@ class RuleExecutor:
         """递归地对一个表达式节点求值并返回结果。"""
         expr_type = type(expr)
 
-        if expr_type is Literal: return expr.value
-
-        # 尝试将表达式重构为 'a.b.c' 这样的路径，以便特殊处理 'vars.*'
-        full_path = self._try_reconstruct_path(expr)
-        if full_path and full_path.startswith('vars.'):
-            return await self._resolve_path(full_path)
+        if expr_type is Literal:
+            return expr.value
 
         if expr_type is Variable:
-            return current_scope.get(expr.name, await self._resolve_path(expr.name))
+            # 如果变量在本地作用域（例如，由 foreach 或赋值创建），则优先使用它。
+            if expr.name in current_scope:
+                return current_scope[expr.name]
+            # 否则，将其视为一个需要从机器人上下文解析的全局变量。
+            return await self._resolve_path(expr.name)
+
         if expr_type is PropertyAccess:
+            # 对于属性访问，例如 a.b.c，我们需要区分 a 是局部变量还是全局上下文变量。
+            full_path = self._try_reconstruct_path(expr)
+            base_name = None
+            if isinstance(expr.target, Variable):
+                base_name = expr.target.name
+            elif isinstance(expr.target, PropertyAccess):
+                # 这是一个简化的处理，用于获取最顶层的基变量名
+                temp_expr = expr.target
+                while isinstance(temp_expr, PropertyAccess):
+                    temp_expr = temp_expr.target
+                if isinstance(temp_expr, Variable):
+                    base_name = temp_expr.name
+
+            # 如果基变量不在当前作用域中，则假定它是一个全局上下文变量（如 'user', 'command'），
+            # 并让 resolver 处理完整的路径。这是修复 user.is_admin 的关键。
+            if base_name and base_name not in current_scope:
+                return await self._resolve_path(full_path)
+
+            # 否则，它是在一个局部变量上进行属性访问。正常求值即可。
             target = await self._evaluate_expression(expr.target, current_scope)
             return target.get(expr.property) if isinstance(target, dict) else getattr(target, expr.property, None)
+
         if expr_type is IndexAccess:
             target = await self._evaluate_expression(expr.target, current_scope)
             index = await self._evaluate_expression(expr.index, current_scope)
