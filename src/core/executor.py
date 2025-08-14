@@ -107,7 +107,7 @@ class RuleExecutor:
     一个AST（抽象语法树）解释器，负责执行由 RuleParser 生成的语法树。
     它通过访问者模式遍历AST，对表达式求值，管理变量作用域，并执行与外部世界交互的“动作”。
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule"):
         """
         初始化规则执行器。
 
@@ -115,31 +115,42 @@ class RuleExecutor:
             update: 当前的 Telegram Update 对象。
             context: 当前的 Telegram Context 对象。
             db_session: 当前数据库会话。
+            rule_name: 当前正在执行的规则的名称，用于日志记录。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
+        self.rule_name = rule_name
         self.per_request_cache: Dict[str, Any] = {}
         self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache)
+
+    def _log_debug(self, message: str):
+        """一个辅助函数，用于为日志消息添加规则名称前缀。"""
+        logger.debug(f"[{self.rule_name}] {message}")
 
     async def execute_rule(self, rule: ParsedRule):
         """
         执行一个已完全解析的规则。
         此方法会为本次执行创建一个顶层的变量作用域。
         """
-        # 为每个规则的执行创建一个独立的顶层作用域，以确保变量隔离。
+        self._log_debug("开始执行规则。")
         top_level_scope = {}
 
         # 1. 如果存在 WHERE 子句，则对其求值。
         if rule.where_clause:
+            self._log_debug("正在求值 WHERE 子句...")
             where_passed = await self._evaluate_expression(rule.where_clause, top_level_scope)
-            # 如果 WHERE 条件不为真，则终止此规则的执行。
             if not where_passed:
+                self._log_debug(f"WHERE 子句求值结果为 '{where_passed}' (假值)，规则终止。")
                 return
+            self._log_debug(f"WHERE 子句求值结果为 '{where_passed}' (真值)，继续执行。")
 
         # 2. 如果 WHERE 子句通过（或不存在），则执行 THEN 代码块。
         if rule.then_block:
+            self._log_debug("正在执行 THEN 代码块...")
             await self._execute_statement_block(rule.then_block, top_level_scope)
+
+        self._log_debug("规则执行完毕。")
 
     async def _execute_statement_block(self, block: StatementBlock, current_scope: Dict[str, Any]):
         """在给定的作用域内执行一个语句块。"""
@@ -152,6 +163,7 @@ class RuleExecutor:
         if stmt_type is Assignment:
             await self._visit_assignment(stmt, current_scope)
         elif stmt_type is ActionCallStmt:
+            self._log_debug(f"正在执行动作: {stmt.call.action_name}")
             await self._visit_action_call_stmt(stmt, current_scope)
         elif stmt_type is ForEachStmt:
             await self._visit_foreach_stmt(stmt, current_scope)
@@ -231,9 +243,10 @@ class RuleExecutor:
         if action_name in _ACTION_REGISTRY:
             action_func = _ACTION_REGISTRY[action_name]
             evaluated_args = [await self._evaluate_expression(arg_expr, current_scope) for arg_expr in stmt.call.args]
+            self._log_debug(f"动作参数求值结果: {evaluated_args}")
             await action_func(self, *evaluated_args)
         else:
-            logger.warning(f"调用了未知的动作: '{stmt.call.action_name}'")
+            logger.warning(f"[{self.rule_name}] 调用了未知的动作: '{stmt.call.action_name}'")
 
     async def _evaluate_expression(self, expr: Expr, current_scope: Dict[str, Any]) -> Any:
         """递归地对一个表达式节点求值并返回结果。"""

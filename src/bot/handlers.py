@@ -180,13 +180,18 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
                 logger.info(f"已为群组 {chat_id} 缓存 {len(parsed_rules)} 条规则。")
 
             rules_to_process = rule_cache.get(chat_id, [])
-            if not rules_to_process: return
+            if not rules_to_process:
+                logger.debug(f"[{chat_id}] No rules to process for event '{event_type}'.")
+                return
 
+            logger.debug(f"[{chat_id}] Processing event '{event_type}' with {len(rules_to_process)} rules.")
             # 遍历并执行匹配的规则
             for parsed_rule in rules_to_process:
+                # 检查规则的 when_event 是否与当前事件类型匹配
                 if parsed_rule.when_event and parsed_rule.when_event.lower().startswith(event_type):
+                    logger.debug(f"[{chat_id}] Event '{event_type}' matches rule '{parsed_rule.name}'. Executing...")
                     try:
-                        executor = RuleExecutor(update, context, db_session)
+                        executor = RuleExecutor(update, context, db_session, parsed_rule.name)
                         await executor.execute_rule(parsed_rule)
                     except StopRuleProcessing:
                         logger.info(f"规则 '{parsed_rule.name}' 请求停止处理后续规则。")
