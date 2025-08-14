@@ -48,6 +48,7 @@ class Group(Base):
     # 其下所有关联的 Rule 和 StateVariable 也会被自动删除。
     rules = relationship("Rule", back_populates="group", cascade="all, delete-orphan")
     state_variables = relationship("StateVariable", back_populates="group", cascade="all, delete-orphan")
+    logs = relationship("Log", back_populates="group", cascade="all, delete-orphan")
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式。"""
@@ -136,6 +137,31 @@ class Verification(Base):
 
     def __repr__(self):
         return f"<Verification(user_id={self.user_id}, group_id={self.group_id}, attempts={self.attempts_made})>"
+
+
+class Log(Base):
+    """
+    模型类：存储一条操作日志。
+    用于记录由规则触发的关键操作，以便管理员审计和未来可能的自动化分析。
+    """
+    __tablename__ = 'logs'
+
+    id = Column(Integer, primary_key=True, comment="日志的唯一标识符 (自增主键)")
+    group_id = Column(BigInteger, ForeignKey('groups.id', ondelete="CASCADE"),
+                      nullable=False, index=True, comment="关联的群组ID")
+
+    # 日志的核心信息
+    message = Column(Text, nullable=False, comment="日志的具体文本内容")
+    tag = Column(String(100), nullable=True, index=True, comment="用于分类的标签")
+    actor_user_id = Column(BigInteger, nullable=False, index=True, comment="执行操作的用户ID")
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False,
+                       comment="日志记录时间")
+
+    # ORM 关系
+    group = relationship("Group", back_populates="logs")
+
+    def __repr__(self):
+        return f"<Log(id={self.id}, group_id={self.group_id}, actor={self.actor_user_id}, tag='{self.tag}')>"
 
 
 # ==================== 数据库初始化函数 ====================

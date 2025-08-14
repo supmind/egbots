@@ -112,6 +112,7 @@ END
 | `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。`user_id` 可选。 |
 | `unmute_user(user_id)` | 解除用户禁言（恢复发送消息权限）。`user_id` 可选。 |
 | `set_var(name, value)` | 设置一个持久化变量 (例如 `"group.my_var"`)。 |
+| `log(message, tag)` | 记录一条日志。`message` 是必需的文本，`tag` 是可选的分类标签。每个群组最多保留500条日志，采用先进先出策略。 |
 | `start_verification()` | 对新用户启动人机验证流程。 |
 | `stop()` | 立即停止执行当前规则，且不再处理后续规则。 |
 

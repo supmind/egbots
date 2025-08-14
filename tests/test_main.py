@@ -6,7 +6,7 @@ import importlib
 # Import the module we want to test
 main_module = importlib.import_module("main")
 
-from src.database import Base, Group, Rule
+from src.database import Base, Group, Rule, Log
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

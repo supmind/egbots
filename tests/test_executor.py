@@ -6,6 +6,7 @@ from telegram import ChatPermissions
 
 from src.core.parser import RuleParser
 from src.core.executor import RuleExecutor, _ACTION_REGISTRY
+from src.database import Log
 
 # =================== 辅助工具 ===================
 
@@ -191,3 +192,55 @@ async def test_foreach_on_empty_and_null():
     # 在 null 上循环也不应执行任何操作或引发错误
     final_scope_null = await run_script("foreach (item in null) { counter = counter + 1; }")
     assert final_scope_null['counter'] == 0
+
+
+@pytest.mark.asyncio
+async def test_action_log_with_rotation(test_db_session_factory):
+    """
+    测试 log 动作，特别是其日志轮换（rotation）功能。
+    """
+    # --- 1. 准备 ---
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    mock_update.effective_user.id = 123
+    mock_context = Mock()
+
+    with test_db_session_factory() as session:
+        executor = RuleExecutor(mock_update, mock_context, session)
+
+        # --- 2. 第一次记录日志 ---
+        await executor.log("这是第一条日志", tag="initial")
+        session.commit()
+
+        # 断言日志已创建
+        logs = session.query(Log).all()
+        assert len(logs) == 1
+        assert logs[0].message == "这是第一条日志"
+        assert logs[0].tag == "initial"
+        assert logs[0].group_id == -1001
+        assert logs[0].actor_user_id == 123
+
+        # --- 3. 记录另外 500 条日志以触发轮换 ---
+        for i in range(500):
+            await executor.log(f"日志 #{i}", tag="loop")
+            # 每次提交以模拟独立事件，并确保 count() 查询获取最新状态
+            session.commit()
+
+        # --- 4. 验证轮换逻辑 ---
+        # 总共添加了 1 (初始) + 500 (循环) = 501 条日志。
+        # 第501次添加时，会删除最旧的一条，所以最终数量应为500。
+        log_count = session.query(Log).count()
+        assert log_count == 500
+
+        # 第一条日志（“这是第一条日志”）应该已被删除
+        first_log_exists = session.query(Log).filter_by(message="这是第一条日志").first()
+        assert first_log_exists is None
+
+        # 循环中的第一条日志（“日志 #0”）现在应该是最旧的，并且应该存在
+        loop_log_0_exists = session.query(Log).filter_by(message="日志 #0").first()
+        assert loop_log_0_exists is not None
+
+        # 最后一条日志（“日志 #499”）应该存在
+        last_log_exists = session.query(Log).filter_by(message="日志 #499").first()
+        assert last_log_exists is not None
+        assert last_log_exists.tag == "loop"

@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
 
 # 从重构后的 database 模块导入所有需要的组件
-from src.database import Base, Group, Rule, StateVariable
+from src.database import Base, Group, Rule, StateVariable, Log
 
 # 使用内存中的 SQLite 数据库进行测试，这样可以保证每次测试都在一个干净、隔离的环境中运行。
 TEST_DATABASE_URL = "sqlite:///:memory:"

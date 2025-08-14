@@ -15,7 +15,7 @@ from src.core.parser import (
     ActionCallExpr, Literal, Variable, PropertyAccess, IndexAccess, BinaryOp,
     ListConstructor, DictConstructor, IfStmt, ForEachStmt, BreakStmt, ContinueStmt
 )
-from src.database import StateVariable
+from src.database import StateVariable, Log
 from .resolver import VariableResolver
 
 logger = logging.getLogger(__name__)
@@ -542,6 +542,47 @@ class RuleExecutor:
             )
         except Exception as e:
             logger.error(f"为用户 {target_user_id} 解除禁言失败: {e}", exc_info=True)
+
+
+    @action("log")
+    async def log(self, message: str, tag: str = None):
+        """
+        动作：记录一条日志，并应用轮换策略。
+        每个群组最多保留500条日志，超出时会自动删除最旧的日志。
+        """
+        if not self.update.effective_chat:
+            return logger.warning("log 动作无法在没有有效群组的上下文中执行。")
+
+        actor_user_id = self._get_initiator_id()
+        if not actor_user_id:
+            return logger.warning("log 动作无法确定操作者ID，已跳过。")
+
+        group_id = self.update.effective_chat.id
+
+        try:
+            # 1. 检查当前日志数量
+            log_count = self.db_session.query(Log).filter_by(group_id=group_id).count()
+
+            # 2. 如果达到或超过限制，则删除最旧的日志
+            if log_count >= 500:
+                oldest_log = self.db_session.query(Log).filter_by(
+                    group_id=group_id
+                ).order_by(Log.timestamp.asc()).first()
+                if oldest_log:
+                    self.db_session.delete(oldest_log)
+
+            # 3. 创建并添加新日志
+            new_log = Log(
+                group_id=group_id,
+                actor_user_id=actor_user_id,
+                message=str(message),
+                tag=str(tag) if tag is not None else None
+            )
+            self.db_session.add(new_log)
+            logger.info(f"群组 {group_id} 中已记录新日志。标签: {tag}, 消息: {message}")
+
+        except Exception as e:
+            logger.error(f"为群组 {group_id} 记录日志时出错: {e}", exc_info=True)
 
 
     @action("stop")

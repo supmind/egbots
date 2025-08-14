@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database import Base, Rule, Group, Verification
+from src.database import Base, Rule, Group, Verification, Log
 from src.bot.handlers import process_event, verification_callback_handler
 from src.utils import generate_math_image
 

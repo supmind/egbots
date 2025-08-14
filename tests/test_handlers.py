@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.bot.handlers import reload_rules_handler, process_event
-from src.database import Base, Rule, Group
+from src.database import Base, Rule, Group, Log
 from src.utils import session_scope
 
 pytestmark = pytest.mark.asyncio
