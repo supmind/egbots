@@ -60,12 +60,14 @@ class VariableResolver:
         cache_key = f"command_args_{self.update.update_id}_{self.update.message.text}"
         if cache_key not in self.per_request_cache:
             parts = shlex.split(self.update.message.text)
-            self.per_request_cache[cache_key] = {
+            parsed_command = {
                 "name": parts[0].lstrip('/'),
                 "args": parts[1:],
                 "text": self.update.message.text,
                 "full_args": " ".join(parts[1:])
             }
+            logger.debug(f"命令已解析: name='{parsed_command['name']}', args={parsed_command['args']}")
+            self.per_request_cache[cache_key] = parsed_command
 
         command_data = self.per_request_cache[cache_key]
 
