@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.jobstores.base import JobLookupError
 from telegram.ext import Application, MessageHandler, CommandHandler, ChatMemberHandler, filters, CallbackQueryHandler
 
 # --- 内部模块导入 ---
@@ -163,6 +164,13 @@ async def main():
     # --- 7. 启动一切 ---
     try:
         async with application:
+            # 启动前，先尝试移除可能已损坏的旧任务，以确保健壮性
+            try:
+                scheduler.remove_job('daily_cleanup')
+                logger.info("已成功移除旧的 'daily_cleanup' 计划任务。")
+            except JobLookupError:
+                logger.info("未找到旧的 'daily_cleanup' 计划任务，无需移除。")
+
             # 注册我们的每日清理任务，并明确地将 db_url 作为参数传递
             scheduler.add_job(
                 cleanup_old_events, 'cron', hour=4, minute=0, id='daily_cleanup',
