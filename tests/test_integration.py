@@ -311,6 +311,40 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
 
+
+async def test_rule_priority_execution_order(mock_update, mock_context, test_db_session_factory):
+    """
+    集成测试：验证具有不同优先级的规则是否按正确的顺序执行。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        # 低优先级规则
+        db.add(Rule(
+            group_id=-1001, name="Low Prio Rule", priority=5,
+            script="""WHEN message THEN { reply("low priority"); } END"""
+        ))
+        # 高优先级规则
+        db.add(Rule(
+            group_id=-1001, name="High Prio Rule", priority=10,
+            script="""WHEN message THEN { reply("high priority"); } END"""
+        ))
+        db.commit()
+
+    mock_update.effective_message.text = "trigger both"
+
+    # --- 2. 执行阶段 (Act) ---
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        await process_event("message", mock_update, mock_context)
+
+    # --- 3. 验证阶段 (Assert) ---
+    # 验证 reply_text 被调用了两次
+    assert mock_update.effective_message.reply_text.call_count == 2
+    # 验证调用的顺序是否正确（高优先级在前）
+    calls = mock_update.effective_message.reply_text.call_args_list
+    assert calls[0].args[0] == "high priority"
+    assert calls[1].args[0] == "low priority"
+
 async def test_full_lifecycle_simple_reply(mock_update, mock_context, test_db_session_factory):
     """
     测试一个完整的事件生命周期：

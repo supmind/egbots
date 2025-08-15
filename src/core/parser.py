@@ -24,7 +24,9 @@ class RuleParserError(Exception):
             super().__init__(f"解析错误: {message}")
 
 # =================== 抽象语法树 (AST) 节点定义 ===================
-# AST (Abstract Syntax Tree) 是将纯文本脚本转换为程序可理解的结构化对象的关键。
+# AST (Abstract Syntax Tree) 是将纯文本脚本转换为程序可理解的、结构化的对象表示。
+# 它是解析器（Parser）的输出，也是执行器（Executor）的输入，是连接这两个核心模块的桥梁。
+# 每个节点都代表了语言中的一个语法结构（如赋值、函数调用、二元运算等）。
 
 # --- 表达式节点 (Expression Nodes) ---
 @dataclass
@@ -84,9 +86,9 @@ class Stmt:
     pass
 
 @dataclass
-class Assignment(Expr): # 赋值也是一种表达式，因此继承自 Expr
+class Assignment(Expr): # 在我们的语言中，赋值既是语句也是表达式（例如 `a = b = 5;`），因此它继承自 Expr。
     """赋值表达式节点，例如: x = 10"""
-    variable: Expr  # 左值可以是变量、属性访问或下标访问
+    variable: Expr  # 左值（L-value）可以是变量、属性访问或下标访问，代表要被赋值的目标。
     expression: Expr
 
 @dataclass
@@ -149,18 +151,20 @@ class Token:
     line: int
     column: int
 
-# 使用正则表达式定义所有合法的词法单元。
+# 使用正则表达式定义所有合法的词法单元（Token）。
+# 分词器（Tokenizer）的工作就是将原始的、连续的脚本字符串，根据这些定义，切割成一个个离散的、带有类型和值的 Token。
 #
-# 重点:
-# 1.  **顺序至关重要**: 正则引擎会按列表顺序尝试匹配。因此，更具体的模式必须放在更通用的模式之前。
-#     例如, `COMPARE_OP` 中的 `startswith` 关键字必须在 `IDENTIFIER` 之前，否则 "startswith" 会被错误地识别为一个普通标识符。
-# 2.  **负数处理**: `NUMBER` 模式 `(-?\d+(\.\d*)?)` 被特意放在 `ARITH_OP` (`\+|-|\*|/`) 之前。
-#     这确保了 `-10` 这样的字符串被完整地识别为一个 `NUMBER` 词法单元，而不是一个 `ARITH_OP` (`-`) 后跟一个 `NUMBER` (`10`)。
-# 3.  **关键字**: `KEYWORD` 模式 `\b(WHEN|...)\b` 使用了单词边界 `\b`，以防止将 `THEN` 误认为 `my_then_variable` 的一部分。
+# 设计重点:
+# 1.  **顺序至关重要 (Order Matters)**: 正则引擎会按照列表中从上到下的顺序尝试匹配。因此，更具体的模式必须放在更通用的模式之前。
+#     一个经典的例子是，`COMPARE_OP` 中的 `contains` 关键字必须在 `IDENTIFIER` (通用标识符) 之前，否则 "contains" 这个词会被错误地识别为一个普通变量名，而不是一个比较运算符。
+# 2.  **负数处理 (Negative Number Handling)**: `NUMBER` 模式 `(-?\d+(\.\d*)?)` 被特意放在了 `ARITH_OP` (算术运算符 `\+|-|\*|/`) 之前。
+#     这个顺序确保了像 `-10` 这样的字符串被完整地识别为一个 `NUMBER` 类型的 Token，其值为 `-10`。如果没有这个顺序，它可能会被错误地拆分为两个 Token：一个 `ARITH_OP` (`-`) 和一个 `NUMBER` (`10`)。
+# 3.  **关键字的单词边界 (Keyword Word Boundaries)**: `KEYWORD` 模式 `\b(WHEN|...)\b` 使用了单词边界 `\b`。
+#     这可以防止关键字成为其他标识符的一部分。例如，如果没有 `\b`，`my_then_variable` 这个变量名中的 `then` 部分就可能会被错误地识别为 `THEN` 关键字。
 TOKEN_SPECIFICATION = [
-    ('SKIP',         r'[ \t]+'),      # 忽略所有空格和制表符
-    ('COMMENT',      r'//[^\n]*'),   # 忽略从 // 到行尾的单行注释
-    ('NEWLINE',      r'\n'),         # 将换行符识别为一个独立的词法单元，但在分词器中会被忽略
+    ('SKIP',         r'[ \t]+'),      # 忽略所有水平方向的空白字符（空格、制表符）。
+    ('COMMENT',      r'//[^\n]*'),   # 忽略从 // 到行尾的单行注释。
+    ('NEWLINE',      r'\n'),         # 将换行符识别为一个独立的词法单元，但在分词器的主循环中会被直接跳过。
     ('LBRACE',       r'\{'),
     ('RBRACE',       r'\}'),
     ('LPAREN',       r'\('),
@@ -171,16 +175,16 @@ TOKEN_SPECIFICATION = [
     ('COMMA',        r','),
     ('COLON',        r':'),
     ('DOT',          r'\.'),
-    ('COMPARE_OP',   r'==|!=|>=|<=|>|<|\b(contains|startswith|endswith)\b'),
-    ('EQUALS',       r'='),
-    ('LOGIC_OP',     r'\b(and|or|not)\b'),
-    # 关键点：将 NUMBER 放在 ARITH_OP 前面，以确保优先匹配负数，而不是将'-'解析为独立的减号
-    ('NUMBER',       r'-?\d+(\.\d*)?'),
-    ('ARITH_OP',     r'\+|-|\*|/'),
-    ('KEYWORD',      r'\b(WHEN|WHERE|THEN|END|IF|ELSE|FOREACH|IN|BREAK|CONTINUE|TRUE|FALSE|NULL)\b'),
-    ('STRING',       r'"[^"]*"|\'[^\']*\''),
-    ('IDENTIFIER',   r'[a-zA-Z_][a-zA-Z0-9_]*'),
-    ('MISMATCH',     r'.'),
+    ('COMPARE_OP',   r'==|!=|>=|<=|>|<|\b(contains|startswith|endswith)\b'), # 比较运算符
+    ('EQUALS',       r'='),          # 赋值运算符
+    ('LOGIC_OP',     r'\b(and|or|not)\b'), # 逻辑运算符
+    # 关键点：将 NUMBER 放在 ARITH_OP 前面，以确保优先匹配负数，而不是将'-'解析为独立的减号。
+    ('NUMBER',       r'-?\d+(\.\d*)?'), # 匹配整数和浮点数，包括负数。
+    ('ARITH_OP',     r'\+|-|\*|/'),   # 算术运算符
+    ('KEYWORD',      r'\b(WHEN|WHERE|THEN|END|IF|ELSE|FOREACH|IN|BREAK|CONTINUE|TRUE|FALSE|NULL)\b'), # 所有关键字
+    ('STRING',       r'"[^"]*"|\'[^\']*\''), # 匹配由双引号或单引号包裹的字符串。
+    ('IDENTIFIER',   r'[a-zA-Z_][a-zA-Z0-9_]*'), # 匹配变量名、函数名等标识符。
+    ('MISMATCH',     r'.'),          # 捕获所有其他不符合上述任何规则的单个字符，并标记为错误。
 ]
 # 在此处通过 re.IGNORECASE 标志实现全局不区分大小写，而不是在每个规则中使用 (?i)
 TOKEN_REGEX = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPECIFICATION), flags=re.IGNORECASE)
@@ -352,23 +356,31 @@ class RuleParser:
     def _parse_expression(self, min_precedence=0) -> Expr:
         """
         使用“优先级攀爬”（Pratt Parsing）算法来解析一个完整的、带优先级的表达式。
-        这是一个强大且优雅的算法，专门用于处理包含不同优先级和结合性（左结合/右结合）的二元运算符的表达式。
+        这是一个强大且优雅的算法，专门用于处理包含不同优先级和结合性（左结合/右结合）的二元运算符。
+        它比传统的递归下降解析在处理表达式时更简洁、高效。
+
+        核心思想：
+        - 每个运算符都有一个“优先级”（precedence）。
+        - 解析器在循环中不断地“向右看”，只要遇到的运算符的优先级不低于当前的“最小优先级”（`min_precedence`），
+          它就会“抓住”这个运算符和它右边的表达式，并将它们与左边的表达式（`lhs`）结合起来。
+        - 在处理一个运算符时，它会递归地调用自己来解析右侧的表达式，但会传入一个更高的“最小优先级”，
+          以此来确保更高优先级的运算符（如 `*`）会被优先绑定到其右侧的操作数上。
 
         工作原理简述 (以 `1 + 2 * 3` 为例):
-        1. `_parse_expression(0)` 被调用。
+        1. `_parse_expression(min_precedence=0)` 被调用。
         2. `_parse_unary_expression` 解析出 `1` 作为初始的 `lhs` (left-hand side)。
-        3. 进入 `while` 循环，看到下一个 token 是 `+`。`+` 的优先级 (5) > `min_precedence` (0)。
-        4. 我们处理 `+`。递归调用 `_parse_expression` 来解析右侧表达式，但这次传入的 `min_precedence` 是 `+` 的优先级再加一，即 6。
-           - `_parse_expression(6)` 被调用。
-           - 它解析出 `2` 作为 `lhs`。
-           - 看到下一个 token 是 `*`。`*` 的优先级 (6) >= `min_precedence` (6)。
-           - 我们处理 `*`。递归调用 `_parse_expression(7)`。
+        3. 进入 `while` 循环，看到下一个 token 是 `+`。`+` 的优先级 (5) > `min_precedence` (0)，循环继续。
+        4. 我们“抓住” `+`。然后递归调用 `_parse_expression` 来解析 `+` 右边的表达式，但这次传入的 `min_precedence` 是 `+` 的优先级再加一，即 6。
+           - `_parse_expression(min_precedence=6)` 被调用。
+           - 它解析出 `2` 作为其内部的 `lhs`。
+           - 它向右看，看到 `*`。`*` 的优先级 (6) >= `min_precedence` (6)，循环继续。
+           - 它“抓住” `*`，并递归调用 `_parse_expression(min_precedence=7)`。
              - `_parse_expression(7)` 解析出 `3` 作为 `lhs`。
-             - 循环结束，因为它后面没有更高优先级的运算符了。返回 `Literal(3)`。
+             - 它向右看，没有更多的运算符了，循环结束，返回 `Literal(3)`。
            - 回到 `_parse_expression(6)`，它现在有了 `rhs` (`Literal(3)`)。它将 `2`, `*`, `3` 组合成 `BinaryOp(2, '*', 3)` 并将其作为新的 `lhs`。
            - 循环结束，返回 `BinaryOp(2, '*', 3)`。
-        5. 回到最初的 `_parse_expression(0)`，它现在有了 `rhs` (`BinaryOp(2, '*', 3)`)。它将 `1`, `+`, 和这个 `rhs` 组合成 `BinaryOp(1, '+', BinaryOp(2, '*', 3))`。
-        6. 循环结束，返回最终的、正确嵌套的 AST。
+        5. 回到最初的 `_parse_expression(0)`，它现在有了 `rhs` (`BinaryOp(2, '*', 3)`)。它将 `1`, `+`, 和这个 `rhs` 组合成 `BinaryOp(1, '+', BinaryOp(2, '*', 3))` 作为新的 `lhs`。
+        6. 循环结束，返回最终的、正确嵌套的 AST，完美地体现了运算优先级。
         """
         lhs = self._parse_unary_expression()
 
@@ -398,7 +410,8 @@ class RuleParser:
 
     def _get_operator_precedence(self, token: Token) -> int:
         """
-        返回二元运算符的优先级。数字越大，优先级越高。
+        定义并返回二元运算符的优先级（precedence）。数字越大，优先级越高。
+        这个优先级表直接决定了表达式的求值顺序。
         - 赋值 (`=`): 1 (最低)
         - 逻辑或 (`or`): 2
         - 逻辑与 (`and`): 3
@@ -418,13 +431,15 @@ class RuleParser:
         return 0
 
     def _parse_unary_expression(self) -> Expr:
-        """解析一元运算符，例如 'not'。"""
+        """解析一元前缀运算符，例如 'not'。"""
         if self._peek_type('LOGIC_OP') and self._current_token().value.lower() == 'not':
             op_token = self._consume_keyword('not')
-            # 'not' 的优先级非常高，因此它后面应该跟一个同样能处理一元运算的表达式。
+            # 'not' 的优先级非常高，因此它后面应该跟一个同样能处理高优先级运算的表达式。
+            # 递归调用 _parse_unary_expression 而不是 _parse_expression，可以正确处理像 `not not true` 这样的链式调用。
             operand = self._parse_unary_expression()
-            # 在我们的AST中，为了简化，我们将 'not' 视为一个特殊的二元运算，其左操作数为空。
-            # 在执行器（Executor）中，会特别处理这种左操作数为 None 的情况。
+            # 在我们的AST中，为了简化，我们将 'not' 视为一个特殊的二元运算，其左操作数被设置为一个固定的字面量。
+            # 在执行器（Executor）中，会特别处理这种左操作数为特定值的情况，从而实现一元运算的逻辑。
+            # 这样做的好处是避免了为一元运算单独创建一个新的 AST 节点类型。
             return BinaryOp(left=Literal(value=None), op=op_token.value, right=operand)
 
         return self._parse_accessor_expression()
@@ -449,9 +464,9 @@ class RuleParser:
 
     def _parse_primary_expression(self) -> Expr:
         """
-        解析表达式的最基本组成部分（原子单元）。
-        这包括字面量、变量、括号内的表达式、列表/字典构造器，以及函数调用。
-        这是表达式递归下降解析的“基础情况”。
+        解析表达式的最基本组成部分（原子单元，Atoms）。
+        这是表达式递归下降解析的“基础情况”或“终止条件”。它负责处理那些不能再被分解的、
+        最简单的表达式片段，例如字面量、变量名，以及用于改变优先级的括号表达式。
         """
         token = self._current_token()
         if token.type == 'STRING':
@@ -470,10 +485,12 @@ class RuleParser:
             if val_lower == 'null': return Literal(value=None)
         elif token.type == 'IDENTIFIER':
             #
-            # 这是区分“变量访问”（如 `my_var`）和“函数调用”（如 `len(my_list)`）的关键逻辑。
-            # 我们向前“偷看”一个 token (`_peek_type`)，但不消耗它。如果标识符后面紧跟着一个左括号 `(`，
-            # 我们就断定这是一个函数调用，并调用专门的 `_parse_action_call_expression` 方法。
-            # 否则，它只是一个普通的变量访问。
+            # 这是区分“变量访问”（如 `my_var`）和“函数/动作调用”（如 `len(my_list)`）的关键逻辑。
+            # 我们向前“偷看”一个 token (`_peek_type(..., offset=1)`)，但不消耗它（即不移动解析器指针 `self.pos`）。
+            # 如果当前标识符的下一个 token 是一个左括号 `(`，我们就断定这是一个函数/动作调用，
+            # 并调用专门的 `_parse_action_call_expression` 方法来处理。
+            # 否则，它只是一个普通的变量访问，我们直接返回一个 `Variable` 节点。
+            # 这种“向前看”（lookahead）的技巧是递归下降解析器中非常常用和强大的技术。
             #
             if self._peek_type('LPAREN', offset=1):
                 return self._parse_action_call_expression()
@@ -542,9 +559,13 @@ class RuleParser:
         return self.tokens[self.pos + offset].value.lower() == expected_value.lower()
 
     def _consume(self, expected_type: str) -> Token:
-        """消耗一个指定类型的 token，如果类型不匹配则抛出错误。"""
+        """
+        消耗并返回一个指定类型的 token。这是解析器向前推进的核心方法。
+        如果当前 token 的类型与期望的不匹配，它会立即抛出一个带有详细位置信息的错误。
+        """
         if self.pos >= len(self.tokens):
-            # 在报告错误之前，尝试获取最后一个 token 的位置，以提供更有用的错误信息
+            # 在报告错误之前，尝试获取最后一个 token 的位置，以提供更有用的错误信息，
+            # 指出脚本在何处意外结束。
             last_token = self.tokens[-1] if self.tokens else None
             line = last_token.line if last_token else -1
             col = last_token.column if last_token else -1
@@ -563,7 +584,7 @@ class RuleParser:
             col = last_token.column if last_token else -1
             raise RuleParserError(f"期望得到关键字 '{keyword}'，但脚本已意外结束。", line, col)
         token = self.tokens[self.pos]
-        # 注意：允许 token 类型为 KEYWORD 或 LOGIC_OP，以统一处理 'not', 'and', 'or' 等逻辑关键字
+        # 注意：允许 token 类型为 KEYWORD 或 LOGIC_OP，这是为了统一处理 'if', 'else', 'and', 'or' 等所有关键字。
         if (token.type not in ('KEYWORD', 'LOGIC_OP')) or token.value.lower() != keyword.lower():
             raise RuleParserError(f"期望得到关键字 '{keyword}'，但得到 '{token.value}' (类型: {token.type})", token.line, token.column)
         self.pos += 1
@@ -581,8 +602,9 @@ class RuleParser:
 def precompile_rule(script: str) -> (bool, Optional[str]):
     """
     预编译一个规则脚本以检查其语法是否有效。
-    这是一个对外暴露的实用工具函数，可用于在不实际执行规则的情况下，
-    快速验证一个规则脚本的语法正确性。这对于在外部系统（如Web界面）中集成规则编辑器非常有用。
+    这是一个对外暴露的、安全的实用工具函数。它可以在不实际执行任何代码的情况下，
+    快速验证一个规则脚本的语法正确性。这对于在外部系统（例如，一个Web界面的规则编辑器）
+    中集成规则验证功能非常有用。
 
     Args:
         script: 包含单条规则的完整脚本字符串。
@@ -591,7 +613,7 @@ def precompile_rule(script: str) -> (bool, Optional[str]):
         一个元组 `(is_valid, error_message)`。
         - 如果脚本语法完全正确，返回 `(True, None)`。
         - 如果脚本存在语法错误，返回 `(False, "包含具体行号和错误信息的字符串")`。
-        - 如果脚本为空或只包含空白，返回 `(False, "脚本不能为空。")`。
+        - 如果脚本为空或只包含空白字符，返回 `(False, "脚本不能为空。")`。
     """
     if not isinstance(script, str) or not script.strip():
         return False, "脚本不能为空。"
@@ -601,6 +623,6 @@ def precompile_rule(script: str) -> (bool, Optional[str]):
         RuleParser(script).parse()
         return True, None
     except RuleParserError as e:
-        # 如果在解析过程中捕获到我们自定义的 `RuleParserError`，
-        # 说明存在语法错误。我们将异常对象转换为字符串（它包含了详细的错误信息）并返回。
+        # 如果在解析过程中捕获到我们自定义的 `RuleParserError`，说明存在语法错误。
+        # 我们将异常对象直接转换为字符串（它已经包含了格式化好的、用户友好的错误信息）并返回。
         return False, str(e)

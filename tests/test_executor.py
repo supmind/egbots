@@ -570,3 +570,46 @@ async def test_stop_action_raises_exception():
     script = "stop();"
     with pytest.raises(StopRuleProcessing):
         await _execute_then_block(script, Mock(), Mock())
+
+@pytest.mark.asyncio
+async def test_action_in_loop(mock_update, mock_context):
+    """测试在 foreach 循环中调用动作。"""
+    script = """
+    items = ["a", "b", "c"];
+    foreach (item in items) {
+        reply("Item is " + item);
+    }
+    """
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, mock_context)
+
+    # 验证 reply 被调用了三次
+    assert mock_update.effective_message.reply_text.call_count == 3
+    calls = mock_update.effective_message.reply_text.call_args_list
+    assert calls[0].args[0] == "Item is a"
+    assert calls[1].args[0] == "Item is b"
+    assert calls[2].args[0] == "Item is c"
+
+@pytest.mark.asyncio
+async def test_action_failure_graceful_handling(mock_update, mock_context, caplog):
+    """测试当一个动作的 API 调用失败时，执行器是否能优雅地处理错误。"""
+    from telegram.error import Forbidden
+
+    # 模拟 ban_user 动作因权限不足而抛出 Forbidden 异常
+    mock_context.bot.ban_chat_member = AsyncMock(side_effect=Forbidden("Not enough rights"))
+
+    # 在 pytest 的日志捕获中执行
+    with caplog.at_level('ERROR'):
+        # 我们期望这个调用不会抛出异常，而是将错误记录下来
+        await _execute_then_block("ban_user(123);", mock_update, mock_context)
+
+    # 验证 API 调用被尝试过
+    mock_context.bot.ban_chat_member.assert_called_once_with(mock_update.effective_chat.id, 123)
+
+    # 验证错误已被正确记录
+    assert len(caplog.records) == 1
+    log_record = caplog.records[0]
+    assert log_record.levelname == 'ERROR'
+    assert "封禁用户 123 失败" in log_record.message
+    # The exception type name "Forbidden" is not in the log, only its message.
+    assert "Not enough rights" in log_record.message

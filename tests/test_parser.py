@@ -378,6 +378,52 @@ class TestNewRuleParser(unittest.TestCase):
                 except RuleParserError as e:
                     self.fail(f"解析单参数函数 '{func_name}' 调用失败: {e}")
 
+    def test_parse_nested_if_in_foreach(self):
+        """测试解析嵌套在 foreach 循环内部的 if 语句。"""
+        script = """
+        WHEN command THEN {
+            foreach (item in my_list) {
+                if (item > 10) {
+                    reply("big");
+                }
+            }
+        }
+        """
+        rule = RuleParser(script).parse()
+        self.assertIsInstance(rule.then_block, StatementBlock)
+        foreach_stmt = rule.then_block.statements[0]
+        self.assertIsInstance(foreach_stmt, ForEachStmt)
+
+        # 验证循环体
+        loop_body = foreach_stmt.body
+        self.assertIsInstance(loop_body, StatementBlock)
+        self.assertEqual(len(loop_body.statements), 1)
+
+        # 验证循环体内的 if 语句
+        if_stmt = loop_body.statements[0]
+        self.assertIsInstance(if_stmt, IfStmt)
+        self.assertIsInstance(if_stmt.condition, BinaryOp)
+        self.assertEqual(if_stmt.condition.left.name, "item")
+        self.assertIsNone(if_stmt.else_block)
+
+    def test_parse_binary_op_with_function_call(self):
+        """测试解析一个操作数是函数调用的二元运算表达式。"""
+        script = "WHEN command WHERE x > len(my_list) THEN {}"
+        rule = RuleParser(script).parse()
+
+        where_clause = rule.where_clause
+        self.assertIsInstance(where_clause, BinaryOp)
+        self.assertEqual(where_clause.op, ">")
+
+        # 验证左操作数
+        self.assertIsInstance(where_clause.left, Variable)
+        self.assertEqual(where_clause.left.name, "x")
+
+        # 验证右操作数
+        self.assertIsInstance(where_clause.right, ActionCallExpr)
+        self.assertEqual(where_clause.right.action_name, "len")
+        self.assertEqual(len(where_clause.right.args), 1)
+        self.assertEqual(where_clause.right.args[0].name, "my_list")
 
 if __name__ == '__main__':
     unittest.main()

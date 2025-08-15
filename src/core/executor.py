@@ -20,11 +20,20 @@ from .resolver import VariableResolver
 
 logger = logging.getLogger(__name__)
 
-# ==================== 动作与内置函数注册表 ====================
+# ==================== 动作与内置函数注册表 (Action & Built-in Function Registries) ====================
 
-# 用于存储所有可用动作的注册表
+# 这是一个“注册表模式”的实现，用于解耦动作/函数的定义与执行。
+# 当解析器遇到一个动作调用（如 `reply("hello")`）时，执行器不需要用一个巨大的 if/elif/else 结构来查找
+# 对应的 Python 方法，而是直接在这个字典中通过名称查找即可。
+# 这种设计使得添加新的动作/函数变得非常简单：只需要在 `RuleExecutor` 类中定义一个新方法，
+# 并为其附上 `@action(...)` 或 `@builtin_function(...)` 装饰器即可，无需修改执行器的核心逻辑。
+
+# _ACTION_REGISTRY 用于存储所有可用的“动作”（Actions）。
+# 动作是与外部世界（主要是 Telegram API）交互的命令，例如 `reply()`, `ban_user()`。它们通常是异步的。
 _ACTION_REGISTRY: Dict[str, Callable[..., Coroutine]] = {}
-# 用于存储所有内置函数的注册表
+
+# _BUILTIN_FUNCTIONS 用于存储所有可用的“内置函数”（Built-in Functions）。
+# 内置函数是纯粹的数据处理函数，例如 `len()`, `str()`。它们是同步的，并且不应有任何副作用。
 _BUILTIN_FUNCTIONS: Dict[str, Callable[..., Any]] = {}
 
 def action(name: str):
@@ -86,40 +95,46 @@ def builtin_join(l: list, sep: str) -> str:
     """内置函数：使用分隔符连接列表中的所有元素，生成一个字符串。"""
     return str(sep).join(map(str, l))
 
-# ==================== 自定义控制流异常 ====================
+# ==================== 自定义控制流异常 (Custom Control Flow Exceptions) ====================
+
+# 在解释器或编译器中，使用异常来处理非线性的控制流（如 `break`, `continue`, `return`）是一种常见且优雅的技术。
+# 当执行器遇到 `break` 语句时，它会抛出 `BreakException`。这个异常会被上层的 `_visit_foreach_stmt` 方法捕获，
+# 从而立即终止循环，而不是通过设置和检查大量的布尔标志来逐层退出。这使得代码更清晰、更易于理解。
 
 class StopRuleProcessing(Exception):
     """当执行 stop() 动作时抛出，用于立即停止处理当前事件的所有后续规则。"""
     pass
 
 class BreakException(Exception):
-    """用于从 foreach 循环中跳出，实现 break 语句。"""
+    """用于从 `foreach` 循环中跳出，实现 `break` 语句。"""
     pass
 
 class ContinueException(Exception):
-    """用于跳至 foreach 循环的下一次迭代，实现 continue 语句。"""
+    """用于跳至 `foreach` 循环的下一次迭代，实现 `continue` 语句。"""
     pass
 
 # ==================== 规则执行器 (AST 解释器) ====================
 
 class RuleExecutor:
     """
-    一个AST（抽象语法树）解释器，负责执行由 RuleParser 生成的语法树。
-    它通过“访问者模式”遍历AST，对表达式求值，管理变量作用域，并执行与外部世界交互的“动作”。
-    这是整个规则引擎的核心运行时。
+    一个AST（抽象语法树）解释器，负责执行由 `RuleParser` 生成的语法树。
+    它通过递归地“访问”AST的每个节点（这是一种“访问者模式”的体现），对表达式求值，管理变量作用域，
+    并执行与外部世界（如Telegram API、数据库）交互的“动作”。这是整个规则引擎的核心运行时。
 
     工作流程:
-    1.  **初始化**: `RuleExecutor` 接收当前的 `Update`, `Context`, 数据库会话等所有上下文信息。
-        它还会创建一个 `VariableResolver` 实例，专门用于处理变量解析。
-    2.  **执行入口**: `execute_rule` 方法是执行的起点。它首先会检查并求值规则的 `WHERE` 子句。
-    3.  **求值与执行**: 如果 `WHERE` 子句通过，它会开始逐条执行 `THEN` 块中的语句。
-        -   对于表达式 (`1 + 2`, `user.id` 等)，它会调用 `_evaluate_expression` 来递归地计算出结果。
-        -   对于语句 (`x = 5`, `reply("hi")` 等)，它会调用 `_execute_statement` 来执行相应的操作。
+    1.  **初始化**: `RuleExecutor` 接收当前的 `Update`, `Context`, 数据库会话等所有运行时上下文信息。
+        它还会创建一个 `VariableResolver` 实例，将所有变量解析的复杂性委托给它。
+    2.  **执行入口 (`execute_rule`)**: 这是执行的起点。它首先会检查并对规则的 `WHERE` 子句进行求值。
+    3.  **求值与执行 (`_evaluate_expression` / `_execute_statement`)**:
+        - 如果 `WHERE` 子句的结果为真（或不存在），它会开始逐条执行 `THEN` 块中的语句。
+        - 对于表达式（如 `1 + 2`, `user.id`），它会调用 `_evaluate_expression` 来递归地计算出其Python值。
+        - 对于语句（如 `x = 5;`, `reply("hi");`），它会调用 `_execute_statement` 来执行相应的操作（如赋值、调用动作）。
     4.  **变量管理**:
-        -   `_evaluate_expression` 在查找变量时，会优先在 `current_scope` (本地作用域) 中查找。
-        -   如果在本地作用域找不到，它会将变量路径委托给 `self.variable_resolver` 来从更广的上下文中解析。
+        - 在对表达式求值时，它会维护一个 `current_scope` 字典来存储脚本的局部变量（例如，由赋值语句或 `foreach` 循环创建的变量）。
+        - 当查找一个变量时，它会优先在 `current_scope` 中查找。
+        - 如果在本地作用域找不到，它会将变量路径（如 `user.is_admin`）委托给 `self.variable_resolver` 来从更广的上下文中（如 `Update` 对象、数据库）解析。
     5.  **动作调用**: 当遇到一个动作调用（如 `reply(...)`）时，它会从 `_ACTION_REGISTRY` 中找到对应的
-        Python 方法，并用求值后的参数来调用它。
+        Python 方法，并用求值后的参数来异步调用它。
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule"):
         """
@@ -127,41 +142,43 @@ class RuleExecutor:
 
         Args:
             update: 当前的 Telegram Update 对象，包含了事件的所有上下文信息。
-            context: 当前的 Telegram Context 对象，用于访问机器人实例等。
-            db_session: 当前的数据库会话，用于读写持久化变量。
-            rule_name: 当前正在执行的规则的名称，主要用于日志记录，便于调试。
+            context: 当前的 Telegram Context 对象，用于访问机器人实例 (`context.bot`) 等。
+            db_session: 当前的数据库会话，用于读写持久化变量和日志。
+            rule_name: 当前正在执行的规则的名称，主要用于日志记录，以方便调试。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.rule_name = rule_name
-        # per_request_cache 用于在单次事件处理中缓存高成本计算的结果（如API调用）。
-        # 它被传递给 VariableResolver，以确保整个执行过程共享同一个缓存。
+        # `per_request_cache` 用于在单次事件处理中缓存高成本计算的结果（如API调用、命令解析）。
+        # 它被同时传递给 `VariableResolver`，以确保整个执行过程共享同一个缓存实例。
         self.per_request_cache: Dict[str, Any] = {}
         self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache)
 
     def _log_debug(self, message: str):
-        """一个辅助函数，用于为日志消息添加规则名称前缀。"""
+        """一个辅助函数，用于为调试日志消息自动添加规则名称前缀，便于追踪。"""
         logger.debug(f"[{self.rule_name}] {message}")
 
     async def execute_rule(self, rule: ParsedRule):
         """
         执行一个已完全解析的规则。
-        此方法会为本次执行创建一个顶层的变量作用域。
+        此方法会为本次执行创建一个顶层的变量作用域 (`top_level_scope`)。
         """
         self._log_debug("开始执行规则。")
         top_level_scope = {}
 
-        # 1. 如果存在 WHERE 子句，则对其求值。
+        # 步骤 1: 如果存在 WHERE 子句，则对其求值。
         if rule.where_clause:
             self._log_debug("正在求值 WHERE 子句...")
+            # `_evaluate_expression` 会返回表达式的实际值。
             where_passed = await self._evaluate_expression(rule.where_clause, top_level_scope)
+            # 我们使用 Python 的 `bool()` 来判断结果的“真假性”，这与多数动态语言的行为一致。
             if not where_passed:
                 self._log_debug(f"WHERE 子句求值结果为 '{where_passed}' (假值)，规则终止。")
-                return
+                return # 条件不满足，提前退出。
             self._log_debug(f"WHERE 子句求值结果为 '{where_passed}' (真值)，继续执行。")
 
-        # 2. 如果 WHERE 子句通过（或不存在），则执行 THEN 代码块。
+        # 步骤 2: 如果 WHERE 子句通过（或不存在），则执行 THEN 代码块。
         if rule.then_block:
             self._log_debug("正在执行 THEN 代码块...")
             await self._execute_statement_block(rule.then_block, top_level_scope)
@@ -174,7 +191,7 @@ class RuleExecutor:
             await self._execute_statement(stmt, current_scope)
 
     async def _execute_statement(self, stmt: Stmt, current_scope: Dict[str, Any]):
-        """将单个语句分派到正确的处理方法。"""
+        """根据语句的AST节点类型，将其分派到正确的处理方法。"""
         stmt_type = type(stmt)
         if stmt_type is Assignment:
             await self._visit_assignment(stmt, current_scope)
@@ -184,9 +201,9 @@ class RuleExecutor:
         elif stmt_type is ForEachStmt:
             await self._visit_foreach_stmt(stmt, current_scope)
         elif stmt_type is BreakStmt:
-            raise BreakException()
+            raise BreakException() # 抛出异常以中断循环
         elif stmt_type is ContinueStmt:
-            raise ContinueException()
+            raise ContinueException() # 抛出异常以跳到下一次迭代
         elif stmt_type is IfStmt:
             await self._visit_if_stmt(stmt, current_scope)
         else:
@@ -291,8 +308,8 @@ class RuleExecutor:
 
     async def _evaluate_expression(self, expr: Expr, current_scope: Dict[str, Any]) -> Any:
         """
-        通过递归下降的方式对一个表达式AST节点求值并返回其结果。
-        这是解释器的核心，它将AST节点转换为实际的Python值。
+        通过递归下降的方式对一个表达式AST节点求值，并返回其对应的Python值。
+        这是解释器的核心计算引擎。
         """
         expr_type = type(expr)
 
@@ -300,42 +317,34 @@ class RuleExecutor:
         if expr_type is Literal:
             return expr.value
 
-        # --- 变量与作用域 ---
+        # --- 变量与作用域查找 ---
         if expr_type is Variable:
             # 作用域查找顺序：优先查找本地作用域（由 `x = ...` 或 `foreach` 创建的变量）。
             if expr.name in current_scope:
                 return current_scope[expr.name]
-            # 如果本地作用域中没有，则委托给 VariableResolver 从更广的上下文中查找（如 `user.id`, `vars.group.x`）。
+            # 如果本地作用域中没有，则委托给 VariableResolver 从更广的上下文中查找（如 `user.id`, `vars.group.x` 等）。
             return await self._resolve_path(expr.name)
 
         # --- 复合表达式（递归部分） ---
         if expr_type is PropertyAccess:
             #
-            # 这是整个求值器中最复杂的逻辑之一，用于区分对“普通”对象的属性访问
-            # (例如 `my_dict.key`) 和对“魔法”上下文变量的访问 (例如 `user.is_admin`)。
+            # 这是整个求值器中最复杂、也最精妙的逻辑之一。它需要区分两种完全不同的情况：
+            # 1. 对“普通”本地变量的属性访问 (例如 `my_dict.key`)。
+            # 2. 对“魔法”上下文变量的访问 (例如 `user.is_admin`, `message.text`)。
             #
-            # 问题: 一个简单的实现 `target = await self._evaluate_expression(expr.target, ...)` 会失败，
+            # 问题: 一个简单的实现，如 `target = await self._evaluate_expression(expr.target, ...)`，会在这里失败。
             # 因为它会尝试对 `user` 或 `vars.user` 求值，但这些本身并不是有效的独立变量，它们只是路径的“命名空间”。
             #
             # 解决方案:
-            # 1. 将整个访问链（如 `user.is_admin`）重构为一个完整的路径字符串。
-            # 2. 检查这个路径的“基变量”（`user`）是否存在于本地作用域中。
-            # 3. 如果基变量 *不* 在本地作用域中，我们就假定这是一个需要由 VariableResolver
-            #    特殊处理的“魔法”变量，并将完整的路径字符串 (`user.is_admin`) 直接交给它。
-            # 4. 如果基变量 *在* 本地作用域中（例如 `my_dict = {"key": "val"}; ... my_dict.key`），
-            #    我们就按常规方式处理：先对 `my_dict` 求值，然后获取其 `key` 属性。
+            # 1. 尝试将整个访问链（如 `user.is_admin`）重构为一个完整的路径字符串。
+            # 2. 检查这个路径的“基变量”（即第一个部分，如 `user`）是否存在于本地作用域 `current_scope` 中。
+            # 3. 如果基变量 *不* 在本地作用域中，我们就假定这是一个需要由 `VariableResolver`
+            #    特殊处理的“魔法”变量，并将完整的路径字符串 (`user.is_admin`) 直接交给它处理。
+            # 4. 反之，如果基变量 *在* 本地作用域中（例如，脚本中有一行 `my_dict = {"key": "val"};`），
+            #    我们就按常规方式处理：先对 `my_dict` 求值，得到一个Python字典，然后再获取其 `key` 属性。
             #
             full_path = self._try_reconstruct_path(expr)
-            base_name = None
-            if isinstance(expr.target, Variable):
-                base_name = expr.target.name
-            elif isinstance(expr.target, PropertyAccess):
-                # 向上追溯，找到访问链的起点
-                temp_expr = expr.target
-                while isinstance(temp_expr, PropertyAccess):
-                    temp_expr = temp_expr.target
-                if isinstance(temp_expr, Variable):
-                    base_name = temp_expr.name
+            base_name = full_path.split('.')[0] if full_path else None
 
             # 核心判断：如果基变量不是一个局部变量，则将整个路径交给 VariableResolver 处理。
             if base_name and base_name not in current_scope:
@@ -343,7 +352,11 @@ class RuleExecutor:
 
             # 否则，按常规方式处理：先求值目标对象，再获取其属性。
             target = await self._evaluate_expression(expr.target, current_scope)
-            return target.get(expr.property) if isinstance(target, dict) else getattr(target, expr.property, None)
+            if isinstance(target, dict):
+                return target.get(expr.property)
+            elif target is not None:
+                return getattr(target, expr.property, None)
+            return None
 
         if expr_type is IndexAccess:
             target = await self._evaluate_expression(expr.target, current_scope)
@@ -367,26 +380,27 @@ class RuleExecutor:
         op = expr.op.lower()
 
         # 为 `and` 和 `or` 实现短路求值 (short-circuiting)。
-        # 这是重要的性能优化和行为修正。例如，在 `false and some_func()` 中，
-        # `some_func()` 根本不应该被执行。
+        # 这是重要的性能优化和行为修正。例如，在表达式 `false and some_func()` 中，
+        # `some_func()` 根本不应该被求值。我们的实现确保了这一点。
         if op == 'and':
-            lhs = await self._evaluate_expression(expr.left, current_scope)
-            # 只有当左侧为真时，才需要对右侧求值
-            return bool(await self._evaluate_expression(expr.right, current_scope)) if lhs else False
+            left_val = await self._evaluate_expression(expr.left, current_scope)
+            # 只有当左侧为真时，才需要对右侧求值。
+            return bool(await self._evaluate_expression(expr.right, current_scope)) if left_val else False
         if op == 'or':
-            lhs = await self._evaluate_expression(expr.left, current_scope)
-            # 只有当左侧为假时，才需要对右侧求值
-            return True if lhs else bool(await self._evaluate_expression(expr.right, current_scope))
+            left_val = await self._evaluate_expression(expr.left, current_scope)
+            # 只有当左侧为假时，才需要对右侧求值。
+            return True if left_val else bool(await self._evaluate_expression(expr.right, current_scope))
         if op == 'not':
-            # `not` 是一元运算，在我们的AST中其左操作数(lhs)为None，因此只对右侧求值。
+            # `not` 是一元运算，在我们的AST中其左操作数(left)为None，因此只对右侧求值。
             return not bool(await self._evaluate_expression(expr.right, current_scope))
 
-        # 对于非短路运算符，先对两边的操作数求值
+        # 对于非短路运算符，先对两边的操作数求值。
         lhs = await self._evaluate_expression(expr.left, current_scope)
         rhs = await self._evaluate_expression(expr.right, current_scope)
 
-        # 算术、列表和字符串运算
+        # 算术、列表和字符串运算。
         # `+` 运算符被重载用于多种类型：数字加法、字符串拼接、列表拼接。
+        # 这里的 `or 0` 和 `or ''` 是为了优雅地处理 `null` 值，将其视为空值或零值。
         if op == '+':
             try:
                 if isinstance(lhs, list): return lhs + (rhs if isinstance(rhs, list) else [rhs])
@@ -474,16 +488,16 @@ class RuleExecutor:
 
     def _get_target_user_id(self, explicit_user_id: Any = None) -> Optional[int]:
         """
-        一个统一的辅助方法，用于确定动作的目标用户ID，以确保行为的一致性和可预测性。
-        这是整个动作系统的核心设计哲学之一。
+        一个统一的辅助方法，用于确定动作的目标用户ID，以确保所有动作的行为都一致且可预测。
+        这是整个动作系统的核心设计哲学之一，旨在消除歧义。
 
-        规则非常简单：
+        规则非常简单，且优先级从高到低：
         1.  **显式优于隐式**: 如果在动作调用中显式提供了 `user_id` 参数 (例如 `ban_user(12345)`),
-            则永远优先使用它。
-        2.  **默认上下文**: 如果未提供 `user_id` 参数 (例如 `ban_user()`), 则默认目标是触发当前规则的用户
+            则永远优先使用这个ID。
+        2.  **默认上下文**: 如果未提供 `user_id` 参数 (例如 `ban_user()`), 则默认目标是**触发当前规则的用户**
             (即 `update.effective_user.id`)。
 
-        这使得规则编写者的意图非常明确。如果要对被回复消息的用户进行操作，
+        这个设计使得规则编写者的意图非常明确。例如，如果要对被回复消息的用户进行操作，
         脚本必须显式地写 `ban_user(message.reply_to_message.from_user.id)`，
         而不是依赖于模糊的、可能随上下文变化的隐式目标。
         """
@@ -494,7 +508,7 @@ class RuleExecutor:
                 logger.warning(f"提供的 user_id '{explicit_user_id}' 不是一个有效的用户ID。")
                 return None
 
-        # 如果没有提供显式ID，则回退到默认目标：动作的发起者自己
+        # 如果没有提供显式ID，则回退到默认目标：动作的发起者本人。
         if self.update.effective_user:
             return self.update.effective_user.id
 
@@ -591,12 +605,12 @@ class RuleExecutor:
         工作流程:
         1.  **解析路径**: 将 `variable_path` (如 `"user.warns"`) 分割为作用域 (`user`) 和变量名 (`warns`)。
         2.  **确定目标**:
-            - 如果作用域是 `'group'`，则目标是当前群组。
+            - 如果作用域是 `'group'`，则目标是当前群组 (`group_id`)，且 `user_id` 在数据库中为 `NULL`。
             - 如果作用域是 `'user'`，则调用 `_get_target_user_id(user_id)` 来确定目标用户。
-              这允许脚本编写者通过 `set_var("user.points", 100, some_other_user_id)` 来修改其他用户的变量。
-        3.  **数据库操作**:
-            - 查询数据库中是否已存在该变量。
-            - 如果 `value` 是 `null`，则从数据库中删除该变量记录。
+              这个设计允许脚本编写者通过 `set_var("user.points", 100, some_other_user_id)` 来修改其他用户的变量。
+        3.  **数据库操作 (Upsert Logic)**:
+            - 首先查询数据库中是否已存在该变量（基于 `group_id`, `user_id`, `name` 的组合键）。
+            - 如果 `value` 是 `null`，则从数据库中删除该变量记录（如果存在）。
             - 否则，将 `value` 序列化为 JSON 字符串，然后创建或更新数据库中的记录。
         """
         if not isinstance(variable_path, str) or '.' not in variable_path:
@@ -712,8 +726,8 @@ class RuleExecutor:
     async def log(self, message: str, tag: str = None):
         """
         动作：在数据库中为当前群组记录一条日志，并应用轮换（rotation）策略。
-        为了防止数据库无限膨胀，每个群组最多只保留最新的 500 条日志。
-        当记录第 501 条日志时，最旧的一条会自动被删除。
+        为了防止数据库因日志条目而无限膨胀，我们为每个群组设置了一个固定的日志容量上限（500条）。
+        当记录第 501 条日志时，最旧的一条会自动被删除，从而实现一个“滚动窗口”式的日志系统。
         """
         if not self.update.effective_chat:
             return logger.warning("log 动作无法在没有有效群组的上下文中执行。")
@@ -725,22 +739,23 @@ class RuleExecutor:
         group_id = self.update.effective_chat.id
 
         try:
-            # 1. 获取当前群组的日志总数。
-            # 关键修复：在计数之前先 flush，以确保 session 中新添加但未提交的日志能被 count() 查到。
+            # 步骤 1: 获取当前群组的日志总数。
+            # 关键修复：在计数之前先调用 `db_session.flush()`，以确保 session 中新添加但尚未提交的日志
+            # 也能被 `count()` 查询到，避免在连续快速记录日志时出现计数错误。
             self.db_session.flush()
-            # 注意：在 SQLAlchemy 中，`count()` 通常比 `len(query.all())` 更高效，因为它在数据库层面执行计数。
+            # 注意：在 SQLAlchemy 中，`query.count()` 通常比 `len(query.all())` 更高效，因为它在数据库层面执行计数。
             log_count = self.db_session.query(Log).filter_by(group_id=group_id).count()
 
-            # 2. 如果达到或超过限制，则查询并删除最旧的一条日志。
+            # 步骤 2: 如果达到或超过限制，则查询并删除最旧的一条日志。
             if log_count >= 500:
-                # 通过时间戳升序排序并取第一个，即可找到最旧的日志。
+                # 通过按时间戳升序排序并取第一个，即可高效地找到最旧的日志记录。
                 oldest_log = self.db_session.query(Log).filter_by(
                     group_id=group_id
                 ).order_by(Log.timestamp.asc()).first()
                 if oldest_log:
                     self.db_session.delete(oldest_log)
 
-            # 3. 创建并添加新日志记录。
+            # 步骤 3: 创建并添加新的日志记录。
             new_log = Log(
                 group_id=group_id,
                 actor_user_id=actor_user_id,
@@ -756,7 +771,10 @@ class RuleExecutor:
 
     @action("stop")
     async def stop(self):
-        """动作：立即停止执行当前规则，并且不再处理此事件的任何后续规则。"""
+        """
+        动作：立即停止执行当前规则，并且不再处理此事件的任何后续规则。
+        这是通过抛出一个特殊的 `StopRuleProcessing` 异常来实现的，该异常会在 `process_event` 中被捕获。
+        """
         raise StopRuleProcessing()
 
 def _parse_duration(duration_str: str) -> Optional[timedelta]:

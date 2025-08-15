@@ -161,6 +161,22 @@ async def test_resolve_persistent_variable_edge_cases(path, expected_value, mock
         resolver = VariableResolver(mock_update, Mock(), session, {})
         assert await resolver.resolve(path) == expected_value
 
+async def test_resolve_persistent_variable_numeric_string_bug(mock_update, test_db_session_factory):
+    """
+    TDD 测试：专门用于复现并验证“纯数字字符串未被转换为数字”的 bug。
+    """
+    with test_db_session_factory() as session:
+        # 准备一个值为纯数字字符串（不是有效的JSON）的变量
+        session.add(StateVariable(group_id=-1001, user_id=None, name="numeric_str_val", value="12345"))
+        session.commit()
+
+        resolver = VariableResolver(mock_update, Mock(), session, {})
+
+        # 验证解析器是否能正确地将其转换为整数，而不是返回字符串 "12345"
+        resolved_value = await resolver.resolve("vars.group.numeric_str_val")
+        assert resolved_value == 12345
+        assert isinstance(resolved_value, int)
+
 async def test_resolve_deeply_nested_context_variable():
     """测试解析深层嵌套的上下文变量。"""
     # 创建一个包含 reply_to_message 的复杂 Update 结构
