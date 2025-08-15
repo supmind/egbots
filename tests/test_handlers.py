@@ -179,8 +179,9 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
     assert "检测到新群组" in caplog.text
     assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
-    # 13 default rules (8 original + 5 new) should be loaded
-    assert len(mock_context.bot_data['rule_cache'][-1001]) == 13
+    # The number of loaded rules should match the number of default rules.
+    from src.bot.default_rules import DEFAULT_RULES
+    assert len(mock_context.bot_data['rule_cache'][-1001]) == len(DEFAULT_RULES)
     # The executor should have been called at least once.
     assert MockRuleExecutor.called
 

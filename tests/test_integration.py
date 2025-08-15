@@ -225,6 +225,8 @@ async def test_user_join_triggers_verification(mock_update, mock_context, test_d
     # --- 1. 准备阶段 (Setup) ---
     # 确保数据库中没有这个群组，这样 `_seed_rules_if_new_group` 就会被触发
     mock_context.bot.username = "TestBot"
+    # 关键：显式设置 is_bot 为 False，以满足规则的 WHERE 条件
+    mock_update.effective_user.is_bot = False
 
     # --- 2. 执行阶段 (Act) ---
     # 模拟 `user_join` 事件。这将导致 `process_event` 调用 `_seed_rules_if_new_group`，

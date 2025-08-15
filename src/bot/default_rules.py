@@ -1,41 +1,100 @@
 # src/bot/default_rules.py
 
 # ======================================================================================
-# 预设的默认规则列表
+# 预设的默认规则列表 (v2.1 - 全面重构版)
 # ======================================================================================
 # 当机器人被添加到一个新的群组时，此列表中的规则会自动被安装。
-# 这为群组管理员提供了一套即开即用的基础管理功能。
+# 这套规则经过精心设计，提供了一整套强大、常用且开箱即用的群组管理功能。
 #
-# 规则说明:
-# - `name`: 规则的描述性名称。
-# - `priority`: 规则的执行优先级，数字越大，优先级越高。
-# - `script`: 规则的核心逻辑，使用本机器人定制的脚本语言编写。
+# 规则优先级设计 (高 -> 低):
+# 1.  核心安全与验证 (1000+): 新用户验证，确保基础安全。
+# 2.  内容过滤 (500-999): 过滤高危文件、转发、广告链接等。
+# 3.  行为管理 (400-499): 防刷屏。
+# 4.  管理员命令 (100-399): 管理员使用的命令，如 /warn, /ban。
+# 5.  通用命令与自动化 (1-99): /help 等普通命令。
+# 6.  清理工作 (0): 删除服务消息和命令消息，应在所有逻辑处理完毕后执行。
 # ======================================================================================
 
 DEFAULT_RULES = [
+    # ========================== 核心安全与验证 ==========================
     {
-        "name": "新用户入群验证",
+        "name": "[核心] 新用户入群验证",
         "priority": 1000,
         "script": """
 WHEN user_join
+WHERE user.is_bot == false
 THEN {
-    // 对新加入的用户启动人机验证流程
     start_verification();
 }
 END
 """
     },
+    # ========================== 内容过滤 ==========================
     {
-        "name": "刷屏检测 (文本/命令)",
-        "priority": 500,
+        "name": "[内容] 删除高危文件",
+        "priority": 600,
+        "script": """
+WHEN document
+WHERE
+    user.is_admin == false AND
+    (
+        message.document.file_name endswith ".exe" OR
+        message.document.file_name endswith ".bat" OR
+        message.document.file_name endswith ".sh" OR
+        message.document.file_name endswith ".cmd" OR
+        message.document.file_name endswith ".scr"
+    )
+THEN {
+    delete_message();
+    log("删除了用户 " + user.id + " 发送的高危文件: " + message.document.file_name, "security");
+}
+END
+"""
+    },
+    {
+        "name": "[内容] 删除转发消息",
+        "priority": 590,
         "script": """
 WHEN message
 WHERE
-    user.is_admin == false AND user.stats.messages_30s > 5
+    user.is_admin == false AND
+    message.forward_from != null
+THEN {
+    delete_message();
+    log("删除了用户 " + user.id + " 转发的消息。", "anti_spam");
+}
+END
+"""
+    },
+    {
+        "name": "[内容] 限制新用户发送链接",
+        "priority": 580,
+        "script": """
+WHEN message
+WHERE
+    user.is_admin == false AND
+    user.stats.messages_24h < 5 AND // 定义新用户为24小时内发言少于5条
+    (message.text contains "http://" OR message.text contains "https://" OR message.text contains "t.me")
+THEN {
+    delete_message();
+    send_message("@" + user.first_name + "，为防止广告，新用户暂时无法发送链接。");
+    log("自动删除了新用户 " + user.id + " 发送的链接。", "anti_spam");
+}
+END
+"""
+    },
+    # ========================== 行为管理 (防刷屏) ==========================
+    # 将防刷屏规则拆分为多个，每个对应一个事件类型，以兼容当前的解析器。
+    {
+        "name": "[行为] 防刷屏 (文本)",
+        "priority": 400,
+        "script": """
+WHEN message
+WHERE user.is_admin == false AND user.stats.messages_20s > 5
 THEN {
     mute_user("10m");
     reply("检测到刷屏行为，您已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因发送文本消息刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
     delete_message();
     stop();
 }
@@ -43,17 +102,15 @@ END
 """
     },
     {
-        "name": "刷屏检测 (媒体)",
-        "priority": 500,
+        "name": "[行为] 防刷屏 (图片)",
+        "priority": 400,
         "script": """
 WHEN photo
-WHERE
-    user.is_admin == false AND user.stats.messages_30s > 5
+WHERE user.is_admin == false AND user.stats.messages_20s > 5
 THEN {
     mute_user("10m");
-    // 对于媒体消息，回复可能意义不大，但我们仍然发送以作通知
-    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因发送图片刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    reply("检测到刷屏行为，您已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
     delete_message();
     stop();
 }
@@ -61,16 +118,15 @@ END
 """
     },
         {
-        "name": "刷屏检测 (视频)",
-        "priority": 500,
+        "name": "[行为] 防刷屏 (视频)",
+        "priority": 400,
         "script": """
 WHEN video
-WHERE
-    user.is_admin == false AND user.stats.messages_30s > 5
+WHERE user.is_admin == false AND user.stats.messages_20s > 5
 THEN {
     mute_user("10m");
-    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因发送视频刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    reply("检测到刷屏行为，您已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
     delete_message();
     stop();
 }
@@ -78,16 +134,15 @@ END
 """
     },
     {
-        "name": "刷屏检测 (文件)",
-        "priority": 500,
+        "name": "[行为] 防刷屏 (文件)",
+        "priority": 400,
         "script": """
 WHEN document
-WHERE
-    user.is_admin == false AND user.stats.messages_30s > 5
+WHERE user.is_admin == false AND user.stats.messages_20s > 5
 THEN {
     mute_user("10m");
-    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因发送文件刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    reply("检测到刷屏行为，您已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
     delete_message();
     stop();
 }
@@ -95,27 +150,49 @@ END
 """
     },
     {
-        "name": "刷屏检测 (媒体组)",
-        "priority": 500,
+        "name": "[行为] 防刷屏 (媒体组)",
+        "priority": 400,
         "script": """
 WHEN media_group
-WHERE
-    user.is_admin == false AND user.stats.messages_30s > 5
+WHERE user.is_admin == false AND user.stats.messages_20s > 5
 THEN {
     mute_user("10m");
-    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因发送媒体组刷屏被自动禁言10分钟。", "auto_moderation_flood");
-    // 注意：这里的 delete_message() 只会删除媒体组的“代表消息”
-    // 完整的删除需要更复杂的逻辑，例如遍历 media_group.messages 并逐个删除
+    reply("检测到刷屏行为，您已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
     delete_message();
     stop();
 }
 END
 """
     },
+    # ========================== 管理员命令 ==========================
     {
-        "name": "通用回复封禁",
+        "name": "[管理] 警告系统",
         "priority": 200,
+        "script": """
+WHEN command
+WHERE command.name == 'warn' AND user.is_admin == true AND command.arg_count > 0
+THEN {
+    target_id = int(command.arg[0]);
+    current_warnings = get_var("user.warnings", 0, target_id);
+    new_warnings = current_warnings + 1;
+    set_var("user.warnings", new_warnings, target_id);
+
+    if (new_warnings >= 3) {
+        log("用户 " + target_id + " 因达到3次警告被踢出。", "moderation");
+        kick_user(target_id);
+        set_var("user.warnings", null, target_id); // 重置警告
+        reply("用户 " + target_id + " 已达到3次警告，已被自动踢出。");
+    } else {
+        reply("已警告用户 " + target_id + "。当前警告次数: " + new_warnings);
+    }
+}
+END
+"""
+    },
+    {
+        "name": "[管理] 回复快捷封禁",
+        "priority": 190,
         "script": """
 WHEN command
 WHERE
@@ -123,16 +200,16 @@ WHERE
     command.name == "ban" AND
     message.reply_to_message != null
 THEN {
-    // 对回复的消息所对应的用户执行封禁操作
-    ban_user(message.reply_to_message.from_user.id, command.full_args);
+    reason = command.full_args;
+    ban_user(message.reply_to_message.from_user.id, reason);
     reply("操作成功！用户已被封禁。");
 }
 END
 """
     },
     {
-        "name": "通用回复踢出",
-        "priority": 200,
+        "name": "[管理] 回复快捷踢出",
+        "priority": 190,
         "script": """
 WHEN command
 WHERE
@@ -140,7 +217,6 @@ WHERE
     command.name == "kick" AND
     message.reply_to_message != null
 THEN {
-    // 对回复的消息所对应的用户执行踢出操作
     kick_user(message.reply_to_message.from_user.id);
     reply("操作成功！用户已被移出群组。");
 }
@@ -148,8 +224,8 @@ END
 """
     },
     {
-        "name": "通用回复禁言",
-        "priority": 200,
+        "name": "[管理] 回复快捷禁言",
+        "priority": 190,
         "script": """
 WHEN command
 WHERE
@@ -158,16 +234,16 @@ WHERE
     command.arg_count >= 1 AND
     message.reply_to_message != null
 THEN {
-    // 对回复的消息所对应的用户执行禁言操作，时长为第一个参数
-    mute_user(command.arg[0], message.reply_to_message.from_user.id);
-    reply("操作成功！用户已被禁言 " + command.arg[0] + "。");
+    duration = command.arg[0];
+    mute_user(duration, message.reply_to_message.from_user.id);
+    reply("操作成功！用户已被禁言 " + duration + "。");
 }
 END
 """
     },
     {
-        "name": "通用回复解除禁言",
-        "priority": 200,
+        "name": "[管理] 回复快捷解禁",
+        "priority": 190,
         "script": """
 WHEN command
 WHERE
@@ -175,102 +251,62 @@ WHERE
     command.name == "unmute" AND
     message.reply_to_message != null
 THEN {
-    // 对回复的消息所对应的用户执行解除禁言操作
     unmute_user(message.reply_to_message.from_user.id);
     reply("操作成功！用户已解除禁言。");
 }
 END
 """
     },
+    # ========================== 通用命令与自动化 ==========================
     {
-        "name": "设置关键词回复",
+        "name": "[通用] 帮助命令",
         "priority": 10,
         "script": """
 WHEN command
-WHERE
-    user.is_admin == true AND
-    command.name == "set_reply" AND
-    command.arg_count >= 2
+WHERE command.name == "help"
 THEN {
-    // 从持久化变量中读取已有的关键词列表
-    reminders = vars.group.reminders or [];
-
-    // 解析命令参数
-    args = split(command.full_args, " ", 1);
-    keyword = args[0];
-    reply_text = args[1];
-
-    // 创建一个新的关键词对象
-    new_reminder = {"keyword": keyword, "reply": reply_text};
-
-    // 过滤掉已存在的同名关键词，实现覆盖效果
-    new_reminders = [];
-    foreach (item in reminders) {
-        if (item.keyword != keyword) {
-            new_reminders = new_reminders + [item];
-        }
-    }
-    new_reminders = new_reminders + [new_reminder];
-
-    // 将更新后的列表写回持久化变量
-    set_var("group.reminders", new_reminders);
-    reply("关键词回复已设置: " + keyword + " -> " + reply_text);
+    reply("我是一个由规则驱动的管理机器人。群管理员可以通过 /rules 命令查看和管理本群的自动化规则。");
+}
+END
+"""
+    },
+    # ========================== 清理工作 ==========================
+    {
+        "name": "[清理] 删除入群消息",
+        "priority": 0,
+        "script": """
+WHEN user_join
+THEN {
+    delete_message();
 }
 END
 """
     },
     {
-        "name": "删除关键词回复",
-        "priority": 10,
+        "name": "[清理] 删除离群消息",
+        "priority": 0,
         "script": """
-WHEN command
-WHERE
-    user.is_admin == true AND
-    command.name == "del_reply" AND
-    command.arg_count >= 1
+WHEN user_leave
 THEN {
-    reminders = vars.group.reminders or [];
-    keyword_to_delete = command.arg[0];
-
-    new_reminders = [];
-    found = false;
-    foreach (item in reminders) {
-        if (item.keyword != keyword_to_delete) {
-            new_reminders = new_reminders + [item];
-        } else {
-            found = true;
-        }
-    }
-
-    set_var("group.reminders", new_reminders);
-
-    if (found) {
-        reply("关键词 " + keyword_to_delete + " 已被删除。");
-    } else {
-        reply("未找到关键词 " + keyword_to_delete + "。");
-    }
+    delete_message();
 }
 END
 """
     },
     {
-        "name": "触发关键词回复",
-        "priority": 1,
+        "name": "[清理] 删除管理命令",
+        "priority": 0,
         "script": """
-WHEN message
+WHEN command
 WHERE
-    message.from_user.is_bot == false AND
-    vars.group.reminders != null AND len(vars.group.reminders) > 0
+    user.is_admin == true AND
+    (
+        command.name == "ban" OR command.name == "kick" OR
+        command.name == "mute" OR command.name == "unmute" OR
+        command.name == "warn"
+    )
 THEN {
-    reminders = vars.group.reminders;
-    foreach (item in reminders) {
-        // 简单包含匹配
-        if (message.text contains item.keyword) {
-            reply(item.reply);
-            // 匹配到第一个后即停止，避免刷屏
-            break;
-        }
-    }
+    delete_message();
 }
 END
 """
