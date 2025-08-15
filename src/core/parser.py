@@ -5,13 +5,18 @@ from dataclasses import dataclass, field
 from typing import List, Any, Optional, Dict
 
 # ======================================================================================
-# 脚本语言 v2.3 - 解析器实现
+# 脚本语言 v3.0 - 解析器实现
 # ======================================================================================
 
 # =================== 自定义异常 ===================
 
 class RuleParserError(Exception):
-    """自定义的解析器异常，包含行列号信息以便于调试。"""
+    """
+    自定义的解析器异常。
+
+    当解析过程中发生语法错误时抛出。它包含了错误发生的具体行号和列号，
+    以便于用户调试其编写的规则脚本。
+    """
     def __init__(self, message: str, line: int = -1, column: int = -1):
         self.message = message
         self.line = line
@@ -129,7 +134,19 @@ class IfStmt(Stmt):
 # --- 顶层规则结构 ---
 @dataclass
 class ParsedRule:
-    """代表一个完全解析后的规则的顶层AST节点。"""
+    """
+    代表一个完全解析后的规则的顶层AST节点。
+
+    这是解析器的最终输出，包含了规则的所有结构化信息，
+    可以直接被 `RuleExecutor` 使用。
+
+    Attributes:
+        name (Optional[str]): 规则的名称，主要用于日志和调试。
+        priority (int): 规则的优先级，暂未使用。
+        when_event (Optional[str]): 规则的触发事件 (WHEN 子句)。
+        where_clause (Optional[Expr]): 规则的守卫条件 (WHERE 子句) 的AST。
+        then_block (Optional[StatementBlock]): 规则的执行体 (THEN 子句) 的AST。
+    """
     name: Optional[str] = "无标题规则"
     priority: int = 0
     when_event: Optional[str] = None
@@ -145,7 +162,15 @@ class ParsedRule:
 
 @dataclass
 class Token:
-    """词法单元，包含类型、值和位置信息。"""
+    """
+    词法单元，是分词过程的基本单位。
+
+    Attributes:
+        type (str): Token的类型 (例如 'IDENTIFIER', 'NUMBER')。
+        value (str): Token的原始文本值 (例如 'my_var', '123')。
+        line (int): Token在源代码中的行号。
+        column (int): Token在源代码中的列号。
+    """
     type: str
     value: str
     line: int
@@ -190,7 +215,18 @@ TOKEN_SPECIFICATION = [
 TOKEN_REGEX = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPECIFICATION), flags=re.IGNORECASE)
 
 def tokenize(code: str) -> List[Token]:
-    """将输入的代码字符串分解为词法单元流。"""
+    """
+    将输入的代码字符串分解为词法单元 (Token) 流。
+
+    Args:
+        code (str): 要进行分词的原始脚本代码。
+
+    Returns:
+        List[Token]: 一个由 `Token` 对象组成的列表。
+
+    Raises:
+        RuleParserError: 如果在代码中发现任何无法识别的无效字符。
+    """
     tokens = []
     line_num = 1
     line_start = 0
@@ -214,15 +250,28 @@ def tokenize(code: str) -> List[Token]:
 
 class RuleParser:
     """
-    一个完整的、用于C风格脚本语言的解析器。
-    它接收脚本字符串，将其分词，然后构建一个详细的AST。
+    一个完整的、用于C风格脚本语言的递归下降解析器。
+
+    它接收一个脚本字符串，通过 `tokenize` 函数将其分词，然后构建一个
+    代表该脚本结构的抽象语法树 (AST)。这个AST是 `RuleExecutor` 的输入。
     """
     def __init__(self, script: str):
-        self.tokens = tokenize(script)
-        self.pos = 0
+        self.tokens: List[Token] = tokenize(script)
+        self.pos: int = 0
 
     def parse(self) -> ParsedRule:
-        """解析完整规则脚本的主入口。"""
+        """
+        解析完整规则脚本的主入口。
+
+        它会依次解析 `WHEN`, `WHERE` (可选), 和 `THEN` 子句，
+        最终构建并返回一个 `ParsedRule` 对象。
+
+        Returns:
+            ParsedRule: 代表整个规则的顶层AST节点。
+
+        Raises:
+            RuleParserError: 如果脚本不符合预期的规则结构（例如缺少 `WHEN` 或 `THEN`）。
+        """
         rule = ParsedRule()
 
         # 解析 WHEN
@@ -250,7 +299,6 @@ class RuleParser:
         if not self._is_at_end() and self._peek_value('END'):
             self._consume_keyword('END')
 
-        # 在此我们不再检查 END 之后是否有多余的 token。
         # 在此我们不再检查 END 之后是否有多余的 token。
         # 这使得规则脚本可以包含尾随的空行或注释，而不会导致解析失败，从而提高了灵活性。
         return rule
@@ -359,28 +407,13 @@ class RuleParser:
         这是一个强大且优雅的算法，专门用于处理包含不同优先级和结合性（左结合/右结合）的二元运算符。
         它比传统的递归下降解析在处理表达式时更简洁、高效。
 
-        核心思想：
-        - 每个运算符都有一个“优先级”（precedence）。
-        - 解析器在循环中不断地“向右看”，只要遇到的运算符的优先级不低于当前的“最小优先级”（`min_precedence`），
-          它就会“抓住”这个运算符和它右边的表达式，并将它们与左边的表达式（`lhs`）结合起来。
-        - 在处理一个运算符时，它会递归地调用自己来解析右侧的表达式，但会传入一个更高的“最小优先级”，
-          以此来确保更高优先级的运算符（如 `*`）会被优先绑定到其右侧的操作数上。
-
         工作原理简述 (以 `1 + 2 * 3` 为例):
-        1. `_parse_expression(min_precedence=0)` 被调用。
-        2. `_parse_unary_expression` 解析出 `1` 作为初始的 `lhs` (left-hand side)。
-        3. 进入 `while` 循环，看到下一个 token 是 `+`。`+` 的优先级 (5) > `min_precedence` (0)，循环继续。
-        4. 我们“抓住” `+`。然后递归调用 `_parse_expression` 来解析 `+` 右边的表达式，但这次传入的 `min_precedence` 是 `+` 的优先级再加一，即 6。
-           - `_parse_expression(min_precedence=6)` 被调用。
-           - 它解析出 `2` 作为其内部的 `lhs`。
-           - 它向右看，看到 `*`。`*` 的优先级 (6) >= `min_precedence` (6)，循环继续。
-           - 它“抓住” `*`，并递归调用 `_parse_expression(min_precedence=7)`。
-             - `_parse_expression(7)` 解析出 `3` 作为 `lhs`。
-             - 它向右看，没有更多的运算符了，循环结束，返回 `Literal(3)`。
-           - 回到 `_parse_expression(6)`，它现在有了 `rhs` (`Literal(3)`)。它将 `2`, `*`, `3` 组合成 `BinaryOp(2, '*', 3)` 并将其作为新的 `lhs`。
-           - 循环结束，返回 `BinaryOp(2, '*', 3)`。
-        5. 回到最初的 `_parse_expression(0)`，它现在有了 `rhs` (`BinaryOp(2, '*', 3)`)。它将 `1`, `+`, 和这个 `rhs` 组合成 `BinaryOp(1, '+', BinaryOp(2, '*', 3))` 作为新的 `lhs`。
-        6. 循环结束，返回最终的、正确嵌套的 AST，完美地体现了运算优先级。
+        1.  `_parse_unary_expression` 解析出 `1` 作为初始的 `lhs` (left-hand side)。
+        2.  进入 `while` 循环，看到下一个 token 是 `+`。`+` 的优先级 (5) > `min_precedence` (0)，循环继续。
+        3.  我们“抓住” `+`。然后递归调用 `_parse_expression` 来解析 `+` 右边的表达式，但这次传入的 `min_precedence` 是 `+` 的优先级再加一，即 6。
+        4.  在递归调用中，`*` (优先级6) 会被优先处理，返回 `BinaryOp(2, '*', 3)`。
+        5.  回到最初的调用，它现在有了 `rhs`。它将 `1`, `+`, 和这个 `rhs` 组合成 `BinaryOp(1, '+', BinaryOp(2, '*', 3))`。
+        6.  循环结束，返回最终的、正确嵌套的 AST，完美地体现了运算优先级。
         """
         lhs = self._parse_unary_expression()
 
@@ -435,11 +468,8 @@ class RuleParser:
         if self._peek_type('LOGIC_OP') and self._current_token().value.lower() == 'not':
             op_token = self._consume_keyword('not')
             # 'not' 的优先级非常高，因此它后面应该跟一个同样能处理高优先级运算的表达式。
-            # 递归调用 _parse_unary_expression 而不是 _parse_expression，可以正确处理像 `not not true` 这样的链式调用。
             operand = self._parse_unary_expression()
             # 在我们的AST中，为了简化，我们将 'not' 视为一个特殊的二元运算，其左操作数被设置为一个固定的字面量。
-            # 在执行器（Executor）中，会特别处理这种左操作数为特定值的情况，从而实现一元运算的逻辑。
-            # 这样做的好处是避免了为一元运算单独创建一个新的 AST 节点类型。
             return BinaryOp(left=Literal(value=None), op=op_token.value, right=operand)
 
         return self._parse_accessor_expression()
@@ -602,12 +632,13 @@ class RuleParser:
 def precompile_rule(script: str) -> (bool, Optional[str]):
     """
     预编译一个规则脚本以检查其语法是否有效。
+
     这是一个对外暴露的、安全的实用工具函数。它可以在不实际执行任何代码的情况下，
     快速验证一个规则脚本的语法正确性。这对于在外部系统（例如，一个Web界面的规则编辑器）
     中集成规则验证功能非常有用。
 
     Args:
-        script: 包含单条规则的完整脚本字符串。
+        script (str): 包含单条规则的完整脚本字符串。
 
     Returns:
         一个元组 `(is_valid, error_message)`。

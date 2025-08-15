@@ -17,33 +17,39 @@ def mock_callback_update():
     mock.callback_query.from_user = MagicMock()
     return mock
 
-async def test_unit_verification_success(mock_callback_update, mock_context, test_db_session_factory):
+async def test_unit_verification_success_calls_util(mock_callback_update, mock_context, test_db_session_factory):
     """
-    单元测试：验证用户点击正确答案后的成功流程。
+    单元测试：验证用户点击正确答案后，会调用重构后的 unmute_user_util 工具函数。
     """
     group_id, user_id, correct_answer = -1001, 123, "42"
 
+    # 准备数据库
     with test_db_session_factory() as db:
         db.add(Verification(group_id=group_id, user_id=user_id, correct_answer=correct_answer, attempts_made=1))
         db.commit()
 
+    # 准备 Mocks
     mock_callback_update.callback_query.data = f"verify_{group_id}_{user_id}_{correct_answer}"
     mock_callback_update.callback_query.from_user.id = user_id
     mock_context.job_queue.get_jobs_by_name.return_value = []
-    # 修复：确保 mock 的 bot 方法是可等待的
-    mock_context.bot.restrict_chat_member = AsyncMock()
-    mock_context.bot.get_chat = AsyncMock()
 
-    await verification_callback_handler(mock_callback_update, mock_context)
+    # Patch a util function and check if it's called
+    with patch('src.bot.handlers.unmute_user_util', new_callable=AsyncMock) as mock_unmute_util:
+        # 模拟工具函数调用成功
+        mock_unmute_util.return_value = True
 
-    mock_context.bot.get_chat.assert_called_once_with(chat_id=group_id)
-    mock_context.bot.restrict_chat_member.assert_called_once()
-    mock_callback_update.callback_query.edit_message_text.assert_called_once_with(
-        text="✅ 验证成功！您现在可以在群组中发言了。"
-    )
+        # 执行处理器
+        await verification_callback_handler(mock_callback_update, mock_context)
 
-    with test_db_session_factory() as db:
-        assert db.query(Verification).count() == 0
+        # 验证
+        mock_unmute_util.assert_called_once_with(mock_context, group_id, user_id)
+        mock_callback_update.callback_query.edit_message_text.assert_called_once_with(
+            text="✅ 验证成功！您现在可以在群组中发言了。"
+        )
+
+        # 验证数据库记录是否被删除
+        with test_db_session_factory() as db:
+            assert db.query(Verification).count() == 0
 
 async def test_unit_verification_wrong_answer_with_retries(mock_callback_update, mock_context, test_db_session_factory):
     """

@@ -332,3 +332,67 @@ async def test_stop_action_halts_processing(MockRuleExecutor, mock_update, mock_
     # --- 验证 ---
     # 验证 reply 动作从未被调用，因为 stop() 规则应该先执行并中断流程。
     mock_reply_action.assert_not_called()
+
+
+async def test_rules_command_by_non_admin(mock_update, mock_context):
+    """测试：非管理员用户无法使用 /rules 命令。"""
+    mock_member = MagicMock(status='member')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_member)
+
+    await rules_handler(mock_update, mock_context)
+
+    mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
+
+async def test_toggle_rule_command_by_non_admin(mock_update, mock_context):
+    """测试：非管理员用户无法使用 /togglerule 命令。"""
+    mock_member = MagicMock(status='member')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_member)
+
+    await toggle_rule_handler(mock_update, mock_context)
+
+    mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
+
+
+@patch('src.bot.handlers.RuleExecutor')
+async def test_process_event_cache_invalidation(MockRuleExecutor, mock_update, mock_context, test_db_session_factory, caplog):
+    """
+    测试完整的缓存失效生命周期：缓存未命中 -> 命中 -> 失效 -> 再次未命中。
+    """
+    # --- 1. 准备 ---
+    mock_executor_instance = MockRuleExecutor.return_value
+    mock_executor_instance.execute_rule = AsyncMock()
+    group_id = mock_update.effective_chat.id
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Test Rule", script="WHEN message THEN {} END", is_active=True))
+        db.commit()
+
+    # --- 2. 第一次调用 (缓存未命中) ---
+    with caplog.at_level(logging.INFO):
+        await process_event("message", mock_update, mock_context)
+    assert "缓存未命中" in caplog.text
+    assert group_id in mock_context.bot_data['rule_cache']
+    MockRuleExecutor.assert_called()
+
+    # --- 3. 第二次调用 (缓存命中) ---
+    caplog.clear()
+    MockRuleExecutor.reset_mock()
+    with caplog.at_level(logging.INFO):
+        await process_event("message", mock_update, mock_context)
+    assert "缓存未命中" not in caplog.text
+    MockRuleExecutor.assert_called()
+
+    # --- 4. 使缓存失效 (调用 /reload_rules) ---
+    mock_admin = MagicMock(status='administrator')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+    await reload_rules_handler(mock_update, mock_context)
+    assert group_id not in mock_context.bot_data['rule_cache'] # 确认缓存已被清除
+
+    # --- 5. 第三次调用 (再次缓存未命中) ---
+    caplog.clear()
+    MockRuleExecutor.reset_mock()
+    with caplog.at_level(logging.INFO):
+        await process_event("message", mock_update, mock_context)
+    assert "缓存未命中" in caplog.text
+    # 因为规则仍然是激活的，所以执行器应该被调用
+    MockRuleExecutor.assert_called()

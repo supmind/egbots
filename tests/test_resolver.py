@@ -13,20 +13,13 @@
 import pytest
 from unittest.mock import Mock, AsyncMock, MagicMock
 import json
-
-from src.core.resolver import VariableResolver
-from src.database import StateVariable
-
-# Mark all tests in this file as asyncio
-pytestmark = pytest.mark.asyncio
-
-import pytest
-from unittest.mock import Mock, AsyncMock, MagicMock
-import json
+from datetime import datetime, timedelta, timezone
+import time
 
 from telegram import Update, Chat, User, Message
 from src.core.resolver import VariableResolver
-from src.database import StateVariable
+from src.database import StateVariable, EventLog
+from cachetools import TTLCache
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
@@ -50,7 +43,7 @@ def mock_update() -> MagicMock:
     mock_user = User(id=123, is_bot=False, first_name="Test")
     mock_chat = Chat(id=-1001, type="group")
     # 关键修复：在 Message 中包含 from_user，这样 effective_user 就会被自动设置
-    mock_message = Message(message_id=1, date=None, chat=mock_chat, text="", from_user=mock_user)
+    mock_message = Message(message_id=1, date=datetime.now(timezone.utc), chat=mock_chat, text="", from_user=mock_user)
 
     # 创建一个真实的 Update 对象作为 spec
     spec_update = Update(
@@ -90,7 +83,7 @@ async def test_resolve_command_variable():
     mock_chat = Chat(id=-1001, type="group")
     mock_message = Message(
         message_id=2,
-        date=None,
+        date=datetime.now(timezone.utc),
         chat=mock_chat,
         text="/test_command arg1 'arg 2 with spaces'",
         from_user=mock_user
@@ -119,7 +112,7 @@ async def test_resolve_command_variable_parsing(command_text, expected_name, exp
     """使用参数化测试来验证 shlex 对各种命令格式的解析能力。"""
     mock_user = User(id=123, is_bot=False, first_name="Test")
     mock_chat = Chat(id=-1001, type="group")
-    mock_message = Message(message_id=2, date=None, chat=mock_chat, text=command_text, from_user=mock_user)
+    mock_message = Message(message_id=2, date=datetime.now(timezone.utc), chat=mock_chat, text=command_text, from_user=mock_user)
     mock_update_with_command = Update(update_id=1000, message=mock_message)
     mock_context = Mock()
     mock_context.bot_data = {}
@@ -137,7 +130,7 @@ async def test_resolve_command_variable_on_non_command():
     mock_user = User(id=123, is_bot=False, first_name="Test")
     mock_chat = Chat(id=-1001, type="group")
     # 消息文本不以 "/" 开头
-    mock_message = Message(message_id=3, date=None, chat=mock_chat, text="this is not a command", from_user=mock_user)
+    mock_message = Message(message_id=3, date=datetime.now(timezone.utc), chat=mock_chat, text="this is not a command", from_user=mock_user)
     mock_update_no_command = Update(update_id=1001, message=mock_message)
     mock_context = Mock()
     mock_context.bot_data = {}
@@ -175,6 +168,25 @@ async def test_resolve_persistent_variable_from_db(mock_update, test_db_session_
         assert await resolver.resolve("vars.group.non_existent") is None
         assert await resolver.resolve("vars.user.non_existent") is None
         assert await resolver.resolve("vars.user_999.non_existent") is None
+
+async def test_resolve_persistent_variable_user_id_parsing_bug(mock_update, test_db_session_factory):
+    """
+    测试针对 `vars.user_ID.name` 格式解析的 bug 修复。
+    旧的实现会错误地处理 `user_123_abc` 这样的格式。
+    """
+    with test_db_session_factory() as session:
+        # 准备一个特定用户ID的变量
+        session.add(StateVariable(group_id=-1001, user_id=456, name="points", value="1000"))
+        session.commit()
+        mock_context = Mock()
+        mock_context.bot_data = {}
+
+        resolver = VariableResolver(mock_update, mock_context, session, {})
+
+        # 测试路径中包含多余部分的情况，应能正确解析出第一个数字ID
+        assert await resolver.resolve("vars.user_456_ignore_this.points") == 1000
+        # 测试无效的用户ID格式
+        assert await resolver.resolve("vars.user_abc.points") is None
 
 @pytest.mark.parametrize("path, expected_value", [
     ("vars.group.settings", {"enabled": True, "mode": "strict"}),
@@ -216,9 +228,9 @@ async def test_resolve_deeply_nested_context_variable():
     """测试解析深层嵌套的上下文变量。"""
     # 创建一个包含 reply_to_message 的复杂 Update 结构
     replied_to_user = User(id=555, is_bot=False, first_name="Replied")
-    replied_to_message = Message(message_id=10, date=None, chat=Chat(id=-1001, type="group"), text="original message", from_user=replied_to_user)
+    replied_to_message = Message(message_id=10, date=datetime.now(timezone.utc), chat=Chat(id=-1001, type="group"), text="original message", from_user=replied_to_user)
     replying_user = User(id=123, is_bot=False, first_name="Test")
-    replying_message = Message(message_id=11, date=None, chat=Chat(id=-1001, type="group"), text="a reply", from_user=replying_user, reply_to_message=replied_to_message)
+    replying_message = Message(message_id=11, date=datetime.now(timezone.utc), chat=Chat(id=-1001, type="group"), text="a reply", from_user=replying_user, reply_to_message=replied_to_message)
     mock_update_with_reply = Update(update_id=1002, message=replying_message)
     mock_context = Mock()
     mock_context.bot_data = {}
@@ -265,19 +277,15 @@ async def test_resolve_computed_is_admin_on_api_error(mock_update):
     assert await resolver.resolve("user.is_admin") is False
     mock_context.bot.get_chat_member.assert_called_once_with(chat_id=-1001, user_id=123)
 
-from datetime import datetime, timedelta, timezone
-from src.database import EventLog
-from cachetools import TTLCache
-
 async def test_resolve_media_group_variables(mock_update):
     """测试 media_group.* 相关变量的解析。"""
     # 模拟一个聚合后的媒体组消息列表，并将其附加到 Update 对象上
     mock_chat = Chat(id=-1001, type="group")
     mock_user = User(id=123, is_bot=False, first_name="Test")
     # 媒体组中的消息
-    msg1 = Message(message_id=20, date=None, chat=mock_chat, from_user=mock_user, photo=[Mock()])
-    msg2 = Message(message_id=21, date=None, chat=mock_chat, from_user=mock_user, photo=[Mock()], caption="This is the caption")
-    msg3 = Message(message_id=22, date=None, chat=mock_chat, from_user=mock_user, video=Mock())
+    msg1 = Message(message_id=20, date=datetime.now(timezone.utc), chat=mock_chat, from_user=mock_user, photo=[Mock()])
+    msg2 = Message(message_id=21, date=datetime.now(timezone.utc), chat=mock_chat, from_user=mock_user, photo=[Mock()], caption="This is the caption")
+    msg3 = Message(message_id=22, date=datetime.now(timezone.utc), chat=mock_chat, from_user=mock_user, video=Mock())
 
     # 就像在真实 handler 中一样，将聚合后的消息列表附加到 update 对象上
     setattr(mock_update, 'media_group_messages', [msg1, msg2, msg3])
@@ -340,10 +348,24 @@ async def test_resolve_stats_variable_with_caching(mock_update, test_db_session_
 
         # 4. 解析 group.stats.messages_1h，应该查询数据库
         result4 = await resolver.resolve("group.stats.messages_1h")
-        assert result4 == 2 # user123 (1h前) + user666 (30m前)
+        assert result4 == 2 # user123 (59m前) + user666 (30m前)
         assert query_spy.call_count == 3 # 调用次数增加
 
         # 5. 解析一个不存在的统计类型
         result5 = await resolver.resolve("group.stats.invalid_3h")
         assert result5 is None
         assert query_spy.call_count == 3 # 不应产生查询
+
+async def test_resolve_time_unix(mock_update):
+    """测试 time.unix 变量的解析。"""
+    mock_context = Mock()
+    mock_context.bot_data = {}
+    resolver = VariableResolver(mock_update, mock_context, Mock(), {})
+
+    # 获取当前时间的 unix 时间戳
+    expected_timestamp = int(time.time())
+    resolved_timestamp = await resolver.resolve("time.unix")
+
+    # 允许最多2秒的误差，以应对测试执行的延迟
+    assert abs(resolved_timestamp - expected_timestamp) <= 2
+    assert isinstance(resolved_timestamp, int)

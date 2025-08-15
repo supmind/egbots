@@ -10,7 +10,7 @@ from src.core.parser import (
 
 class TestNewRuleParser(unittest.TestCase):
     """
-    针对重构后的新版规则解析器 (v2.3) 的单元测试。
+    针对重构后的新版规则解析器 (v3.0) 的单元测试。
     这些测试用于验证新的 C-style、大括号风格的语言及其新功能。
     """
 
@@ -271,21 +271,24 @@ class TestNewRuleParser(unittest.TestCase):
     def test_mismatched_character_error(self):
         """测试脚本中包含无效字符时是否会引发错误。"""
         script = 'WHEN command THEN { let x = 1; # 无效字符 }'
-        try:
-            RuleParser(script).parse()
-            self.fail("解析含有无效字符的脚本时，并未按预期引发 RuleParserError。")
-        except RuleParserError as e:
-            self.assertIn("存在无效字符: #", str(e))
-
-    def test_syntax_error(self):
-        """测试无效语法是否能正确抛出 RuleParserError。"""
-        script = 'WHEN command THEN { my_var = "hello" }' # 缺少分号
-        with self.assertRaises(RuleParserError):
+        with self.assertRaisesRegex(RuleParserError, "存在无效字符: #"):
             RuleParser(script).parse()
 
-        script = 'WHEN command THEN { foreach (item in my_list) reply(item); }' # 缺少大括号
-        with self.assertRaises(RuleParserError):
-            RuleParser(script).parse()
+    def test_detailed_syntax_errors(self):
+        """对多种常见的语法错误进行细粒度的测试，并验证错误信息。"""
+        test_cases = {
+            'missing_semicolon': ('WHEN c THEN { reply("a") }', "期望得到 token 类型 SEMICOLON，但得到 RBRACE"),
+            'missing_closing_brace': ('WHEN c THEN { reply("a");', "期望得到 RBRACE，但脚本已意外结束"),
+            'missing_closing_paren': ('WHEN c THEN { if (a > 1 { reply("a"); } }', "期望得到 token 类型 RPAREN，但得到 LBRACE"),
+            'invalid_assignment_target': ('WHEN c THEN { 123 = x; }', "赋值表达式的左侧必须是变量"),
+            'invalid_statement': ('WHEN c THEN { 1 + 2; }', "结果不能作为一条独立的语句"),
+            'missing_where_expression': ('WHEN c WHERE THEN {}', "非预期的 token 'THEN'"),
+        }
+
+        for name, (script, expected_error) in test_cases.items():
+            with self.subTest(error_case=name):
+                with self.assertRaisesRegex(RuleParserError, expected_error):
+                    RuleParser(script).parse()
 
     def test_default_rules_are_parsable(self):
         """
@@ -448,6 +451,38 @@ class TestNewRuleParser(unittest.TestCase):
                     self.assertEqual(where_clause.right.value, "spam")
                 except RuleParserError as e:
                     self.fail(f"解析运算符 '{op}' 失败: {e}")
+
+    def test_chained_assignment(self):
+        """测试链式赋值 (a = b = 10) 的解析，应为右结合。"""
+        script = "WHEN command THEN { a = b = 10; }"
+        rule = RuleParser(script).parse()
+
+        # 顶层应该是 a = (b = 10)
+        outer_assignment = rule.then_block.statements[0]
+        self.assertIsInstance(outer_assignment, Assignment)
+        self.assertEqual(outer_assignment.variable.name, 'a')
+
+        # 内层应该是 b = 10
+        inner_assignment = outer_assignment.expression
+        self.assertIsInstance(inner_assignment, Assignment)
+        self.assertEqual(inner_assignment.variable.name, 'b')
+        self.assertIsInstance(inner_assignment.expression, Literal)
+        self.assertEqual(inner_assignment.expression.value, 10)
+
+    def test_empty_constructors(self):
+        """测试空列表和空字典的构造。"""
+        script = "WHEN command THEN { my_list = []; my_dict = {}; }"
+        rule = RuleParser(script).parse()
+
+        # 空列表
+        list_assignment = rule.then_block.statements[0].expression
+        self.assertIsInstance(list_assignment, ListConstructor)
+        self.assertEqual(len(list_assignment.elements), 0)
+
+        # 空字典
+        dict_assignment = rule.then_block.statements[1].expression
+        self.assertIsInstance(dict_assignment, DictConstructor)
+        self.assertEqual(len(dict_assignment.pairs), 0)
 
     # 辅助方法，用于在测试中断言时重构属性访问路径
     def _reconstruct_path(self, expr):

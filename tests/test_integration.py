@@ -591,6 +591,39 @@ async def test_complex_foreach_with_control_flow(mock_update, mock_context, test
     mock_update.effective_message.reply_text.assert_called_once_with("Total: 80, Count: 3")
 
 
+async def test_log_and_stop_interaction(mock_update, mock_context, test_db_session_factory):
+    """
+    集成测试：验证在同一个代码块中，`log` 动作在 `stop` 动作之前会被执行，
+    而 `stop` 之后的动作则不会被执行。
+    """
+    # --- 1. 准备 ---
+    script = """
+    WHEN message THEN {
+        log("This should be logged");
+        stop();
+        reply("This should not be sent");
+    } END
+    """
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        db.add(Rule(group_id=-1001, name="Log and Stop Rule", script=script))
+        db.commit()
+
+    # --- 2. 执行 ---
+    await process_event("message", mock_update, mock_context)
+
+    # --- 3. 验证 ---
+    # 验证 reply 动作未被调用
+    mock_update.effective_message.reply_text.assert_not_called()
+
+    # 验证 log 动作已生效（数据库中存在记录）
+    with test_db_session_factory() as db:
+        log_entry = db.query(Log).filter(Log.message == "This should be logged").one_or_none()
+        assert log_entry is not None
+        assert log_entry.group_id == -1001
+        assert log_entry.actor_user_id == mock_update.effective_user.id
+
+
 async def test_complex_keyword_automute_scenario(mock_update, mock_context, test_db_session_factory):
     """
     一个复杂的端到端集成测试，模拟一个“关键词自动禁言”的系统。

@@ -254,6 +254,23 @@ async def test_action_unmute_user_targeting():
 
 
 @pytest.mark.asyncio
+async def test_action_unmute_user_calls_util(mock_update, mock_context):
+    """测试 unmute_user 动作是否正确调用了重构后的工具函数。"""
+    # 使用 patch 来模拟我们新创建的工具函数
+    with patch('src.core.executor.unmute_user_util', new_callable=AsyncMock) as mock_util:
+        # 执行包含 unmute_user 动作的脚本
+        await _execute_then_block("unmute_user(54321);", mock_update, mock_context)
+
+        # 断言工具函数被以正确的参数调用了一次
+        mock_util.assert_called_once()
+        call_args, _ = mock_util.call_args
+        # call_args 是一个元组，包含了所有位置参数
+        # (context, chat_id, user_id)
+        assert call_args[0] is mock_context
+        assert call_args[1] == mock_update.effective_chat.id
+        assert call_args[2] == 54321
+
+@pytest.mark.asyncio
 async def test_action_unmute_user_no_permissions(mock_update, mock_context):
     """测试 unmute_user 在 get_chat 未返回权限时的后备行为。"""
     mock_context.bot.restrict_chat_member = AsyncMock()

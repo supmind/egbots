@@ -4,6 +4,8 @@ import io
 from contextlib import contextmanager
 from sqlalchemy.orm import Session, sessionmaker
 from PIL import Image, ImageDraw, ImageFont
+from telegram import ChatPermissions
+from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 
@@ -75,3 +77,48 @@ def generate_math_image(problem: str) -> io.BytesIO:
     img_byte_arr.seek(0) # 重置流的指针到开头
 
     return img_byte_arr
+
+
+async def unmute_user_util(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    """
+    一个统一的工具函数，用于为一个用户解除禁言（恢复其默认的群组权限）。
+    它会尝试获取群组的默认权限，如果失败则使用一套理智的、通用的权限。
+
+    Args:
+        context: 当前的 `ContextTypes.DEFAULT_TYPE` 对象。
+        chat_id: 目标群组的 ID。
+        user_id: 目标用户的 ID。
+
+    Returns:
+        bool: 操作是否成功。
+    """
+    try:
+        chat = await context.bot.get_chat(chat_id=chat_id)
+        permissions = chat.permissions
+        if not permissions:
+            # 如果群组没有特定权限设置，则提供一个理智的默认值
+            logger.debug(f"群组 {chat_id} 没有设置默认权限，将使用通用权限进行解除禁言。")
+            permissions = ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_invite_users=True,
+            )
+
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=permissions
+        )
+        logger.info(f"已通过工具函数为用户 {user_id} 在群组 {chat_id} 解除禁言。")
+        return True
+    except Exception as e:
+        logger.error(f"在工具函数中为用户 {user_id} 在群组 {chat_id} 解除禁言时失败: {e}", exc_info=True)
+        return False
