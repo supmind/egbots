@@ -311,6 +311,99 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
 
+async def test_full_lifecycle_simple_reply(mock_update, mock_context, test_db_session_factory):
+    """
+    测试一个完整的事件生命周期：
+    1. 一个 "message" 事件被触发。
+    2. 系统从数据库加载并解析匹配的规则。
+    3. 规则的 WHERE 子句通过。
+    4. 规则的 THEN 块被执行，并调用了 'reply' 动作。
+    """
+    # 1. 准备：在数据库中创建一条规则
+    script = """
+    WHEN message
+    WHERE message.text contains "world"
+    THEN {
+        reply("Hello to you too!");
+    }
+    END
+    """
+    with test_db_session_factory() as session:
+        session.add(Group(id=-1001, name="Test Group"))
+        session.add(Rule(group_id=-1001, name="Simple Reply Rule", script=script, is_active=True))
+        session.commit()
+
+    mock_update.message.text = "Hello world"
+
+    # 2. 执行：调用事件处理器
+    await process_event("message", mock_update, mock_context)
+
+    # 3. 验证：检查 mock 的 bot API 是否被正确调用
+    mock_update.effective_message.reply_text.assert_called_once_with("Hello to you too!")
+
+async def test_local_variable_precedence(mock_update, mock_context, test_db_session_factory):
+    """
+    测试作用域优先级：验证脚本内的局部变量是否优先于同名的上下文变量。
+    """
+    # 1. 准备：创建一条规则，其中定义了一个名为 'user' 的局部变量，
+    # 这会与上下文中的 'user' 对象冲突。
+    script = """
+    WHEN message
+    THEN {
+        user = {"id": 999}; // 定义一个与上下文变量同名的局部变量
+        reply("User ID is " + user.id);
+    }
+    END
+    """
+    with test_db_session_factory() as session:
+        session.add(Group(id=-1001, name="Test Group"))
+        session.add(Rule(group_id=-1001, name="Scope Test Rule", script=script, is_active=True))
+        session.commit()
+
+    # 2. 执行
+    await process_event("message", mock_update, mock_context)
+
+    # 3. 验证：reply 动作应该使用局部变量 `user.id` (999)，而不是上下文中的 `user.id` (123)。
+    mock_update.effective_message.reply_text.assert_called_once_with("User ID is 999")
+
+async def test_complex_foreach_with_control_flow(mock_update, mock_context, test_db_session_factory):
+    """
+    测试一个复杂的 foreach 循环，其中包含 if, break, continue 和对外部变量的修改。
+    """
+    script = """
+    WHEN message
+    THEN {
+        my_list = [10, 20, 30, 40, 50];
+        total = 0;
+        count = 0;
+        foreach (item in my_list) {
+            if (item == 20) {
+                continue; // 跳过 20
+            }
+            if (item == 50) {
+                break; // 在 50 处停止
+            }
+            total = total + item;
+            count = count + 1;
+        }
+        reply("Total: " + total + ", Count: " + count);
+    }
+    END
+    """
+    with test_db_session_factory() as session:
+        session.add(Group(id=-1001, name="Test Group"))
+        session.add(Rule(group_id=-1001, name="Complex Loop Rule", script=script, is_active=True))
+        session.commit()
+
+    # 2. 执行
+    await process_event("message", mock_update, mock_context)
+
+    # 3. 验证：
+    # 循环应该处理 10, 30, 40。
+    # - total 应该是 10 + 30 + 40 = 80
+    # - count 应该是 3
+    mock_update.effective_message.reply_text.assert_called_once_with("Total: 80, Count: 3")
+
 
 async def test_complex_keyword_automute_scenario(mock_update, mock_context, test_db_session_factory):
     """

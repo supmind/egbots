@@ -126,6 +126,59 @@ async def test_list_and_dict_construction():
 
 
 @pytest.mark.asyncio
+async def test_action_ban_user(mock_update, mock_context):
+    """测试 ban_user 动作。"""
+    mock_context.bot.ban_chat_member = AsyncMock()
+
+    await _execute_then_block("ban_user(12345, 'spam');", mock_update, mock_context)
+
+    mock_context.bot.ban_chat_member.assert_called_once()
+    call_args = mock_context.bot.ban_chat_member.call_args
+    assert call_args.args[0] == mock_update.effective_chat.id
+    assert call_args.args[1] == 12345
+    # ban_chat_member doesn't have a reason argument in the library version used,
+    # but the action itself logs it. We are just testing the bot call here.
+
+@pytest.mark.asyncio
+async def test_action_mute_user(mock_update, mock_context):
+    """测试 mute_user 动作。"""
+    from datetime import datetime, timedelta, timezone
+    mock_context.bot.restrict_chat_member = AsyncMock()
+
+    await _execute_then_block("mute_user('1h', 54321);", mock_update, mock_context)
+
+    mock_context.bot.restrict_chat_member.assert_called_once()
+    call_kwargs = mock_context.bot.restrict_chat_member.call_args.kwargs
+    assert call_kwargs['chat_id'] == mock_update.effective_chat.id
+    assert call_kwargs['user_id'] == 54321
+    assert not call_kwargs['permissions'].can_send_messages
+    # Check that the 'until_date' is approximately 1 hour from now
+    expected_until = datetime.now(timezone.utc) + timedelta(hours=1)
+    assert abs(call_kwargs['until_date'].timestamp() - expected_until.timestamp()) < 5
+
+@pytest.mark.asyncio
+async def test_action_start_verification(mock_update, mock_context):
+    """测试 start_verification 动作。"""
+    mock_context.bot.restrict_chat_member = AsyncMock()
+    mock_context.bot.send_message = AsyncMock()
+    mock_context.bot.username = "MyTestBot"
+    mock_update.effective_user.mention_html.return_value = "Test User"
+
+    await _execute_then_block("start_verification();", mock_update, mock_context)
+
+    # 1. 验证用户被禁言
+    mock_context.bot.restrict_chat_member.assert_called_once()
+    restrict_kwargs = mock_context.bot.restrict_chat_member.call_args.kwargs
+    assert not restrict_kwargs['permissions'].can_send_messages
+    assert restrict_kwargs['user_id'] == mock_update.effective_user.id
+
+    # 2. 验证发送了验证消息
+    mock_context.bot.send_message.assert_called_once()
+    send_kwargs = mock_context.bot.send_message.call_args.kwargs
+    assert "点此开始验证" in send_kwargs['reply_markup'].inline_keyboard[0][0].text
+    assert f"verify_{mock_update.effective_chat.id}_{mock_update.effective_user.id}" in send_kwargs['reply_markup'].inline_keyboard[0][0].url
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("expr, scope, expected", [
     # 涉及 null 的运算
     ("null + 5", None, 5),
@@ -410,6 +463,14 @@ async def test_action_log_with_rotation(test_db_session_factory):
     ("str(123)", None, "123"),
     ("str(true)", None, "True"),
     ("str([1, 2])", None, "[1, 2]"),
+    # lower() / upper()
+    ("lower('HeLlO')", None, "hello"),
+    ("upper('HeLlO')", None, "HELLO"),
+    # split()
+    ("split('a,b,c', ',')", None, ["a", "b", "c"]),
+    ("split('a b c')", None, ["a", "b", "c"]),
+    # join()
+    ("join(['a', 'b', 'c'], '-')", None, "a-b-c"),
 ])
 async def test_builtin_functions(func_call, scope, expected):
     """测试内置函数的行为，包括边界情况。"""

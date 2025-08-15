@@ -149,13 +149,18 @@ class Token:
     line: int
     column: int
 
-# 使用正则表达式定义所有合法的词法单元
-# 注意：此处的顺序很重要。例如，`NUMBER` 必须在 `ARITH_OP` 之前，
-# 这样才能正确地将 `-10` 识别为一个数字，而不是一个减号和一个数字。
+# 使用正则表达式定义所有合法的词法单元。
+#
+# 重点:
+# 1.  **顺序至关重要**: 正则引擎会按列表顺序尝试匹配。因此，更具体的模式必须放在更通用的模式之前。
+#     例如, `COMPARE_OP` 中的 `startswith` 关键字必须在 `IDENTIFIER` 之前，否则 "startswith" 会被错误地识别为一个普通标识符。
+# 2.  **负数处理**: `NUMBER` 模式 `(-?\d+(\.\d*)?)` 被特意放在 `ARITH_OP` (`\+|-|\*|/`) 之前。
+#     这确保了 `-10` 这样的字符串被完整地识别为一个 `NUMBER` 词法单元，而不是一个 `ARITH_OP` (`-`) 后跟一个 `NUMBER` (`10`)。
+# 3.  **关键字**: `KEYWORD` 模式 `\b(WHEN|...)\b` 使用了单词边界 `\b`，以防止将 `THEN` 误认为 `my_then_variable` 的一部分。
 TOKEN_SPECIFICATION = [
-    ('SKIP',         r'[ \t]+'),      # 忽略空格和制表符
-    ('COMMENT',      r'//[^\n]*'),   # 忽略单行注释
-    ('NEWLINE',      r'\n'),         # 识别换行符
+    ('SKIP',         r'[ \t]+'),      # 忽略所有空格和制表符
+    ('COMMENT',      r'//[^\n]*'),   # 忽略从 // 到行尾的单行注释
+    ('NEWLINE',      r'\n'),         # 将换行符识别为一个独立的词法单元，但在分词器中会被忽略
     ('LBRACE',       r'\{'),
     ('RBRACE',       r'\}'),
     ('LPAREN',       r'\('),
@@ -242,6 +247,7 @@ class RuleParser:
             self._consume_keyword('END')
 
         # 在此我们不再检查 END 之后是否有多余的 token。
+        # 在此我们不再检查 END 之后是否有多余的 token。
         # 这使得规则脚本可以包含尾随的空行或注释，而不会导致解析失败，从而提高了灵活性。
         return rule
 
@@ -257,9 +263,8 @@ class RuleParser:
     def _parse_statement(self) -> Stmt:
         """
         解析单条语句。
-        这是一个关键的调度方法，它根据下一个 token 的类型来决定调用哪个更具体的解析方法。
-        语句可以是一条独立的表达式（例如赋值或动作调用），
-        也可以是特定的语句关键字（如 if, foreach）。
+        这是一个关键的“调度”方法，它根据下一个 token 的类型来决定调用哪个更具体的解析方法。
+        语句可以是一条独立的表达式（例如赋值或动作调用），也可以是特定的语句关键字（如 if, foreach）。
         """
         # 首先检查是否是特定的语句关键字
         if self._peek_value('if'):
@@ -281,7 +286,7 @@ class RuleParser:
 
         # 验证表达式是否可以作为独立的语句存在。
         # 只有动作调用（如 `reply("hello");`）和赋值（如 `x = 1;`）是有效的独立语句。
-        # 像 `1 + 2;` 这样的表达式是无效的。
+        # 像 `1 + 2;` 这样的表达式虽然在语法上可能被解析，但它没有任何副作用，因此在我们的语言中被视为无效语句。
         if isinstance(expr, ActionCallExpr):
             return ActionCallStmt(call=expr)
         if isinstance(expr, Assignment):
@@ -313,14 +318,19 @@ class RuleParser:
         else_block = None
         if self._peek_value('else'):
             self._consume_keyword('else')
-            # 此处是处理 `else if` 的关键技巧：
-            # 当 `else` 后面紧跟着 `if` 时，我们将整个 `if` 语句作为一个新的 `IfStmt` 节点，
-            # 并将其包装在一个只包含这一个语句的 `StatementBlock` 中。
-            # 这使得 AST 结构保持一致，`else` 块始终是一个 `StatementBlock`。
+            #
+            # 此处是处理 `else if` 的关键技巧:
+            # 我们的语法中没有 `elif` 关键字。`else if` 实际上被解析为一个 `else` 块，
+            # 这个块内恰好包含了一个 `if` 语句。
+            # 通过将这个后续的 `if` 语句包装在一个新的 `StatementBlock` 中，
+            # 我们可以用现有的 `IfStmt(..., else_block=...)` 结构来优雅地表示 `else if` 链，
+            # 而无需为 AST 引入一个新的节点类型。这使得 AST 结构更加统一和简洁。
+            #
             if self._peek_value('if'):
+                # `else if` 分支: 解析 `if` 语句并将其作为 `else` 块的唯一内容
                 else_block = StatementBlock(statements=[self._parse_if_statement()])
             else:
-                # 如果是普通的 `else`，则直接解析其后的语句块。
+                # 普通 `else` 分支: 直接解析其后的语句块
                 else_block = self._parse_statement_block()
 
         return IfStmt(condition=condition, then_block=then_block, else_block=else_block)
@@ -342,15 +352,23 @@ class RuleParser:
     def _parse_expression(self, min_precedence=0) -> Expr:
         """
         使用“优先级攀爬”（Pratt Parsing）算法来解析一个完整的、带优先级的表达式。
-        这是一个强大且优雅的算法，用于处理不同优先级的二元运算符。
+        这是一个强大且优雅的算法，专门用于处理包含不同优先级和结合性（左结合/右结合）的二元运算符的表达式。
 
-        工作原理:
-        1. 从一个基础表达式（`lhs`）开始。
-        2. 查看下一个运算符，如果它的优先级大于或等于当前的 `min_precedence`，则处理它。
-        3. 在处理该运算符时，递归调用 `_parse_expression` 来解析右侧的表达式（`rhs`），
-           但传入的 `min_precedence` 是当前运算符的优先级 + 1。
-           这确保了更高优先级的运算符（如 `*`）会在较低优先级的运算符（如 `+`）之前被组合。
-        4. 将 `lhs`, 运算符, 和 `rhs` 组合成一个新的 `lhs`，然后继续循环。
+        工作原理简述 (以 `1 + 2 * 3` 为例):
+        1. `_parse_expression(0)` 被调用。
+        2. `_parse_unary_expression` 解析出 `1` 作为初始的 `lhs` (left-hand side)。
+        3. 进入 `while` 循环，看到下一个 token 是 `+`。`+` 的优先级 (5) > `min_precedence` (0)。
+        4. 我们处理 `+`。递归调用 `_parse_expression` 来解析右侧表达式，但这次传入的 `min_precedence` 是 `+` 的优先级再加一，即 6。
+           - `_parse_expression(6)` 被调用。
+           - 它解析出 `2` 作为 `lhs`。
+           - 看到下一个 token 是 `*`。`*` 的优先级 (6) >= `min_precedence` (6)。
+           - 我们处理 `*`。递归调用 `_parse_expression(7)`。
+             - `_parse_expression(7)` 解析出 `3` 作为 `lhs`。
+             - 循环结束，因为它后面没有更高优先级的运算符了。返回 `Literal(3)`。
+           - 回到 `_parse_expression(6)`，它现在有了 `rhs` (`Literal(3)`)。它将 `2`, `*`, `3` 组合成 `BinaryOp(2, '*', 3)` 并将其作为新的 `lhs`。
+           - 循环结束，返回 `BinaryOp(2, '*', 3)`。
+        5. 回到最初的 `_parse_expression(0)`，它现在有了 `rhs` (`BinaryOp(2, '*', 3)`)。它将 `1`, `+`, 和这个 `rhs` 组合成 `BinaryOp(1, '+', BinaryOp(2, '*', 3))`。
+        6. 循环结束，返回最终的、正确嵌套的 AST。
         """
         lhs = self._parse_unary_expression()
 
@@ -363,14 +381,16 @@ class RuleParser:
             if precedence < min_precedence: break
 
             self.pos += 1
-            # 赋值运算符是右结合的，所以它的递归调用不增加优先级
+            # 赋值运算符是右结合的，所以它的递归调用不增加优先级。
+            # 例如，在 `a = b = 5` 中，它应该被解析为 `a = (b = 5)`。
             if op_token.type == 'EQUALS':
-                rhs = self._parse_expression(precedence)
+                rhs = self._parse_expression(precedence) # 递归调用时传入相同的优先级
                 if not isinstance(lhs, (Variable, PropertyAccess, IndexAccess)):
                     raise RuleParserError("赋值表达式的左侧必须是变量、属性或下标。", self._current_token().line)
                 lhs = Assignment(variable=lhs, expression=rhs)
             else:
-                # 对于左结合运算符，递归调用时优先级加一
+                # 其他所有二元运算符都是左结合的。
+                # 递归调用时优先级加一，以确保更高优先级的运算符被优先处理。
                 rhs = self._parse_expression(precedence + 1)
                 lhs = BinaryOp(left=lhs, op=op_token.value, right=rhs)
 
@@ -379,12 +399,12 @@ class RuleParser:
     def _get_operator_precedence(self, token: Token) -> int:
         """
         返回二元运算符的优先级。数字越大，优先级越高。
-        - 赋值 (=): 1 (最低)
-        - 逻辑或 (or): 2
-        - 逻辑与 (and): 3
-        - 比较 (==, >, contains): 4
-        - 加减 (+, -): 5
-        - 乘除 (*, /): 6 (最高)
+        - 赋值 (`=`): 1 (最低)
+        - 逻辑或 (`or`): 2
+        - 逻辑与 (`and`): 3
+        - 比较 (`==`, `>`, `contains`): 4
+        - 加减 (`+`, `-`): 5
+        - 乘除 (`*`, `/`): 6 (最高)
         """
         op = token.value.lower()
         if token.type == 'EQUALS':
@@ -401,8 +421,10 @@ class RuleParser:
         """解析一元运算符，例如 'not'。"""
         if self._peek_type('LOGIC_OP') and self._current_token().value.lower() == 'not':
             op_token = self._consume_keyword('not')
+            # 'not' 的优先级非常高，因此它后面应该跟一个同样能处理一元运算的表达式。
             operand = self._parse_unary_expression()
-            # 将 'not' 视为一个特殊的二元运算，其左操作数为空
+            # 在我们的AST中，为了简化，我们将 'not' 视为一个特殊的二元运算，其左操作数为空。
+            # 在执行器（Executor）中，会特别处理这种左操作数为 None 的情况。
             return BinaryOp(left=Literal(value=None), op=op_token.value, right=operand)
 
         return self._parse_accessor_expression()
@@ -429,11 +451,12 @@ class RuleParser:
         """
         解析表达式的最基本组成部分（原子单元）。
         这包括字面量、变量、括号内的表达式、列表/字典构造器，以及函数调用。
+        这是表达式递归下降解析的“基础情况”。
         """
         token = self._current_token()
         if token.type == 'STRING':
             self._consume('STRING')
-            # 移除字符串两边的引号
+            # 移除字符串两边的引号，例如将 '"hello"' 转换为 'hello'
             return Literal(value=token.value[1:-1])
         elif token.type == 'NUMBER':
             self._consume('NUMBER')
@@ -446,19 +469,22 @@ class RuleParser:
             if val_lower == 'false': return Literal(value=False)
             if val_lower == 'null': return Literal(value=None)
         elif token.type == 'IDENTIFIER':
-            # 这是区分“变量访问”和“函数调用”的关键逻辑。
-            # 我们向前“偷看”一个 token，如果标识符后面跟着一个左括号 `(`，
-            # 那么我们就知道这是一个函数调用，并调用相应的解析方法。
+            #
+            # 这是区分“变量访问”（如 `my_var`）和“函数调用”（如 `len(my_list)`）的关键逻辑。
+            # 我们向前“偷看”一个 token (`_peek_type`)，但不消耗它。如果标识符后面紧跟着一个左括号 `(`，
+            # 我们就断定这是一个函数调用，并调用专门的 `_parse_action_call_expression` 方法。
+            # 否则，它只是一个普通的变量访问。
+            #
             if self._peek_type('LPAREN', offset=1):
                 return self._parse_action_call_expression()
             else:
-                # 否则，它只是一个普通的变量。
+                # 确认它只是一个变量，然后消耗该标识符
                 self._consume('IDENTIFIER')
                 return Variable(name=token.value)
         elif self._peek_type('LPAREN'):
             # 处理用括号包裹的表达式，例如 `(1 + 2) * 3`
             self._consume('LPAREN')
-            expr = self._parse_expression() # 递归调用表达式解析
+            expr = self._parse_expression() # 递归调用主表达式解析器
             self._consume('RPAREN')
             return expr
         elif self._peek_type('LBRACK'):
@@ -518,7 +544,11 @@ class RuleParser:
     def _consume(self, expected_type: str) -> Token:
         """消耗一个指定类型的 token，如果类型不匹配则抛出错误。"""
         if self.pos >= len(self.tokens):
-            raise RuleParserError(f"期望得到 {expected_type}，但脚本已结束。")
+            # 在报告错误之前，尝试获取最后一个 token 的位置，以提供更有用的错误信息
+            last_token = self.tokens[-1] if self.tokens else None
+            line = last_token.line if last_token else -1
+            col = last_token.column if last_token else -1
+            raise RuleParserError(f"期望得到 {expected_type}，但脚本已意外结束。", line, col)
         token = self.tokens[self.pos]
         if token.type != expected_type:
             raise RuleParserError(f"期望得到 token 类型 {expected_type}，但得到 {token.type} ('{token.value}')", token.line, token.column)
@@ -528,9 +558,12 @@ class RuleParser:
     def _consume_keyword(self, keyword: str) -> Token:
         """消耗一个指定的关键字（不区分大小写）。也接受逻辑运算符作为关键字。"""
         if self.pos >= len(self.tokens):
-            raise RuleParserError(f"期望得到关键字 '{keyword}'，但脚本已结束。")
+            last_token = self.tokens[-1] if self.tokens else None
+            line = last_token.line if last_token else -1
+            col = last_token.column if last_token else -1
+            raise RuleParserError(f"期望得到关键字 '{keyword}'，但脚本已意外结束。", line, col)
         token = self.tokens[self.pos]
-        # 注意：允许 token 类型为 KEYWORD 或 LOGIC_OP，以统一处理 'not' 等逻辑关键字
+        # 注意：允许 token 类型为 KEYWORD 或 LOGIC_OP，以统一处理 'not', 'and', 'or' 等逻辑关键字
         if (token.type not in ('KEYWORD', 'LOGIC_OP')) or token.value.lower() != keyword.lower():
             raise RuleParserError(f"期望得到关键字 '{keyword}'，但得到 '{token.value}' (类型: {token.type})", token.line, token.column)
         self.pos += 1
@@ -548,19 +581,26 @@ class RuleParser:
 def precompile_rule(script: str) -> (bool, Optional[str]):
     """
     预编译一个规则脚本以检查其语法是否有效。
+    这是一个对外暴露的实用工具函数，可用于在不实际执行规则的情况下，
+    快速验证一个规则脚本的语法正确性。这对于在外部系统（如Web界面）中集成规则编辑器非常有用。
 
     Args:
         script: 包含单条规则的完整脚本字符串。
 
     Returns:
-        一个元组 (is_valid, error_message)。
-        - 如果语法有效, 返回 (True, None)。
-        - 如果存在语法错误, 返回 (False, "错误信息...")。
+        一个元组 `(is_valid, error_message)`。
+        - 如果脚本语法完全正确，返回 `(True, None)`。
+        - 如果脚本存在语法错误，返回 `(False, "包含具体行号和错误信息的字符串")`。
+        - 如果脚本为空或只包含空白，返回 `(False, "脚本不能为空。")`。
     """
     if not isinstance(script, str) or not script.strip():
         return False, "脚本不能为空。"
     try:
+        # 核心逻辑：创建一个解析器实例并尝试调用其主 `parse` 方法。
+        # 如果 `parse` 成功完成且没有抛出异常，说明语法是有效的。
         RuleParser(script).parse()
         return True, None
     except RuleParserError as e:
+        # 如果在解析过程中捕获到我们自定义的 `RuleParserError`，
+        # 说明存在语法错误。我们将异常对象转换为字符串（它包含了详细的错误信息）并返回。
         return False, str(e)

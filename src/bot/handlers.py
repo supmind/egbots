@@ -160,12 +160,23 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
     无论是什么类型的事件（新消息、用户加入等），最终都会被路由到这里进行统一处理。
 
     它的主要职责包括：
-    1.  管理数据库会话。
-    2.  为新群组植入默认规则。
-    3.  高效地管理和利用规则缓存（这是关键的性能优化）。
-    4.  按优先级顺序遍历和执行与当前事件匹配的规则。
-    5.  处理 `stop()` 动作的控制流中断。
-    6.  捕获并记录单个规则执行时发生的异常，防止其影响其他规则。
+    1.  **数据库会话管理**: 使用 `session_scope` 来确保数据库会话的正确打开和关闭。
+    2.  **新群组初始化**: 通过 `_seed_rules_if_new_group` 为首次使用本机器人的群组植入一套默认规则。
+    3.  **规则缓存 (性能关键)**:
+        -   为了避免在每次事件发生时都从数据库加载和解析所有规则（这会非常低效），
+            我们将已解析的规则对象缓存在 `context.bot_data['rule_cache']` 中。
+        -   缓存的键是 `chat_id`，值是该群组所有已激活规则的 `ParsedRule` 对象列表。
+        -   只有当缓存中不存在某个群组的规则时（缓存未命中），才会执行从数据库加载并解析的昂贵操作。
+        -   当管理员修改规则（如 `togglerule`）时，会清除对应群组的缓存，以确保下次能加载最新的规则。
+    4.  **规则匹配与执行**:
+        -   按优先级顺序遍历缓存中的规则。
+        -   检查规则的 `WHEN` 子句是否与当前 `event_type` 匹配。
+        -   为每个匹配的规则创建一个新的 `RuleExecutor` 实例并执行它。
+    5.  **健壮的错误处理**:
+        -   使用 `try...except StopRuleProcessing` 来处理 `stop()` 动作，立即中断后续规则的执行。
+        -   使用一个宽泛的 `try...except Exception` 来捕获执行单个规则时可能发生的任何其他错误。
+            这确保了一个有问题的规则（例如，由于脚本逻辑错误或Telegram API临时故障）不会让整个机器人崩溃，
+            只会记录错误并继续处理下一条规则。
     """
     if not update.effective_chat: return
     chat_id = update.effective_chat.id
@@ -226,7 +237,10 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
 # 这些处理器是 `python-telegram-bot` 库的直接入口点。
 # 它们的设计非常简单，只是一个轻量级的包装器，其唯一职责是调用通用的 `process_event` 函数，
 # 并传入一个明确的、标准化的事件类型字符串（如 "message", "user_join"）。
-# 这种设计将平台相关的逻辑与核心的、平台无关的规则处理逻辑清晰地分离开来。
+#
+# 这种“包装器模式”是一种重要的设计原则，它将平台相关的逻辑（如何从 `python-telegram-bot`
+# 接收事件）与我们核心的、平台无关的规则处理逻辑 (`process_event`) 清晰地分离开来。
+# 这使得核心逻辑更容易测试，并且在未来如果需要迁移到其他机器人框架时，也只需要重写这些包装器即可。
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理所有符合 `filters.TEXT & ~filters.COMMAND` 的消息。"""
@@ -349,7 +363,25 @@ async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
 async def verification_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     处理用户在私聊中点击验证问题答案按钮的回调查询（CallbackQuery）。
-    这是人机验证流程中最复杂的部分。
+    这是人机验证流程中最复杂的部分，涉及多个状态和API调用。
+
+    工作流程:
+    1.  **解析回调数据**: 从 `query.data` (格式: "verify_{group_id}_{user_id}_{answer}") 中提取出
+        群组ID、用户ID和用户选择的答案。
+    2.  **权限检查**: 确保点击按钮的用户就是需要被验证的用户本人。
+    3.  **获取验证状态**: 从数据库中查询该用户的 `Verification` 记录。如果记录不存在，说明验证已过期或被处理。
+    4.  **清除超时任务**: 既然用户已经响应，无论答案对错，都必须立即找到并取消之前设置的“验证超时”作业
+        (`verification_timeout_handler`)，以防止用户在回答正确后仍然被踢出。
+    5.  **检查答案**:
+        -   **如果正确**:
+            a.  调用 `restrict_chat_member` 为用户恢复正常的发言权限。
+            b.  编辑私聊消息，告知用户验证成功。
+            c.  从数据库中删除该条 `Verification` 记录，完成验证流程。
+        -   **如果错误**:
+            a.  检查已尝试次数 (`attempts_made`)。
+            b.  如果次数已达上限（例如3次），则将用户踢出群组，并告知其结果，然后删除 `Verification` 记录。
+            c.  如果还有剩余次数，则告知用户回答错误和剩余次数，然后调用 `_send_verification_challenge`
+               来发送一道新的验证题目，并更新数据库中的 `Verification` 记录。
     """
     query = update.callback_query
     # 必须先 answer() 回调，否则客户端会一直显示加载状态

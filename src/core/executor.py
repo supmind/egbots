@@ -107,6 +107,19 @@ class RuleExecutor:
     一个AST（抽象语法树）解释器，负责执行由 RuleParser 生成的语法树。
     它通过“访问者模式”遍历AST，对表达式求值，管理变量作用域，并执行与外部世界交互的“动作”。
     这是整个规则引擎的核心运行时。
+
+    工作流程:
+    1.  **初始化**: `RuleExecutor` 接收当前的 `Update`, `Context`, 数据库会话等所有上下文信息。
+        它还会创建一个 `VariableResolver` 实例，专门用于处理变量解析。
+    2.  **执行入口**: `execute_rule` 方法是执行的起点。它首先会检查并求值规则的 `WHERE` 子句。
+    3.  **求值与执行**: 如果 `WHERE` 子句通过，它会开始逐条执行 `THEN` 块中的语句。
+        -   对于表达式 (`1 + 2`, `user.id` 等)，它会调用 `_evaluate_expression` 来递归地计算出结果。
+        -   对于语句 (`x = 5`, `reply("hi")` 等)，它会调用 `_execute_statement` 来执行相应的操作。
+    4.  **变量管理**:
+        -   `_evaluate_expression` 在查找变量时，会优先在 `current_scope` (本地作用域) 中查找。
+        -   如果在本地作用域找不到，它会将变量路径委托给 `self.variable_resolver` 来从更广的上下文中解析。
+    5.  **动作调用**: 当遇到一个动作调用（如 `reply(...)`）时，它会从 `_ACTION_REGISTRY` 中找到对应的
+        Python 方法，并用求值后的参数来调用它。
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule"):
         """
@@ -183,7 +196,9 @@ class RuleExecutor:
         """执行 'if (condition) { ... } else { ... }' 语句。"""
         condition_result = await self._evaluate_expression(stmt.condition, current_scope)
 
-        # 在我们的脚本语言中，0, "", [], {}, None, 和 False 都被视为“假值”。
+        # 在我们的脚本语言中，遵循动态语言的普遍实践：
+        # 0, "", [], {}, None, 和 False 都被视为“假值”(falsy)。
+        # 其他所有值都被视为“真值”(truthy)。
         is_truthy = bool(condition_result)
 
         if is_truthy:
@@ -195,13 +210,13 @@ class RuleExecutor:
         """
         执行 'foreach (var in collection) { ... }' 语句。
 
-        此实现包含一个关于作用域管理的关键修复 (2025-08-14):
+        此实现包含一个关于作用域管理的关键设计决策:
         一个简单的实现可能会为每次循环迭代创建一个作用域的浅拷贝 (`loop_scope = current_scope.copy()`)。
-        但这会导致一个常见的 bug：在循环体内对变量（如 `count = count + 1`）的修改在下一次迭代开始时会丢失，
+        但这会导致一个常见的 bug：在循环体内对外部变量（如 `count = count + 1`）的修改在下一次迭代开始时会丢失，
         因为新的 `loop_scope` 总是从循环开始前的 `current_scope` 复制而来。
 
         正确的实现是直接在 `current_scope` 中操作循环变量。这确保了在多次迭代中，
-        变量状态的修改能够被正确地保持。同时，在循环结束后，必须谨慎地恢复或移除循环变量，
+        对外部变量状态的修改能够被正确地保持。同时，在循环结束后，必须谨慎地恢复或移除循环变量，
         以避免对外部作用域造成污染（即“泄漏”循环变量）。
         """
         collection = await self._evaluate_expression(stmt.collection, current_scope)
@@ -222,9 +237,9 @@ class RuleExecutor:
             try:
                 await self._execute_statement_block(stmt.body, current_scope)
             except BreakException:
-                break  # 退出循环
+                break  # 捕获异常以退出循环
             except ContinueException:
-                continue  # 进入下一次迭代
+                continue  # 捕获异常以进入下一次迭代
 
         # 循环结束后，恢复或移除循环变量以避免污染外部作用域
         if had_original_value:
@@ -281,16 +296,16 @@ class RuleExecutor:
         """
         expr_type = type(expr)
 
-        # --- 基本情况 ---
+        # --- 基本情况 (递归的终止条件) ---
         if expr_type is Literal:
             return expr.value
 
         # --- 变量与作用域 ---
         if expr_type is Variable:
-            # 作用域查找顺序：优先查找本地作用域（由赋值或 foreach 创建的变量）。
+            # 作用域查找顺序：优先查找本地作用域（由 `x = ...` 或 `foreach` 创建的变量）。
             if expr.name in current_scope:
                 return current_scope[expr.name]
-            # 如果本地作用域中没有，则委托给 VariableResolver 从更广的上下文中查找（如 user.id, vars.group.x）。
+            # 如果本地作用域中没有，则委托给 VariableResolver 从更广的上下文中查找（如 `user.id`, `vars.group.x`）。
             return await self._resolve_path(expr.name)
 
         # --- 复合表达式（递归部分） ---
@@ -300,7 +315,7 @@ class RuleExecutor:
             # (例如 `my_dict.key`) 和对“魔法”上下文变量的访问 (例如 `user.is_admin`)。
             #
             # 问题: 一个简单的实现 `target = await self._evaluate_expression(expr.target, ...)` 会失败，
-            # 因为它会尝试对 `user` 或 `vars.user` 求值，但这些本身并不是有效的独立变量。
+            # 因为它会尝试对 `user` 或 `vars.user` 求值，但这些本身并不是有效的独立变量，它们只是路径的“命名空间”。
             #
             # 解决方案:
             # 1. 将整个访问链（如 `user.is_admin`）重构为一个完整的路径字符串。
@@ -322,11 +337,11 @@ class RuleExecutor:
                 if isinstance(temp_expr, Variable):
                     base_name = temp_expr.name
 
-            # 核心判断：如果基变量不是局部变量，则使用特殊解析器
+            # 核心判断：如果基变量不是一个局部变量，则将整个路径交给 VariableResolver 处理。
             if base_name and base_name not in current_scope:
                 return await self._resolve_path(full_path)
 
-            # 否则，按常规方式处理
+            # 否则，按常规方式处理：先求值目标对象，再获取其属性。
             target = await self._evaluate_expression(expr.target, current_scope)
             return target.get(expr.property) if isinstance(target, dict) else getattr(target, expr.property, None)
 
@@ -351,7 +366,7 @@ class RuleExecutor:
         """处理二元运算，包括算术、比较和逻辑运算。"""
         op = expr.op.lower()
 
-        # 为 `and` 和 `or` 实现短路求值（short-circuiting）。
+        # 为 `and` 和 `or` 实现短路求值 (short-circuiting)。
         # 这是重要的性能优化和行为修正。例如，在 `false and some_func()` 中，
         # `some_func()` 根本不应该被执行。
         if op == 'and':
@@ -363,34 +378,40 @@ class RuleExecutor:
             # 只有当左侧为假时，才需要对右侧求值
             return True if lhs else bool(await self._evaluate_expression(expr.right, current_scope))
         if op == 'not':
-            # `not` 是一元运算，只对右侧求值
+            # `not` 是一元运算，在我们的AST中其左操作数(lhs)为None，因此只对右侧求值。
             return not bool(await self._evaluate_expression(expr.right, current_scope))
 
+        # 对于非短路运算符，先对两边的操作数求值
         lhs = await self._evaluate_expression(expr.left, current_scope)
         rhs = await self._evaluate_expression(expr.right, current_scope)
 
         # 算术、列表和字符串运算
-        try:
-            if op == '+':
+        # `+` 运算符被重载用于多种类型：数字加法、字符串拼接、列表拼接。
+        if op == '+':
+            try:
                 if isinstance(lhs, list): return lhs + (rhs if isinstance(rhs, list) else [rhs])
                 if isinstance(rhs, list): return ([lhs] if lhs is not None else []) + rhs
                 if isinstance(lhs, str) or isinstance(rhs, str): return str(lhs or '') + str(rhs or '')
                 return (lhs or 0) + (rhs or 0)
-            if op == '-': return (lhs or 0) - (rhs or 0)
-            if op == '*': return (lhs or 0) * (rhs or 0)
-            if op == '/':
-                if rhs is None or rhs == 0:
-                    logger.warning(f"执行除法时检测到除数为零: {lhs} / {rhs}")
-                    return None
-                try:
-                    # 确保执行浮点除法，以符合大多数脚本语言用户的直觉
-                    return float(lhs or 0) / float(rhs)
-                except (ValueError, TypeError):
-                    logger.warning(f"除法运算的操作数无法转换为浮点数: {lhs} / {rhs}")
-                    return None
-        except TypeError:
-            logger.warning(f"算术运算中存在类型错误: {lhs} {op} {rhs}")
-            return None
+            except TypeError:
+                logger.warning(f"'+' 运算的类型不兼容: {type(lhs)} 和 {type(rhs)}")
+                return None
+
+        # 其他算术运算
+        if op in ('-', '*', '/'):
+            try:
+                lhs_num = lhs or 0
+                rhs_num = rhs or 0
+                if op == '-': return lhs_num - rhs_num
+                if op == '*': return lhs_num * rhs_num
+                if op == '/':
+                    if rhs_num == 0:
+                        logger.warning(f"执行除法时检测到除数为零: {lhs} / {rhs}")
+                        return None
+                    return float(lhs_num) / float(rhs_num)
+            except TypeError:
+                logger.warning(f"算术运算 '{op}' 的操作数类型无效: {type(lhs)} 和 {type(rhs)}")
+                return None
 
         # 比较运算符
         if op in ('==', 'eq'): return lhs == rhs
@@ -405,6 +426,8 @@ class RuleExecutor:
             if op in ('>=', 'ge'): return lhs >= rhs
             if op in ('<=', 'le'): return lhs <= rhs
         except TypeError:
+            # 对于 > < >= <= 等操作，如果操作数类型不兼容（例如 `10 > 'abc'`），
+            # Python会抛出 TypeError。我们捕获它并返回 False，这通常是脚本语言中最安全的行为。
             return False
 
         logger.warning(f"不支持的二元运算符: {op}")
@@ -428,8 +451,8 @@ class RuleExecutor:
     def _try_reconstruct_path(self, expr: Expr) -> Optional[str]:
         """
         尝试从一个表达式AST节点（例如 PropertyAccess 链）重构出完整的点分隔路径字符串。
-        例如，将 PropertyAccess(target=Variable(name='a'), property='b') 转换为 "a.b"。
-        如果表达式不是一个简单的访问路径，则返回 None。
+        例如，将 `PropertyAccess(target=Variable(name='a'), property='b')` 转换为 `"a.b"`。
+        如果表达式不是一个简单的访问路径（例如，包含函数调用或索引访问），则返回 `None`。
         """
         if isinstance(expr, Variable):
             return expr.name
@@ -452,9 +475,17 @@ class RuleExecutor:
     def _get_target_user_id(self, explicit_user_id: Any = None) -> Optional[int]:
         """
         一个统一的辅助方法，用于确定动作的目标用户ID，以确保行为的一致性和可预测性。
+        这是整个动作系统的核心设计哲学之一。
+
         规则非常简单：
-        1. 如果在动作调用中显式提供了 `user_id` 参数 (例如 `ban_user(12345)`), 则永远优先使用它。
-        2. 如果未提供 `user_id` 参数 (例如 `ban_user()`), 则默认目标是触发当前规则的用户。
+        1.  **显式优于隐式**: 如果在动作调用中显式提供了 `user_id` 参数 (例如 `ban_user(12345)`),
+            则永远优先使用它。
+        2.  **默认上下文**: 如果未提供 `user_id` 参数 (例如 `ban_user()`), 则默认目标是触发当前规则的用户
+            (即 `update.effective_user.id`)。
+
+        这使得规则编写者的意图非常明确。如果要对被回复消息的用户进行操作，
+        脚本必须显式地写 `ban_user(message.reply_to_message.from_user.id)`，
+        而不是依赖于模糊的、可能随上下文变化的隐式目标。
         """
         if explicit_user_id:
             try:
@@ -556,9 +587,17 @@ class RuleExecutor:
     async def set_var(self, variable_path: str, value: Any, user_id: Any = None):
         """
         动作：设置一个持久化变量 (例如 "user.warns" 或 "group.config") 并将其存入数据库。
-        - 路径必须是 'scope.name' 的格式, scope 只能是 'user' 或 'group'。
-        - 当 scope 为 'user' 时, 可以额外提供一个 user_id 来指定目标用户。
-        - 将 value 设置为 null 会从数据库中删除该变量。
+
+        工作流程:
+        1.  **解析路径**: 将 `variable_path` (如 `"user.warns"`) 分割为作用域 (`user`) 和变量名 (`warns`)。
+        2.  **确定目标**:
+            - 如果作用域是 `'group'`，则目标是当前群组。
+            - 如果作用域是 `'user'`，则调用 `_get_target_user_id(user_id)` 来确定目标用户。
+              这允许脚本编写者通过 `set_var("user.points", 100, some_other_user_id)` 来修改其他用户的变量。
+        3.  **数据库操作**:
+            - 查询数据库中是否已存在该变量。
+            - 如果 `value` 是 `null`，则从数据库中删除该变量记录。
+            - 否则，将 `value` 序列化为 JSON 字符串，然后创建或更新数据库中的记录。
         """
         if not isinstance(variable_path, str) or '.' not in variable_path:
             return logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效，应为 'scope.name' 格式。")

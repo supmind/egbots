@@ -4,7 +4,8 @@ import unittest
 from src.core.parser import (
     RuleParser, ParsedRule, StatementBlock, Assignment, ActionCallStmt, Literal,
     Variable, BinaryOp, PropertyAccess, IndexAccess, ForEachStmt, IfStmt,
-    RuleParserError, ListConstructor, DictConstructor, precompile_rule
+    RuleParserError, ListConstructor, DictConstructor, precompile_rule,
+    ActionCallExpr, BreakStmt, ContinueStmt
 )
 
 class TestNewRuleParser(unittest.TestCase):
@@ -58,6 +59,38 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(right_sub_expr.op, '*')
         self.assertEqual(right_sub_expr.left.value, 2)
         self.assertEqual(right_sub_expr.right.value, 3)
+
+    def test_parse_complex_expression(self):
+        """测试对混合了多种运算符和括号的复杂表达式的解析。"""
+        script = 'WHEN command WHERE (a > 5 and b < 10) or not (c == "test") THEN {}'
+        rule = RuleParser(script).parse()
+        where_clause = rule.where_clause
+
+        self.assertIsInstance(where_clause, BinaryOp)
+        self.assertEqual(where_clause.op.lower(), 'or')
+
+        # 左侧: (a > 5 and b < 10)
+        left_and_expr = where_clause.left
+        self.assertIsInstance(left_and_expr, BinaryOp)
+        self.assertEqual(left_and_expr.op.lower(), 'and')
+        self.assertIsInstance(left_and_expr.left, BinaryOp)
+        self.assertEqual(left_and_expr.left.left.name, 'a')
+        self.assertEqual(left_and_expr.left.right.value, 5)
+        self.assertIsInstance(left_and_expr.right, BinaryOp)
+        self.assertEqual(left_and_expr.right.left.name, 'b')
+        self.assertEqual(left_and_expr.right.right.value, 10)
+
+        # 右侧: not (c == "test")
+        right_not_expr = where_clause.right
+        self.assertIsInstance(right_not_expr, BinaryOp)
+        self.assertEqual(right_not_expr.op.lower(), 'not')
+        self.assertIsNone(right_not_expr.left.value) # 'not' 的左侧是 None
+
+        inner_comp_expr = right_not_expr.right
+        self.assertIsInstance(inner_comp_expr, BinaryOp)
+        self.assertEqual(inner_comp_expr.op, '==')
+        self.assertEqual(inner_comp_expr.left.name, 'c')
+        self.assertEqual(inner_comp_expr.right.value, 'test')
 
     def test_list_and_dict_literals(self):
         """测试对列表和字典字面量的解析。"""
@@ -129,6 +162,27 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertIsNotNone(stmt.else_block)
         self.assertEqual(len(stmt.then_block.statements), 1)
         self.assertEqual(len(stmt.else_block.statements), 1)
+
+    def test_parse_break_and_continue(self):
+        """测试解析 break 和 continue 语句。"""
+        script = """
+        WHEN command THEN {
+            foreach (item in my_list) {
+                if (item == 1) { continue; }
+                if (item == 2) { break; }
+            }
+        }
+        """
+        rule = RuleParser(script).parse()
+        loop_body = rule.then_block.statements[0].body
+
+        # 检查 continue
+        continue_if = loop_body.statements[0]
+        self.assertIsInstance(continue_if.then_block.statements[0], ContinueStmt)
+
+        # 检查 break
+        break_if = loop_body.statements[1]
+        self.assertIsInstance(break_if.then_block.statements[0], BreakStmt)
 
     def test_parse_if_elif_else_chain(self):
         """测试解析 if-elif-else 链。"""
@@ -283,6 +337,36 @@ class TestNewRuleParser(unittest.TestCase):
         is_valid, error = precompile_rule("   \n\t   ")
         self.assertFalse(is_valid)
         self.assertEqual(error, "脚本不能为空。")
+
+    def test_parse_all_builtin_function_calls(self):
+        """迭代测试所有内置函数的调用语法是否都能被正确解析。"""
+        from src.core.executor import _BUILTIN_FUNCTIONS
+
+        for func_name in _BUILTIN_FUNCTIONS.keys():
+            with self.subTest(function=func_name):
+                # 测试无参数调用
+                script_no_args = f"WHEN command THEN {{ {func_name}(); }} END"
+                try:
+                    rule_no_args = RuleParser(script_no_args).parse()
+                    call_expr_no_args = rule_no_args.then_block.statements[0].call
+                    self.assertIsInstance(call_expr_no_args, ActionCallExpr)
+                    self.assertEqual(call_expr_no_args.action_name, func_name)
+                    self.assertEqual(len(call_expr_no_args.args), 0)
+                except RuleParserError as e:
+                    self.fail(f"解析无参函数 '{func_name}' 调用失败: {e}")
+
+                # 测试带一个参数的调用
+                script_one_arg = f"WHEN command THEN {{ {func_name}(x); }} END"
+                try:
+                    rule_one_arg = RuleParser(script_one_arg).parse()
+                    call_expr_one_arg = rule_one_arg.then_block.statements[0].call
+                    self.assertIsInstance(call_expr_one_arg, ActionCallExpr)
+                    self.assertEqual(call_expr_one_arg.action_name, func_name)
+                    self.assertEqual(len(call_expr_one_arg.args), 1)
+                    self.assertIsInstance(call_expr_one_arg.args[0], Variable)
+                except RuleParserError as e:
+                    self.fail(f"解析单参数函数 '{func_name}' 调用失败: {e}")
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -143,6 +143,22 @@ async def test_resolve_persistent_variable_from_db(mock_update, test_db_session_
         assert await resolver.resolve("vars.user.non_existent") is None
         assert await resolver.resolve("vars.user_999.non_existent") is None
 
+@pytest.mark.parametrize("path, expected_value", [
+    ("vars.group.settings", {"enabled": True, "mode": "strict"}),
+    ("vars.user_invalid", None),
+    ("vars.group.a.b", None),
+    ("vars.user_abc.points", None),
+])
+async def test_resolve_persistent_variable_edge_cases(path, expected_value, mock_update, test_db_session_factory):
+    """测试持久化变量解析的各种边界情况。"""
+    with test_db_session_factory() as session:
+        # 准备一个字典类型的变量
+        session.add(StateVariable(group_id=-1001, user_id=None, name="settings", value=json.dumps({"enabled": True, "mode": "strict"})))
+        session.commit()
+
+        resolver = VariableResolver(mock_update, Mock(), session, {})
+        assert await resolver.resolve(path) == expected_value
+
 async def test_resolve_deeply_nested_context_variable():
     """测试解析深层嵌套的上下文变量。"""
     # 创建一个包含 reply_to_message 的复杂 Update 结构
