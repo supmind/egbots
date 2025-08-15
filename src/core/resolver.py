@@ -216,7 +216,7 @@ class VariableResolver:
         此方法集成了TTL缓存，以避免对数据库的重复查询。
         """
         # 正则表达式现在捕获作用域(scope)、统计类型(stat_type)和时间窗口
-        match = re.match(r'(user|group)\.stats\.(messages|joins|leaves)_(\d+)(h|m|d)', path)
+        match = re.match(r'(user|group)\.stats\.(messages|joins|leaves)_(\d+)(s|h|m|d)', path)
         if not match:
             return None
 
@@ -234,7 +234,8 @@ class VariableResolver:
             return self.stats_cache[cache_key]
 
         # 计算时间范围
-        if unit == 'h': delta = timedelta(hours=value)
+        if unit == 's': delta = timedelta(seconds=value)
+        elif unit == 'h': delta = timedelta(hours=value)
         elif unit == 'm': delta = timedelta(minutes=value)
         elif unit == 'd': delta = timedelta(days=value)
         else: return None
