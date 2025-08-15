@@ -70,6 +70,7 @@ def _seed_rules_if_new_group(group_id: int, db_session: Session) -> bool:
             new_rule = Rule(
                 group_id=group_id,
                 name=rule_data["name"],
+                description=rule_data.get("description"), # 使用 .get() 避免老数据出错
                 script=rule_data["script"],
                 priority=rule_data["priority"],
                 is_active=True
@@ -137,14 +138,15 @@ async def rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for rule in all_rules:
             status_icon = "✅ [激活]" if rule.is_active else "❌ [禁用]"
             message_lines.append(f"<code>{rule.id}</code>: {status_icon} {rule.name}")
-        message_lines.append("\n使用 <code>/togglerule &lt;ID&gt;</code> 来激活或禁用某条规则。")
+        message_lines.append("\n使用 <code>/ruleon &lt;ID&gt;</code> 来激活或禁用某条规则。")
+        message_lines.append("使用 <code>/rulehelp &lt;ID&gt;</code> 来查看规则的详细信息。")
         await update.message.reply_text("\n".join(message_lines), parse_mode='HTML')
 
-async def toggle_rule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def rule_help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    处理 `/togglerule <rule_id>` 命令。
+    处理 /rulehelp <rule_id> 命令。
 
-    此命令用于激活或禁用指定ID的规则，并会自动清除规则缓存。
+    此命令用于显示特定规则的详细信息，包括名称、描述和优先级。
     仅限群组管理员使用。
     """
     if not update.effective_chat or not update.effective_user: return
@@ -156,10 +158,46 @@ async def toggle_rule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if member.status not in ['creator', 'administrator']:
             return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
     except Exception as e:
-        return logger.error(f"检查 /togglerule 命令权限时出错: {e}")
+        return logger.error(f"检查 /rulehelp 命令权限时出错: {e}")
 
     if not context.args or not context.args[0].isdigit():
-        return await update.message.reply_text("请提供一个有效的规则ID。用法: /togglerule <ID>")
+        return await update.message.reply_text("请提供一个有效的规则ID。用法: /rulehelp <ID>")
+
+    rule_id_to_show = int(context.args[0])
+    session_factory: sessionmaker = context.bot_data['session_factory']
+    with session_scope(session_factory) as db_session:
+        rule = db_session.query(Rule).filter_by(id=rule_id_to_show, group_id=chat_id).first()
+        if not rule:
+            return await update.message.reply_text(f"错误：在当前群组中未找到ID为 {rule_id_to_show} 的规则。")
+
+        status_icon = "✅" if rule.is_active else "❌"
+        message = (
+            f"<b>规则详情 (ID: {rule.id})</b>\n\n"
+            f"<b>名称:</b> {rule.name}\n"
+            f"<b>状态:</b> {status_icon} {'激活' if rule.is_active else '禁用'}\n"
+            f"<b>优先级:</b> {rule.priority}\n\n"
+            f"<b>描述:</b>\n{rule.description or '此规则没有提供描述。'}"
+        )
+        await update.message.reply_text(message, parse_mode='HTML')
+
+
+async def rule_on_off_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理 /ruleon <rule_id> 命令，用于激活或禁用规则。
+    """
+    if not update.effective_chat or not update.effective_user: return
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status not in ['creator', 'administrator']:
+            return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+    except Exception as e:
+        return logger.error(f"检查 /ruleon 命令权限时出错: {e}")
+
+    if not context.args or not context.args[0].isdigit():
+        return await update.message.reply_text("请提供一个有效的规则ID。用法: /ruleon <ID>")
 
     rule_id_to_toggle = int(context.args[0])
     session_factory: sessionmaker = context.bot_data['session_factory']

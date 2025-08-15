@@ -1,7 +1,7 @@
 # src/bot/default_rules.py
 
 # ======================================================================================
-# 预设的默认规则列表 (v2.1 - 全面重构版)
+# 预设的默认规则列表 (v2.2 - 增加描述)
 # ======================================================================================
 # 当机器人被添加到一个新的群组时，此列表中的规则会自动被安装。
 # 这套规则经过精心设计，提供了一整套强大、常用且开箱即用的群组管理功能。
@@ -20,6 +20,7 @@ DEFAULT_RULES = [
     {
         "name": "[核心] 新用户入群验证",
         "priority": 1000,
+        "description": "当有新用户加入群组时，自动对其发起人机验证，以阻止机器人账号。这是保障群组安全的第一道防线。",
         "script": """
 WHEN user_join
 WHERE user.is_bot == false
@@ -33,6 +34,7 @@ END
     {
         "name": "[内容] 删除高危文件",
         "priority": 600,
+        "description": "自动删除非管理员发送的潜在高风险文件，如 .exe, .bat, .sh 等可执行文件，防止恶意软件传播。",
         "script": """
 WHEN document
 WHERE
@@ -54,6 +56,7 @@ END
     {
         "name": "[内容] 删除转发消息",
         "priority": 590,
+        "description": "自动删除所有非管理员成员转发的消息。这有助于减少广告或不相关内容的传播。",
         "script": """
 WHEN message
 WHERE
@@ -69,6 +72,7 @@ END
     {
         "name": "[内容] 限制新用户发送链接",
         "priority": 580,
+        "description": "为防止广告，24小时内发言少于5条的新用户在发送包含链接（http, https, t.me）的消息时，消息将被自动删除。",
         "script": """
 WHEN message
 WHERE
@@ -84,10 +88,10 @@ END
 """
     },
     # ========================== 行为管理 (防刷屏) ==========================
-    # 将防刷屏规则拆分为多个，每个对应一个事件类型，以兼容当前的解析器。
     {
         "name": "[行为] 防刷屏 (文本)",
         "priority": 400,
+        "description": "检测并阻止用户在20秒内发送超过5条文本消息的刷屏行为。触发者将被临时禁言10分钟。",
         "script": """
 WHEN message
 WHERE user.is_admin == false AND user.stats.messages_20s > 5
@@ -104,6 +108,7 @@ END
     {
         "name": "[行为] 防刷屏 (图片)",
         "priority": 400,
+        "description": "检测并阻止用户在20秒内发送超过5张图片的刷屏行为。触发者将被临时禁言10分钟。",
         "script": """
 WHEN photo
 WHERE user.is_admin == false AND user.stats.messages_20s > 5
@@ -117,9 +122,10 @@ THEN {
 END
 """
     },
-        {
+    {
         "name": "[行为] 防刷屏 (视频)",
         "priority": 400,
+        "description": "检测并阻止用户在20秒内发送超过5个视频的刷屏行为。触发者将被临时禁言10分钟。",
         "script": """
 WHEN video
 WHERE user.is_admin == false AND user.stats.messages_20s > 5
@@ -136,6 +142,7 @@ END
     {
         "name": "[行为] 防刷屏 (文件)",
         "priority": 400,
+        "description": "检测并阻止用户在20秒内发送超过5个文件的刷屏行为。触发者将被临时禁言10分钟。",
         "script": """
 WHEN document
 WHERE user.is_admin == false AND user.stats.messages_20s > 5
@@ -152,6 +159,7 @@ END
     {
         "name": "[行为] 防刷屏 (媒体组)",
         "priority": 400,
+        "description": "检测并阻止用户在20秒内发送超过5个媒体组的刷屏行为。触发者将被临时禁言10分钟。",
         "script": """
 WHEN media_group
 WHERE user.is_admin == false AND user.stats.messages_20s > 5
@@ -169,6 +177,7 @@ END
     {
         "name": "[管理] 警告系统",
         "priority": 200,
+        "description": "管理员使用 /warn <user_id> 命令来警告用户。用户累计收到3次警告后将被自动踢出群组。",
         "script": """
 WHEN command
 WHERE command.name == 'warn' AND user.is_admin == true AND command.arg_count > 0
@@ -193,6 +202,7 @@ END
     {
         "name": "[管理] 回复快捷封禁",
         "priority": 190,
+        "description": "管理员通过回复一条消息并使用 /ban [理由] 命令，可以快速封禁该消息的发送者。",
         "script": """
 WHEN command
 WHERE
@@ -210,6 +220,7 @@ END
     {
         "name": "[管理] 回复快捷踢出",
         "priority": 190,
+        "description": "管理员通过回复一条消息并使用 /kick 命令，可以快速将该消息的发送者移出群组。",
         "script": """
 WHEN command
 WHERE
@@ -226,6 +237,7 @@ END
     {
         "name": "[管理] 回复快捷禁言",
         "priority": 190,
+        "description": "管理员通过回复一条消息并使用 /mute <时长> (例如 /mute 10m) 命令，可以快速禁言该消息的发送者。",
         "script": """
 WHEN command
 WHERE
@@ -244,6 +256,7 @@ END
     {
         "name": "[管理] 回复快捷解禁",
         "priority": 190,
+        "description": "管理员通过回复一条消息并使用 /unmute 命令，可以快速解除对该消息发送者的禁言。",
         "script": """
 WHEN command
 WHERE
@@ -261,6 +274,7 @@ END
     {
         "name": "[通用] 帮助命令",
         "priority": 10,
+        "description": "响应用户的 /help 命令，提供关于机器人功能的基本介绍。",
         "script": """
 WHEN command
 WHERE command.name == "help"
@@ -274,6 +288,7 @@ END
     {
         "name": "[清理] 删除入群消息",
         "priority": 0,
+        "description": "自动删除 Telegram 系统生成的“用户 xxx 已加入群组”的提示消息，保持聊天记录的整洁。",
         "script": """
 WHEN user_join
 THEN {
@@ -285,6 +300,7 @@ END
     {
         "name": "[清理] 删除离群消息",
         "priority": 0,
+        "description": "自动删除 Telegram 系统生成的“用户 xxx 已离开群组”的提示消息，保持聊天记录的整洁。",
         "script": """
 WHEN user_leave
 THEN {
@@ -296,6 +312,7 @@ END
     {
         "name": "[清理] 删除管理命令",
         "priority": 0,
+        "description": "自动删除管理员使用的 /ban, /kick, /mute, /unmute, /warn 等管理命令本身，避免命令刷屏。",
         "script": """
 WHEN command
 WHERE

@@ -89,6 +89,7 @@ class Rule(Base):
     # 规则的元数据
     name = Column(String(255), nullable=False, server_default="Untitled Rule",
                   comment="规则名称 (RuleName)")
+    description = Column(Text, nullable=True, comment="规则的详细描述和用法说明")
     priority = Column(Integer, default=0, nullable=False,
                       comment="执行优先级 (priority)，值越大优先级越高")
     script = Column(Text, nullable=False, comment="完整的规则脚本内容")

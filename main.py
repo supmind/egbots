@@ -34,7 +34,8 @@ from src.bot.handlers import (
     start_handler,
     verification_callback_handler,
     rules_handler,
-    toggle_rule_handler,
+    rule_on_off_handler,
+    rule_help_handler,
     cleanup_old_events,
 )
 
@@ -151,7 +152,8 @@ async def main():
     logger.info("正在注册事件处理器...")
     application.add_handler(CommandHandler("reload_rules", reload_rules_handler))
     application.add_handler(CommandHandler("rules", rules_handler))
-    application.add_handler(CommandHandler("togglerule", toggle_rule_handler))
+    application.add_handler(CommandHandler("ruleon", rule_on_off_handler))
+    application.add_handler(CommandHandler("rulehelp", rule_help_handler))
     application.add_handler(MessageHandler(filters.COMMAND, command_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, user_leave_handler))

@@ -8,8 +8,8 @@ from sqlalchemy.orm import sessionmaker
 
 from src.bot.handlers import (
     reload_rules_handler, process_event, rules_handler,
-    toggle_rule_handler, verification_timeout_handler,
-    photo_handler, _process_aggregated_media_group
+    rule_on_off_handler, verification_timeout_handler,
+    photo_handler, _process_aggregated_media_group, rule_help_handler
 )
 from src.database import Base, Rule, Group, Log, Verification
 from src.utils import session_scope
@@ -70,8 +70,8 @@ async def test_rules_command_by_admin(mock_update, mock_context, test_db_session
     assert "✅ [激活] Rule 1" in reply_text
     assert "❌ [禁用] Rule 2" in reply_text
 
-async def test_toggle_rule_command_by_admin(mock_update, mock_context, test_db_session_factory):
-    """测试：管理员使用 /togglerule 命令应能改变规则状态并清除缓存。"""
+async def test_rule_on_off_command_by_admin(mock_update, mock_context, test_db_session_factory):
+    """测试：管理员使用 /ruleon 命令应能改变规则状态并清除缓存。"""
     # --- 准备 ---
     mock_admin = MagicMock(status='administrator')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
@@ -86,7 +86,7 @@ async def test_toggle_rule_command_by_admin(mock_update, mock_context, test_db_s
     mock_context.args = [str(rule_id)]
 
     # --- 执行 ---
-    await toggle_rule_handler(mock_update, mock_context)
+    await rule_on_off_handler(mock_update, mock_context)
 
     # --- 验证 ---
     mock_update.message.reply_text.assert_called_once_with(f"成功将规则 “Test Rule” (ID: {rule_id}) 的状态更新为: ❌ 禁用。")
@@ -344,14 +344,48 @@ async def test_rules_command_by_non_admin(mock_update, mock_context):
 
     mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
 
-async def test_toggle_rule_command_by_non_admin(mock_update, mock_context):
-    """测试：非管理员用户无法使用 /togglerule 命令。"""
+async def test_rule_on_off_command_by_non_admin(mock_update, mock_context):
+    """测试：非管理员用户无法使用 /ruleon 命令。"""
     mock_member = MagicMock(status='member')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_member)
 
-    await toggle_rule_handler(mock_update, mock_context)
+    await rule_on_off_handler(mock_update, mock_context)
 
     mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
+
+
+async def test_rule_help_command_by_admin(mock_update, mock_context, test_db_session_factory):
+    """测试：管理员使用 /rulehelp 命令应能看到规则的详细信息。"""
+    # --- 准备 ---
+    mock_admin = MagicMock(status='administrator')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        rule = Rule(
+            group_id=-1001,
+            name="Helpful Rule",
+            description="This is a test description.",
+            priority=123,
+            script="...",
+            is_active=True
+        )
+        db.add(rule)
+        db.commit()
+        rule_id = rule.id
+
+    mock_context.args = [str(rule_id)]
+
+    # --- 执行 ---
+    await rule_help_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.message.reply_text.assert_called_once()
+    reply_text = mock_update.message.reply_text.call_args[0][0]
+    assert f"<b>规则详情 (ID: {rule_id})</b>" in reply_text
+    assert "<b>名称:</b> Helpful Rule" in reply_text
+    assert "<b>状态:</b> ✅ 激活" in reply_text
+    assert "<b>优先级:</b> 123" in reply_text
+    assert "<b>描述:</b>\nThis is a test description." in reply_text
 
 
 @patch('src.bot.handlers.RuleExecutor')
