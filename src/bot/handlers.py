@@ -320,9 +320,12 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # =================== 计划任务与验证流程处理器 ===================
 
-async def cleanup_old_events(context: ContextTypes.DEFAULT_TYPE):
-    """一个每日运行的清理任务，用于删除超过60天的旧事件日志以防止数据库无限膨胀。"""
-    session_factory: sessionmaker = context.bot_data['session_factory']
+async def cleanup_old_events(session_factory: sessionmaker):
+    """
+    一个每日运行的清理任务，用于删除超过60天的旧事件日志以防止数据库无限膨胀。
+    此函数被设计为直接由 APScheduler 调用，因此它不接收 'context' 对象，
+    而是直接接收它所需要的 'session_factory'。
+    """
     cutoff_time = datetime.now(timezone.utc) - timedelta(days=60)
     logger.info(f"正在执行事件日志清理任务，将删除早于 {cutoff_time} 的所有记录...")
     try:
