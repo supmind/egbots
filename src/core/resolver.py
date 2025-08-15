@@ -13,7 +13,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from cachetools import TTLCache
 
-from src.database import StateVariable, MessageLog
+from src.database import StateVariable, EventLog
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,8 @@ class VariableResolver:
         if path_lower == 'user.is_admin':
             return await self._resolve_computed_is_admin()
 
-        if path_lower.startswith('user.stats.'):
-            return self._resolve_user_stats(path_lower)
+        if path_lower.startswith(('user.stats.', 'group.stats.')):
+            return self._resolve_stats_variable(path_lower)
 
         if path_lower == 'time.unix':
             return int(datetime.now(timezone.utc).timestamp())
@@ -209,46 +209,57 @@ class VariableResolver:
             # 否则，将其作为普通字符串返回。这对于处理由其他系统写入的、非JSON格式的简单字符串值很有用。
             return val_str
 
-    def _resolve_user_stats(self, path: str) -> Optional[int]:
+    def _resolve_stats_variable(self, path: str) -> Optional[int]:
         """
-        解析 `user.stats.*` 形式的统计变量。
-        例如: `user.stats.messages_24h`
+        解析 `user.stats.*` 和 `group.stats.*` 形式的统计变量。
+        例如: `user.stats.messages_24h`, `group.stats.joins_1d`
         此方法集成了TTL缓存，以避免对数据库的重复查询。
         """
-        if not self.update.effective_user:
-            return 0
+        # 正则表达式现在捕获作用域(scope)、统计类型(stat_type)和时间窗口
+        match = re.match(r'(user|group)\.stats\.(messages|joins|leaves)_(\d+)(h|m|d)', path)
+        if not match:
+            return None
 
-        # 使用完整的路径和用户ID作为缓存的唯一键
-        cache_key = f"{path}_{self.update.effective_user.id}"
+        scope, stat_type, value_str, unit = match.groups()
+        value = int(value_str)
+
+        # 缓存键现在包含作用域和路径，对于用户统计，还包含用户ID
+        cache_key = f"{path}"
+        if scope == 'user':
+            if not self.update.effective_user: return 0
+            cache_key += f"_{self.update.effective_user.id}"
 
         # 检查缓存
         if cache_key in self.stats_cache:
             return self.stats_cache[cache_key]
 
-        match = re.match(r'user\.stats\.messages_(\d+)(h|m|d)', path)
-        if not match:
-            return None
-
-        value = int(match.group(1))
-        unit = match.group(2)
-
-        if unit == 'h':
-            delta = timedelta(hours=value)
-        elif unit == 'm':
-            delta = timedelta(minutes=value)
-        elif unit == 'd':
-            delta = timedelta(days=value)
-        else:
-            return None # 不可能发生，但作为保险
+        # 计算时间范围
+        if unit == 'h': delta = timedelta(hours=value)
+        elif unit == 'm': delta = timedelta(minutes=value)
+        elif unit == 'd': delta = timedelta(days=value)
+        else: return None
 
         since_time = datetime.now(timezone.utc) - delta
 
-        # 缓存未命中，查询数据库
-        count = self.db_session.query(func.count(MessageLog.id)).filter(
-            MessageLog.group_id == self.update.effective_chat.id,
-            MessageLog.user_id == self.update.effective_user.id,
-            MessageLog.timestamp >= since_time
-        ).scalar()
+        # 构建数据库查询
+        query = self.db_session.query(func.count(EventLog.id)).filter(
+            EventLog.group_id == self.update.effective_chat.id,
+            EventLog.timestamp >= since_time
+        )
+
+        # 根据统计类型过滤事件
+        if stat_type == 'messages':
+            query = query.filter(EventLog.event_type.in_(['message', 'command', 'photo', 'video', 'document']))
+        elif stat_type == 'joins':
+            query = query.filter(EventLog.event_type == 'user_join')
+        elif stat_type == 'leaves':
+            query = query.filter(EventLog.event_type == 'user_leave')
+
+        # 如果是用户统计，则按用户ID过滤
+        if scope == 'user':
+            query = query.filter(EventLog.user_id == self.update.effective_user.id)
+
+        count = query.scalar() or 0
 
         # 将结果存入缓存
         self.stats_cache[cache_key] = count

@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from src.utils import session_scope, generate_math_image
 from src.core.parser import RuleParser, RuleParserError
 from src.core.executor import RuleExecutor, StopRuleProcessing
-from src.database import Rule, Verification, MessageLog
+from src.database import Rule, Verification, EventLog
 from .default_rules import DEFAULT_RULES
 
 logger = logging.getLogger(__name__)
@@ -202,12 +202,13 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
 
     try:
         with session_scope(session_factory) as db_session:
-            # 记录消息以供统计
-            if update.effective_message and update.effective_user:
-                db_session.add(MessageLog(
+            # 记录事件以供统计
+            if update.effective_user:
+                db_session.add(EventLog(
                     group_id=chat_id,
                     user_id=update.effective_user.id,
-                    message_id=update.effective_message.message_id
+                    event_type=event_type,
+                    message_id=update.effective_message.message_id if update.effective_message else None
                 ))
 
             # 步骤 1: 检查是否是新群组，如果是，则植入规则并强制清除（或初始化）缓存。
@@ -305,6 +306,23 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_event("document", update, context)
 
 # =================== 计划任务与验证流程处理器 ===================
+
+async def cleanup_old_events(context: ContextTypes.DEFAULT_TYPE):
+    """一个每日运行的清理任务，用于删除旧的事件日志以防止数据库无限膨胀。"""
+    session_factory: sessionmaker = context.bot_data['session_factory']
+    retention_period = timedelta(days=60)
+    cutoff_time = datetime.now(timezone.utc) - retention_period
+
+    logger.info(f"正在执行事件日志清理任务，将删除早于 {cutoff_time} 的所有记录...")
+
+    try:
+        with session_scope(session_factory) as db_session:
+            deleted_count = db_session.query(EventLog).filter(EventLog.timestamp < cutoff_time).delete()
+            db_session.commit()
+            logger.info(f"事件日志清理完成，共删除了 {deleted_count} 条旧记录。")
+    except Exception as e:
+        logger.error(f"执行事件日志清理任务时发生错误: {e}", exc_info=True)
+
 
 async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
     """由 APScheduler 调度的作业处理器，用于执行 `WHEN schedule(...)` 规则。"""

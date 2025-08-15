@@ -32,6 +32,7 @@ from src.bot.handlers import (
     verification_callback_handler,
     rules_handler,
     toggle_rule_handler,
+    cleanup_old_events,
 )
 
 # ==================== 日志配置 ====================
@@ -160,6 +161,9 @@ async def main():
     # --- 7. 启动一切 ---
     try:
         async with application:
+            # 注册我们的每日清理任务
+            scheduler.add_job(cleanup_old_events, 'cron', hour=4, minute=0, id='daily_cleanup', replace_existing=True)
+
             scheduler.start()
             logger.info("调度器已成功启动。")
             await load_scheduled_rules(application)

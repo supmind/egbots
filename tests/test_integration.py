@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database import Base, Rule, Group, Verification, Log, MessageLog
+from src.database import Base, Rule, Group, Verification, Log, EventLog
 from src.bot.handlers import process_event, verification_callback_handler
 from src.utils import generate_math_image
 
@@ -312,6 +312,51 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         assert v is None
 
 
+async def test_stats_variables(mock_update, mock_context, test_db_session_factory):
+    """
+    集成测试：验证新的 user.stats.* 和 group.stats.* 变量能否正确工作。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    stats_rule = """
+    WHEN command WHERE command.name == "stats" THEN {
+        reply("user_msg_1h:" + user.stats.messages_1h +
+              ", group_joins_24h:" + group.stats.joins_24h +
+              ", user_leaves_1d:" + user.stats.leaves_1d);
+    } END
+    """
+    user_id = mock_update.effective_user.id
+    other_user_id = 456
+    group_id = mock_update.effective_chat.id
+    now = datetime.now(timezone.utc)
+
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Stats Rule", script=stats_rule))
+        # 准备事件日志
+        # 当前用户的消息
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', message_id=1, timestamp=now - timedelta(minutes=10)))
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', message_id=2, timestamp=now - timedelta(minutes=30)))
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', message_id=3, timestamp=now - timedelta(hours=2))) # 1小时外
+        # 其他用户的消息
+        db.add(EventLog(group_id=group_id, user_id=other_user_id, event_type='message', message_id=4, timestamp=now - timedelta(minutes=5)))
+        # 入群/离群事件
+        db.add(EventLog(group_id=group_id, user_id=other_user_id, event_type='user_join', timestamp=now - timedelta(hours=12)))
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='user_leave', timestamp=now - timedelta(hours=20)))
+        db.add(EventLog(group_id=group_id, user_id=other_user_id, event_type='user_leave', timestamp=now - timedelta(days=2))) # 1天外
+        db.commit()
+
+    # --- 2. 执行与验证 ---
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        mock_update.message.text = "/stats"
+        await process_event("command", mock_update, mock_context)
+
+        # user.stats.messages_1h: 应该只有2条
+        # group.stats.joins_24h: 应该只有1条
+        # user.stats.leaves_1d: 应该只有1条
+        expected_reply = "user_msg_1h:2, group_joins_24h:1, user_leaves_1d:1"
+        mock_update.effective_message.reply_text.assert_called_once_with(expected_reply)
+
+
 async def test_user_stats_variable_with_caching(mock_update, mock_context, test_db_session_factory):
     """
     集成测试：验证新的 user.stats.* 变量能否正确工作，并测试其缓存机制。
@@ -329,18 +374,16 @@ async def test_user_stats_variable_with_caching(mock_update, mock_context, test_
         db.add(Group(id=group_id, name="Test Group"))
         db.add(Rule(group_id=group_id, name="Stats Rule", script=stats_rule))
         # 添加3条在最近1小时内的消息
-        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=1, timestamp=datetime.now(timezone.utc) - timedelta(minutes=10)))
-        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=2, timestamp=datetime.now(timezone.utc) - timedelta(minutes=20)))
-        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=3, timestamp=datetime.now(timezone.utc) - timedelta(minutes=30)))
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', message_id=1, timestamp=datetime.now(timezone.utc) - timedelta(minutes=10)))
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', message_id=2, timestamp=datetime.now(timezone.utc) - timedelta(minutes=20)))
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', message_id=3, timestamp=datetime.now(timezone.utc) - timedelta(minutes=30)))
         # 添加1条在1小时外的消息
-        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=4, timestamp=datetime.now(timezone.utc) - timedelta(hours=2)))
+        db.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', message_id=4, timestamp=datetime.now(timezone.utc) - timedelta(hours=2)))
         db.commit()
 
     # --- 2. 执行与验证 ---
     with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
 
-        # 第一次调用，应该会查询数据库
-        mock_update.message.text = "/stats"
         # 第一次调用，应该会查询数据库
         mock_update.message.text = "/stats"
         await process_event("command", mock_update, mock_context)
@@ -350,7 +393,7 @@ async def test_user_stats_variable_with_caching(mock_update, mock_context, test_
         # 第二次调用，应该使用缓存
         # 为验证缓存，我们直接删除所有日志记录
         with test_db_session_factory() as db:
-            db.query(MessageLog).delete()
+            db.query(EventLog).delete()
             db.commit()
 
         # 再次调用 process_event

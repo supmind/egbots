@@ -49,29 +49,30 @@ class Group(Base):
     rules = relationship("Rule", back_populates="group", cascade="all, delete-orphan")
     state_variables = relationship("StateVariable", back_populates="group", cascade="all, delete-orphan")
     logs = relationship("Log", back_populates="group", cascade="all, delete-orphan")
-    message_logs = relationship("MessageLog", back_populates="group", cascade="all, delete-orphan")
+    event_logs = relationship("EventLog", back_populates="group", cascade="all, delete-orphan")
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式。"""
         return f"<Group(id={self.id}, name='{self.name}')>"
 
 
-class MessageLog(Base):
+class EventLog(Base):
     """
-    模型类：存储消息记录，用于统计分析。
+    模型类：存储通用事件记录，用于统计分析。
     """
-    __tablename__ = 'message_logs'
+    __tablename__ = 'event_logs'
 
     id = Column(Integer, primary_key=True)
     group_id = Column(BigInteger, ForeignKey('groups.id', ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(BigInteger, nullable=False, index=True)
-    message_id = Column(BigInteger, nullable=False)
+    user_id = Column(BigInteger, nullable=True, index=True) # user_id可以为空，例如对于匿名管理员事件
+    event_type = Column(String(50), nullable=False, index=True)
+    message_id = Column(BigInteger, nullable=True) # 只有消息类事件才有 message_id
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
-    group = relationship("Group", back_populates="message_logs")
+    group = relationship("Group", back_populates="event_logs")
 
     def __repr__(self):
-        return f"<MessageLog(id={self.id}, user_id={self.user_id}, group_id={self.group_id})>"
+        return f"<EventLog(id={self.id}, type='{self.event_type}', user_id={self.user_id}, group_id={self.group_id})>"
 
 
 class Rule(Base):
