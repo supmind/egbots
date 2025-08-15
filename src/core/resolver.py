@@ -68,6 +68,9 @@ class VariableResolver:
         if path_lower.startswith('vars.'):
             return self._resolve_persistent_variable(path)
 
+        if path_lower.startswith('media_group.'):
+            return self._resolve_media_group_variable(path_lower)
+
         # 步骤 2: 处理需要特殊计算的、已知的变量
         if path_lower == 'user.is_admin':
             return await self._resolve_computed_is_admin()
@@ -209,6 +212,34 @@ class VariableResolver:
             # 否则，将其作为普通字符串返回。这对于处理由其他系统写入的、非JSON格式的简单字符串值很有用。
             return val_str
 
+    def _resolve_media_group_variable(self, path_lower: str) -> Any:
+        """
+        解析 `media_group.*` 相关的变量。
+        这些变量不是直接来自 Update 对象，而是由我们的聚合逻辑动态附加的。
+        """
+        # 检查聚合的消息列表是否存在
+        if not hasattr(self.update, 'media_group_messages'):
+            return None
+
+        messages = self.update.media_group_messages
+
+        if path_lower == 'media_group.messages':
+            return messages
+
+        if path_lower == 'media_group.message_count':
+            return len(messages)
+
+        if path_lower == 'media_group.caption':
+            # 返回第一个带标题的消息的标题
+            for msg in messages:
+                if msg.caption:
+                    return msg.caption
+            return None
+
+        # 未来可以添加更多媒体组相关的变量，例如 media_group.has_video 等
+
+        return None
+
     def _resolve_stats_variable(self, path: str) -> Optional[int]:
         """
         解析 `user.stats.*` 和 `group.stats.*` 形式的统计变量。
@@ -250,7 +281,7 @@ class VariableResolver:
 
         # 根据统计类型过滤事件
         if stat_type == 'messages':
-            query = query.filter(EventLog.event_type.in_(['message', 'command', 'photo', 'video', 'document']))
+            query = query.filter(EventLog.event_type.in_(['message', 'command', 'photo', 'video', 'document', 'media_group']))
         elif stat_type == 'joins':
             query = query.filter(EventLog.event_type == 'user_join')
         elif stat_type == 'leaves':

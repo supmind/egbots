@@ -141,6 +141,8 @@ async def main():
     application.bot_data['session_factory'] = session_factory
     application.bot_data['scheduler'] = scheduler
     application.bot_data['rule_cache'] = {}
+    application.bot_data['media_group_aggregator'] = {}
+    application.bot_data['media_group_jobs'] = {}
 
     # --- 6. 注册所有事件处理器 ---
     logger.info("正在注册事件处理器...")

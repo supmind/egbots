@@ -26,26 +26,88 @@ END
 """
     },
     {
-        "name": "基础刷屏检测",
+        "name": "刷屏检测 (文本/命令)",
         "priority": 500,
         "script": """
-// 优先级设为 500，确保它在大多数普通规则（如关键词回复）之前运行。
 WHEN message
 WHERE
-    // 规则不应作用于管理员
-    user.is_admin == false AND
-    // 检查用户在过去30秒内发送的消息总数（包括文本、图片、视频、文件等）
-    user.stats.messages_30s > 5
+    user.is_admin == false AND user.stats.messages_30s > 5
 THEN {
-    // 将用户禁言10分钟
     mute_user("10m");
-    // 回复一条消息，告知用户他们因刷屏被禁言
     reply("检测到刷屏行为，您已被临时禁言10分钟。");
-    // 记录日志，方便管理员审查
-    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "auto_moderation");
-    // 删除触发此规则的消息，以保持群组清洁
+    log("用户 " + user.id + " 因发送文本消息刷屏被自动禁言10分钟。", "auto_moderation_flood");
     delete_message();
-    // 停止处理后续规则，避免例如关键词回复等规则被再次触发
+    stop();
+}
+END
+"""
+    },
+    {
+        "name": "刷屏检测 (媒体)",
+        "priority": 500,
+        "script": """
+WHEN photo
+WHERE
+    user.is_admin == false AND user.stats.messages_30s > 5
+THEN {
+    mute_user("10m");
+    // 对于媒体消息，回复可能意义不大，但我们仍然发送以作通知
+    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因发送图片刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    delete_message();
+    stop();
+}
+END
+"""
+    },
+        {
+        "name": "刷屏检测 (视频)",
+        "priority": 500,
+        "script": """
+WHEN video
+WHERE
+    user.is_admin == false AND user.stats.messages_30s > 5
+THEN {
+    mute_user("10m");
+    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因发送视频刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    delete_message();
+    stop();
+}
+END
+"""
+    },
+    {
+        "name": "刷屏检测 (文件)",
+        "priority": 500,
+        "script": """
+WHEN document
+WHERE
+    user.is_admin == false AND user.stats.messages_30s > 5
+THEN {
+    mute_user("10m");
+    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因发送文件刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    delete_message();
+    stop();
+}
+END
+"""
+    },
+    {
+        "name": "刷屏检测 (媒体组)",
+        "priority": 500,
+        "script": """
+WHEN media_group
+WHERE
+    user.is_admin == false AND user.stats.messages_30s > 5
+THEN {
+    mute_user("10m");
+    send_message("检测到刷屏行为，用户 " + user.first_name + " 已被临时禁言10分钟。");
+    log("用户 " + user.id + " 因发送媒体组刷屏被自动禁言10分钟。", "auto_moderation_flood");
+    // 注意：这里的 delete_message() 只会删除媒体组的“代表消息”
+    // 完整的删除需要更复杂的逻辑，例如遍历 media_group.messages 并逐个删除
+    delete_message();
     stop();
 }
 END

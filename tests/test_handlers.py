@@ -8,7 +8,8 @@ from sqlalchemy.orm import sessionmaker
 
 from src.bot.handlers import (
     reload_rules_handler, process_event, rules_handler,
-    toggle_rule_handler, verification_timeout_handler
+    toggle_rule_handler, verification_timeout_handler,
+    photo_handler, _process_aggregated_media_group
 )
 from src.database import Base, Rule, Group, Log, Verification
 from src.utils import session_scope
@@ -178,8 +179,8 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
     assert "检测到新群组" in caplog.text
     assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
-    # 9 default rules (8 original + 1 new) should be loaded
-    assert len(mock_context.bot_data['rule_cache'][-1001]) == 9
+    # 13 default rules (8 original + 5 new) should be loaded
+    assert len(mock_context.bot_data['rule_cache'][-1001]) == 13
     # The executor should have been called at least once.
     assert MockRuleExecutor.called
 
@@ -198,3 +199,71 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
     assert "缓存未命中" not in caplog.text
     # Executor should have been called again.
     assert MockRuleExecutor.called
+
+
+@patch('src.bot.handlers.process_event', new_callable=AsyncMock)
+async def test_media_group_aggregation(mock_process_event, mock_update, mock_context):
+    """
+    测试媒体组消息是否能被正确聚合，并作为单个 'media_group' 事件处理。
+    """
+    # --- 1. 准备 ---
+    media_group_id = "123456789"
+
+    # 为测试初始化聚合器和作业字典
+    mock_context.bot_data['media_group_aggregator'] = {}
+    mock_context.bot_data['media_group_jobs'] = {}
+
+    # 模拟 Job Queue
+    mock_job_queue = MagicMock()
+    mock_job_queue.run_once = MagicMock()
+    mock_context.job_queue = mock_job_queue
+
+    # 模拟三个属于同一个媒体组的消息
+    update1 = MagicMock()
+    update1.message.media_group_id = media_group_id
+    update1.message.message_id = 1
+
+    update2 = MagicMock()
+    update2.message.media_group_id = media_group_id
+    update2.message.message_id = 2
+
+    update3 = MagicMock()
+    update3.message.media_group_id = media_group_id
+    update3.message.message_id = 3
+
+    # --- 2. 执行 ---
+    # 模拟依次收到这三个消息
+    await photo_handler(update1, mock_context)
+    await photo_handler(update2, mock_context)
+    await photo_handler(update3, mock_context)
+
+    # --- 3. 验证计时器 ---
+    # 验证 run_once 只被调用了一次（即只为第一个消息设置了计时器）
+    mock_job_queue.run_once.assert_called_once()
+
+    # --- 4. 验证回调和最终事件 ---
+    # 手动触发计时器回调
+    callback_args = mock_job_queue.run_once.call_args
+    callback_func = callback_args[0][0]
+
+    # 模拟 job 上下文
+    mock_job = MagicMock()
+    mock_job.data = callback_args[1]['data']
+    mock_context.job = mock_job
+
+    await callback_func(mock_context)
+
+    # 验证 process_event 是否以正确的参数被调用
+    mock_process_event.assert_called_once()
+    call_args = mock_process_event.call_args[0]
+
+    event_type_arg = call_args[0]
+    update_arg = call_args[1]
+
+    assert event_type_arg == "media_group"
+    assert hasattr(update_arg, 'media_group_messages')
+    assert len(update_arg.media_group_messages) == 3
+
+    # 验证聚合的消息ID是否正确
+    message_ids = {msg.message_id for msg in update_arg.media_group_messages}
+    assert message_ids == {1, 2, 3}

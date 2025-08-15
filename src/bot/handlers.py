@@ -3,8 +3,10 @@
 import logging
 import random
 from datetime import datetime, timedelta
+import asyncio
+from typing import Dict, List
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, Message
 from telegram.ext import ContextTypes
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -162,6 +164,73 @@ async def toggle_rule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         new_status = "✅ 激活" if rule.is_active else "❌ 禁用"
         await update.message.reply_text(f"成功将规则 “{rule.name}” (ID: {rule.id}) 的状态更新为: {new_status}。")
 
+# =================== 媒体组聚合逻辑 (Media Group Aggregation Logic) ===================
+
+async def _process_aggregated_media_group(context: ContextTypes.DEFAULT_TYPE):
+    """
+    计时器触发的回调函数，用于处理一个已聚合的媒体组。
+    """
+    job = context.job
+    if not job:
+        return
+
+    media_group_id = job.data['media_group_id']
+    aggregator: Dict[str, List[Message]] = context.bot_data['media_group_aggregator']
+    jobs: Dict[str, asyncio.Task] = context.bot_data['media_group_jobs']
+
+    # 从聚合器中获取完整的消息列表
+    messages = aggregator.get(media_group_id, [])
+    if not messages:
+        logger.warning(f"处理媒体组 {media_group_id} 时，聚合器中没有找到任何消息。")
+        return
+
+    # 使用第一条消息的Update作为基础来构造一个新的Update对象
+    # 我们需要确保原始的 update 对象被正确地传递
+    first_update = job.data['first_update']
+
+    # 创建一个新的Update实例的副本，或者直接修改它
+    # 为了安全起见，我们在这里创建一个新的 update 实例的逻辑副本
+    # 但由于python-telegram-bot的Update对象是只读的，我们采用附加属性的方式
+    setattr(first_update, 'media_group_messages', messages)
+
+    logger.info(f"媒体组 {media_group_id} 已聚合，包含 {len(messages)} 条消息，正在作为 'media_group' 事件处理。")
+    await process_event("media_group", first_update, context)
+
+    # 清理
+    if media_group_id in aggregator:
+        del aggregator[media_group_id]
+    if media_group_id in jobs:
+        del jobs[media_group_id]
+
+
+async def _handle_media_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理属于媒体组的单个媒体消息。
+    """
+    if not update.message or not update.message.media_group_id:
+        return
+
+    media_group_id = update.message.media_group_id
+    aggregator: Dict[str, List[Message]] = context.bot_data['media_group_aggregator']
+    jobs: Dict[str, asyncio.Task] = context.bot_data['media_group_jobs']
+
+    # 将消息添加到聚合器
+    if media_group_id not in aggregator:
+        aggregator[media_group_id] = []
+    aggregator[media_group_id].append(update.message)
+
+    # 如果这是该媒体组的第一个消息，则设置一个计时器
+    if media_group_id not in jobs:
+        logger.debug(f"检测到媒体组 {media_group_id} 的第一条消息，设置 500ms 的聚合计时器。")
+        job = context.job_queue.run_once(
+            _process_aggregated_media_group,
+            500 / 1000.0,  # 500ms
+            data={'media_group_id': media_group_id, 'first_update': update},
+            name=f"media_group_{media_group_id}"
+        )
+        jobs[media_group_id] = job
+
+
 # =================== 通用事件处理核心 (Core Event Processor) ===================
 
 async def process_event(event_type: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,15 +364,25 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户发送图片消息的事件。"""
-    await process_event("photo", update, context)
+    if update.message and update.message.media_group_id:
+        await _handle_media_group_message(update, context)
+    else:
+        await process_event("photo", update, context)
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户发送视频消息的事件。"""
-    await process_event("video", update, context)
+    if update.message and update.message.media_group_id:
+        await _handle_media_group_message(update, context)
+    else:
+        await process_event("video", update, context)
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户发送文件（作为附件）的事件。"""
-    await process_event("document", update, context)
+    # 理论上，文档也可以在媒体组中，尽管不常见
+    if update.message and update.message.media_group_id:
+        await _handle_media_group_message(update, context)
+    else:
+        await process_event("document", update, context)
 
 # =================== 计划任务与验证流程处理器 ===================
 
