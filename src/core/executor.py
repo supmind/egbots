@@ -726,6 +726,8 @@ class RuleExecutor:
 
         try:
             # 1. 获取当前群组的日志总数。
+            # 关键修复：在计数之前先 flush，以确保 session 中新添加但未提交的日志能被 count() 查到。
+            self.db_session.flush()
             # 注意：在 SQLAlchemy 中，`count()` 通常比 `len(query.all())` 更高效，因为它在数据库层面执行计数。
             log_count = self.db_session.query(Log).filter_by(group_id=group_id).count()
 

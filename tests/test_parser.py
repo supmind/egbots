@@ -217,6 +217,17 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertIsInstance(final_else_block, StatementBlock)
         self.assertEqual(len(final_else_block.statements), 1)
 
+    def test_parse_schedule_event(self):
+        """测试对 'WHEN schedule(...)' 这种特殊事件的解析。"""
+        script = 'WHEN schedule("0 9 * * *") THEN { log("daily report"); }'
+        parser = RuleParser(script)
+        rule = parser.parse()
+
+        # 解析器会将整个调用表达式转换为一个字符串
+        self.assertEqual(rule.when_event, 'schedule("0 9 * * *")')
+        self.assertIsInstance(rule.then_block, StatementBlock)
+        self.assertEqual(len(rule.then_block.statements), 1)
+
     def test_parse_with_comments_and_newlines(self):
         """测试解析器是否能正确处理注释和多余的换行符。"""
         script = """

@@ -128,6 +128,7 @@ async def test_resolve_persistent_variable_from_db(mock_update, test_db_session_
         session.add(StateVariable(group_id=-1001, user_id=123, name="user_bool", value=json.dumps(True)))
         session.add(StateVariable(group_id=-1001, user_id=123, name="user_list", value=json.dumps([1, "a", False])))
         session.add(StateVariable(group_id=-1001, user_id=555, name="user_int", value="100")) # 纯数字字符串
+        session.add(StateVariable(group_id=-1001, user_id=123, name="user_negative_int", value="-50")) # 负数字符串
         session.commit()
 
         resolver = VariableResolver(mock_update, Mock(), session, {})
@@ -137,6 +138,7 @@ async def test_resolve_persistent_variable_from_db(mock_update, test_db_session_
         assert await resolver.resolve("vars.user.user_bool") is True
         assert await resolver.resolve("vars.user.user_list") == [1, "a", False]
         assert await resolver.resolve("vars.user_555.user_int") == 100
+        assert await resolver.resolve("vars.user.user_negative_int") == -50
 
         # 2. 解析不存在的变量
         assert await resolver.resolve("vars.group.non_existent") is None

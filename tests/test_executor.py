@@ -248,6 +248,24 @@ async def test_action_unmute_user_targeting():
 
 
 @pytest.mark.asyncio
+async def test_action_unmute_user_no_permissions(mock_update, mock_context):
+    """测试 unmute_user 在 get_chat 未返回权限时的后备行为。"""
+    mock_context.bot.restrict_chat_member = AsyncMock()
+    # 模拟 get_chat 返回一个没有设置权限的 Chat 对象
+    mock_chat_no_perms = Mock()
+    mock_chat_no_perms.permissions = None
+    mock_context.bot.get_chat = AsyncMock(return_value=mock_chat_no_perms)
+
+    await _execute_then_block("unmute_user();", mock_update, mock_context)
+
+    mock_context.bot.restrict_chat_member.assert_called_once()
+    _, call_kwargs = mock_context.bot.restrict_chat_member.call_args
+    # 验证即使 get_chat 没有返回权限，依然会使用一个默认的、允许发言的权限对象
+    assert call_kwargs['permissions'].can_send_messages is True
+    assert call_kwargs['permissions'].can_send_other_messages is True
+
+
+@pytest.mark.asyncio
 async def test_action_send_message():
     """测试 send_message 动作。"""
     mock_update = Mock()
@@ -422,10 +440,10 @@ async def test_action_log_with_rotation(test_db_session_factory):
         assert logs[0].actor_user_id == 123
 
         # --- 3. 记录另外 500 条日志以触发轮换 ---
+        # 优化：在一个事务中完成所有日志记录，以提高测试效率
         for i in range(500):
             await executor.log(f"日志 #{i}", tag="loop")
-            # 每次提交以模拟独立事件，并确保 count() 查询获取最新状态
-            session.commit()
+        session.commit()
 
         # --- 4. 验证轮换逻辑 ---
         # 总共添加了 1 (初始) + 500 (循环) = 501 条日志。
