@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.jobstores.base import JobLookupError
 from telegram.ext import Application, MessageHandler, CommandHandler, ChatMemberHandler, filters, CallbackQueryHandler
 
@@ -164,22 +166,30 @@ async def main():
     # --- 7. 启动一切 ---
     try:
         async with application:
-            # 启动前，先尝试移除可能已损坏的旧任务，以确保健壮性
+            # 以暂停模式启动调度器，以安全地操作作业存储
+            scheduler.start(paused=True)
+            logger.info("调度器已以暂停模式启动。")
+
+            # 启动后，尝试移除可能已损坏的旧任务
             try:
                 scheduler.remove_job('daily_cleanup')
                 logger.info("已成功移除旧的 'daily_cleanup' 计划任务。")
             except JobLookupError:
                 logger.info("未找到旧的 'daily_cleanup' 计划任务，无需移除。")
 
-            # 注册我们的每日清理任务，并明确地将 db_url 作为参数传递
+            # 添加新的、正确的每日清理任务
             scheduler.add_job(
                 cleanup_old_events, 'cron', hour=4, minute=0, id='daily_cleanup',
-                replace_existing=True, kwargs={'db_url': db_url}
+                kwargs={'db_url': db_url}
             )
+            logger.info("已成功添加新的 'daily_cleanup' 计划任务。")
 
-            scheduler.start()
-            logger.info("调度器已成功启动。")
+            # 加载所有基于规则的计划任务
             await load_scheduled_rules(application)
+
+            # 恢复调度器运行
+            scheduler.resume()
+            logger.info("调度器已恢复运行。")
             logger.info("机器人已完成启动，开始轮询接收更新...")
             await application.start()
             await application.updater.start_polling()
