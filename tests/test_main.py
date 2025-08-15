@@ -1,4 +1,5 @@
 # tests/test_main.py
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import importlib
@@ -78,45 +79,52 @@ async def test_load_scheduled_rules(test_db_session_factory):
 
 
 @pytest.mark.asyncio
+@patch('main.asyncio.Future')
 @patch('main.Application.builder')
 @patch('main.init_database')
 @patch('main.get_session_factory')
 @patch('main.AsyncIOScheduler')
 @patch('main.load_scheduled_rules', new_callable=AsyncMock)
 @patch('main.os.getenv')
-async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_get_session, mock_init_db, mock_app_builder):
-    """对 main() 函数的流程进行一次高层次的集成测试。"""
+async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_get_session, mock_init_db, mock_app_builder, mock_asyncio_future):
+    """
+    对 main() 函数的流程进行一次高层次的集成测试。
+    这个测试的关键是模拟 `asyncio.Future()`，以防止 `main` 函数无限期等待。
+    """
     # --- 1. 准备模拟对象 ---
     mock_getenv.side_effect = lambda key, default=None: {
         "TELEGRAM_TOKEN": "fake_token",
         "DATABASE_URL": "sqlite:///:memory:"
     }.get(key, default)
 
-    # Because Application is an AsyncMock, its methods (like add_handler) are also async mocks
-    # and must be awaited in the application code.
     mock_app = AsyncMock()
     mock_app.bot_data = {}
+    # 修复1: 将 add_handler 明确设置为同步的 MagicMock，以消除 RuntimeWarning
+    mock_app.add_handler = MagicMock()
+    mock_app.updater = AsyncMock()
     mock_app_builder.return_value.token.return_value.build.return_value = mock_app
 
+    # 修复2: 确保对 asyncio.Future() 的调用返回一个真正的可等待对象(协程)。
+    # asyncio.sleep(0) 是一个创建简单协程的完美、标准的方法。
+    mock_asyncio_future.return_value = asyncio.sleep(0)
+
     # --- 2. Execute ---
-    # We need to wrap the main() call in a way that we can assert the mock calls later.
-    # The main logic of a real app would block on run_polling, but our mock won't.
     await main_module.main()
 
     # --- 3. Assert ---
     mock_init_db.assert_called_once_with("sqlite:///:memory:")
     mock_get_session.assert_called_once()
-    mock_scheduler.assert_called_once()
-    # mock_scheduler.return_value.start.assert_called_once() # <-- 已移除，因为 start() 不再被直接调用
+    mock_scheduler.return_value.start.assert_called_once()
     mock_app_builder.return_value.token.assert_called_once_with("fake_token")
 
     assert 'session_factory' in mock_app.bot_data
     assert 'scheduler' in mock_app.bot_data
     assert 'rule_cache' in mock_app.bot_data
 
-    # Check that the startup and shutdown logic is called
+    # 验证启动逻辑是否被正确调用
     mock_load_rules.assert_awaited_once()
-    # In a mocked environment, run_polling might not be awaited if an error occurs before it.
-    # The previous test failures were because of this. Now that the app code is fixed,
-    # we can properly test that it gets called.
-    mock_app.run_polling.assert_awaited_once()
+    mock_app.start.assert_awaited_once()
+    mock_app.updater.start_polling.assert_awaited_once()
+
+    # 验证 `asyncio.Future()` 被调用，确认我们已经到达了主循环
+    mock_asyncio_future.assert_called_once()

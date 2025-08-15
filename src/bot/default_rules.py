@@ -170,7 +170,9 @@ END
         "priority": 1,
         "script": """
 WHEN message
-WHERE vars.group.reminders != null AND len(vars.group.reminders) > 0
+WHERE
+    message.from_user.is_bot == false AND
+    vars.group.reminders != null AND len(vars.group.reminders) > 0
 THEN {
     reminders = vars.group.reminders;
     foreach (item in reminders) {
