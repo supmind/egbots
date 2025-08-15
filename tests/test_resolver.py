@@ -109,6 +109,29 @@ async def test_resolve_command_variable():
     assert await resolver.resolve("command.full_args") == "arg1 arg 2 with spaces"
     assert await resolver.resolve("command.arg[2]") is None # 索引越界
 
+@pytest.mark.parametrize("command_text, expected_name, expected_args", [
+    ("/kick", "kick", []),
+    ("/ban \"John Doe\" \"for spamming\"", "ban", ["John Doe", "for spamming"]),
+    ("/mute 'user 123' 1h", "mute", ["user 123", "1h"]),
+    ("/complex_cmd arg1 'arg 2' \"arg 3\"", "complex_cmd", ["arg1", "arg 2", "arg 3"]),
+])
+async def test_resolve_command_variable_parsing(command_text, expected_name, expected_args):
+    """使用参数化测试来验证 shlex 对各种命令格式的解析能力。"""
+    mock_user = User(id=123, is_bot=False, first_name="Test")
+    mock_chat = Chat(id=-1001, type="group")
+    mock_message = Message(message_id=2, date=None, chat=mock_chat, text=command_text, from_user=mock_user)
+    mock_update_with_command = Update(update_id=1000, message=mock_message)
+    mock_context = Mock()
+    mock_context.bot_data = {}
+
+    resolver = VariableResolver(mock_update_with_command, mock_context, Mock(), {})
+
+    assert await resolver.resolve("command.name") == expected_name
+    assert await resolver.resolve("command.arg_count") == len(expected_args)
+    assert await resolver.resolve("command.arg") == expected_args
+    for i, arg in enumerate(expected_args):
+        assert await resolver.resolve(f"command.arg[{i}]") == arg
+
 async def test_resolve_command_variable_on_non_command():
     """测试在非命令消息上解析 command.* 变量的行为。"""
     mock_user = User(id=123, is_bot=False, first_name="Test")
@@ -241,3 +264,86 @@ async def test_resolve_computed_is_admin_on_api_error(mock_update):
     # 解析 user.is_admin，预期应安全地返回 False 而不是崩溃
     assert await resolver.resolve("user.is_admin") is False
     mock_context.bot.get_chat_member.assert_called_once_with(chat_id=-1001, user_id=123)
+
+from datetime import datetime, timedelta, timezone
+from src.database import EventLog
+from cachetools import TTLCache
+
+async def test_resolve_media_group_variables(mock_update):
+    """测试 media_group.* 相关变量的解析。"""
+    # 模拟一个聚合后的媒体组消息列表，并将其附加到 Update 对象上
+    mock_chat = Chat(id=-1001, type="group")
+    mock_user = User(id=123, is_bot=False, first_name="Test")
+    # 媒体组中的消息
+    msg1 = Message(message_id=20, date=None, chat=mock_chat, from_user=mock_user, photo=[Mock()])
+    msg2 = Message(message_id=21, date=None, chat=mock_chat, from_user=mock_user, photo=[Mock()], caption="This is the caption")
+    msg3 = Message(message_id=22, date=None, chat=mock_chat, from_user=mock_user, video=Mock())
+
+    # 就像在真实 handler 中一样，将聚合后的消息列表附加到 update 对象上
+    setattr(mock_update, 'media_group_messages', [msg1, msg2, msg3])
+
+    mock_context = Mock()
+    mock_context.bot_data = {}
+    resolver = VariableResolver(mock_update, mock_context, Mock(), {})
+
+    # 测试变量解析
+    assert await resolver.resolve("media_group.message_count") == 3
+    assert await resolver.resolve("media_group.caption") == "This is the caption"
+
+    # 测试当不存在媒体组时的行为
+    clean_mock_update = MagicMock(spec=Update(update_id=999), autospec=True)
+    clean_resolver = VariableResolver(clean_mock_update, mock_context, Mock(), {})
+    assert await clean_resolver.resolve("media_group.message_count") is None
+
+async def test_resolve_stats_variable_with_caching(mock_update, test_db_session_factory, mocker):
+    """测试统计变量 (user.stats.*, group.stats.*) 的解析及其缓存机制。"""
+    now = datetime.now(timezone.utc)
+    user_id = mock_update.effective_user.id
+    group_id = mock_update.effective_chat.id
+
+    with test_db_session_factory() as session:
+        # 准备事件数据
+        # 用户123的事件
+        # 将其修改为59分钟前，以避免由于执行延迟导致的微秒级边界问题
+        session.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', timestamp=now - timedelta(minutes=59)))
+        session.add(EventLog(group_id=group_id, user_id=user_id, event_type='message', timestamp=now - timedelta(hours=25))) # 24小时之外
+        session.add(EventLog(group_id=group_id, user_id=user_id, event_type='user_join', timestamp=now - timedelta(days=2)))
+        # 用户666的事件
+        session.add(EventLog(group_id=group_id, user_id=666, event_type='message', timestamp=now - timedelta(minutes=30)))
+        session.add(EventLog(group_id=group_id, user_id=666, event_type='user_join', timestamp=now - timedelta(minutes=10)))
+        session.commit()
+
+        # 创建一个真实的 TTL cache 实例并注入到 bot_data 中
+        stats_cache = TTLCache(maxsize=100, ttl=60)
+        mock_context = Mock()
+        mock_context.bot_data = {'stats_cache': stats_cache}
+
+        # 监视数据库查询
+        query_spy = mocker.spy(session, 'query')
+
+        resolver = VariableResolver(mock_update, mock_context, session, {})
+
+        # 1. 第一次解析 user.stats.messages_1d，应该查询数据库
+        result1 = await resolver.resolve("user.stats.messages_1d")
+        assert result1 == 1
+        assert query_spy.call_count == 1
+
+        # 2. 第二次解析 user.stats.messages_1d，应该命中缓存，不查询数据库
+        result2 = await resolver.resolve("user.stats.messages_1d")
+        assert result2 == 1
+        assert query_spy.call_count == 1 # 调用次数未增加
+
+        # 3. 解析 group.stats.joins_7d，应该查询数据库
+        result3 = await resolver.resolve("group.stats.joins_7d")
+        assert result3 == 2
+        assert query_spy.call_count == 2 # 调用次数增加
+
+        # 4. 解析 group.stats.messages_1h，应该查询数据库
+        result4 = await resolver.resolve("group.stats.messages_1h")
+        assert result4 == 2 # user123 (1h前) + user666 (30m前)
+        assert query_spy.call_count == 3 # 调用次数增加
+
+        # 5. 解析一个不存在的统计类型
+        result5 = await resolver.resolve("group.stats.invalid_3h")
+        assert result5 is None
+        assert query_spy.call_count == 3 # 不应产生查询

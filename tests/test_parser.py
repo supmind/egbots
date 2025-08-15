@@ -332,6 +332,12 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertTrue(is_valid)
         self.assertIsNone(error)
 
+        # 测试一个带 WHERE 子句的有效规则
+        valid_script_with_where = 'WHEN command WHERE user.id == 123 THEN { reply("ok"); }'
+        is_valid, error = precompile_rule(valid_script_with_where)
+        self.assertTrue(is_valid, f"带 WHERE 子句的有效脚本预编译失败: {error}")
+        self.assertIsNone(error)
+
         # 测试一个语法无效的规则
         invalid_script = 'WHEN command THEN { reply("ok") }' # 缺少分号
         is_valid, error = precompile_rule(invalid_script)
@@ -424,6 +430,34 @@ class TestNewRuleParser(unittest.TestCase):
         self.assertEqual(where_clause.right.action_name, "len")
         self.assertEqual(len(where_clause.right.args), 1)
         self.assertEqual(where_clause.right.args[0].name, "my_list")
+
+    def test_parse_string_comparison_ops(self):
+        """测试解析字符串比较运算符 (contains, startswith, endswith)。"""
+        operators = ["contains", "startswith", "endswith"]
+        for op in operators:
+            with self.subTest(operator=op):
+                script = f'WHEN message WHERE message.text {op} "spam" THEN {{ delete_message(); }}'
+                try:
+                    rule = RuleParser(script).parse()
+                    where_clause = rule.where_clause
+                    self.assertIsInstance(where_clause, BinaryOp)
+                    self.assertEqual(where_clause.op.lower(), op)
+                    self.assertIsInstance(where_clause.left, PropertyAccess)
+                    self.assertEqual(self._reconstruct_path(where_clause.left), "message.text")
+                    self.assertIsInstance(where_clause.right, Literal)
+                    self.assertEqual(where_clause.right.value, "spam")
+                except RuleParserError as e:
+                    self.fail(f"解析运算符 '{op}' 失败: {e}")
+
+    # 辅助方法，用于在测试中断言时重构属性访问路径
+    def _reconstruct_path(self, expr):
+        if isinstance(expr, Variable):
+            return expr.name
+        if isinstance(expr, PropertyAccess):
+            base = self._reconstruct_path(expr.target)
+            return f"{base}.{expr.property}"
+        return ""
+
 
 if __name__ == '__main__':
     unittest.main()

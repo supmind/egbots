@@ -95,6 +95,58 @@ def builtin_join(l: list, sep: str) -> str:
     """内置函数：使用分隔符连接列表中的所有元素，生成一个字符串。"""
     return str(sep).join(map(str, l))
 
+@builtin_function("get_var")
+def get_var(executor: 'RuleExecutor', variable_path: str, default: Any = None, user_id: Any = None) -> Any:
+    """
+    内置函数：从数据库中获取一个持久化变量的值。
+    这是 set_var 的配套函数，允许脚本为动态指定的用户读取变量。
+
+    Args:
+        executor: RuleExecutor 的实例，由装饰器自动注入。
+        variable_path (str): 变量的路径，例如 "user.warnings" 或 "group.config"。
+        default (Any, optional): 如果变量不存在时返回的默认值。默认为 None。
+        user_id (Any, optional): 目标用户的ID。如果未提供，则默认为当前事件的发起者。
+                                 此参数仅在 variable_path 的作用域为 'user' 时有效。
+
+    Returns:
+        变量的值，如果不存在则返回默认值。
+    """
+    if not isinstance(variable_path, str) or '.' not in variable_path:
+        logger.warning(f"get_var 的变量路径 '{variable_path}' 格式无效。")
+        return default
+
+    scope, var_name = variable_path.split('.', 1)
+    if not executor.update.effective_chat:
+        return default
+
+    group_id = executor.update.effective_chat.id
+    db_user_id = None
+
+    if scope.lower() == 'user':
+        target_user_id = executor._get_target_user_id(user_id)
+        if not target_user_id:
+            logger.warning("get_var 在 'user' 作用域下无法确定目标用户。")
+            return default
+        db_user_id = target_user_id
+    elif scope.lower() != 'group':
+        logger.warning(f"get_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
+        return default
+
+    variable = executor.db_session.query(StateVariable).filter_by(
+        group_id=group_id, user_id=db_user_id, name=var_name
+    ).first()
+
+    if not variable:
+        return default
+
+    try:
+        return json.loads(variable.value)
+    except json.JSONDecodeError:
+        val_str = variable.value
+        if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
+            return int(val_str)
+        return val_str
+
 # ==================== 自定义控制流异常 (Custom Control Flow Exceptions) ====================
 
 # 在解释器或编译器中，使用异常来处理非线性的控制流（如 `break`, `continue`, `return`）是一种常见且优雅的技术。
@@ -456,10 +508,18 @@ class RuleExecutor:
 
         func = _BUILTIN_FUNCTIONS[func_name]
         evaluated_args = [await self._evaluate_expression(arg, current_scope) for arg in expr.args]
+
+        # 依赖注入：检查函数是否需要执行器实例
+        import inspect
+        sig = inspect.signature(func)
+        if 'executor' in sig.parameters:
+            # 如果函数签名中有 'executor'，则将 self (RuleExecutor 实例) 作为第一个参数注入。
+            evaluated_args.insert(0, self)
+
         try:
             return func(*evaluated_args)
         except Exception as e:
-            logger.error(f"执行内置函数 '{func_name}' 时出错: {e}")
+            logger.error(f"执行内置函数 '{func_name}' 时出错: {e}", exc_info=True)
             return None
 
     def _try_reconstruct_path(self, expr: Expr) -> Optional[str]:

@@ -313,7 +313,7 @@ async def test_action_kick_user():
 
 @pytest.mark.asyncio
 async def test_action_set_var(test_db_session_factory):
-    """测试 set_var 动作是否能正确地在数据库中创建或更新变量。"""
+    """测试 set_var 动作是否能正确地在数据库中创建、更新和删除变量。"""
     mock_update = Mock()
     mock_update.effective_chat.id = -1001
     mock_update.effective_user.id = 123
@@ -321,35 +321,43 @@ async def test_action_set_var(test_db_session_factory):
     mock_context.bot_data = {}
 
     with test_db_session_factory() as session:
+        from src.database import StateVariable
+        import json
+
         executor = RuleExecutor(mock_update, mock_context, session)
 
         # 1. 创建一个组变量
         await executor.set_var("group.config", {"theme": "dark"})
         session.commit()
+        group_var = session.query(StateVariable).filter_by(group_id=-1001, name="config", user_id=None).one()
+        assert json.loads(group_var.value) == {"theme": "dark"}
 
         # 2. 创建一个用户变量
         await executor.set_var("user.points", 100)
         session.commit()
-
-        # 3. 为另一个用户创建变量
-        await executor.set_var("user.warnings", 1, 999)
-        session.commit()
-
-        # 4. 验证数据库状态
-        from src.database import StateVariable
-        import json
-
-        # 验证组变量
-        group_var = session.query(StateVariable).filter_by(group_id=-1001, name="config", user_id=None).one()
-        assert json.loads(group_var.value) == {"theme": "dark"}
-
-        # 验证当前用户的变量
         user_var = session.query(StateVariable).filter_by(group_id=-1001, name="points", user_id=123).one()
         assert json.loads(user_var.value) == 100
 
-        # 验证另一个用户的变量
+        # 3. 更新用户变量
+        await executor.set_var("user.points", 150)
+        session.commit()
+        user_var_updated = session.query(StateVariable).filter_by(group_id=-1001, name="points", user_id=123).one()
+        assert json.loads(user_var_updated.value) == 150
+        assert session.query(StateVariable).count() == 2 # 确保是更新而不是插入
+
+        # 4. 为另一个用户创建变量
+        await executor.set_var("user.warnings", 1, 999)
+        session.commit()
         other_user_var = session.query(StateVariable).filter_by(group_id=-1001, name="warnings", user_id=999).one()
         assert json.loads(other_user_var.value) == 1
+        assert session.query(StateVariable).count() == 3
+
+        # 5. 通过将值设为 null 来删除变量
+        await executor.set_var("user.warnings", None, 999)
+        session.commit()
+        deleted_var = session.query(StateVariable).filter_by(group_id=-1001, name="warnings", user_id=999).first()
+        assert deleted_var is None
+        assert session.query(StateVariable).count() == 2 # 确认记录已被删除
 
 # =================== 控制流测试 ===================
 
@@ -573,6 +581,30 @@ async def test_foreach_scope_persistence():
     # 最终值应为 10 + 1 + 2 + 3 = 16
     mock_update.effective_message.reply_text.assert_called_once_with("16")
 
+
+@pytest.mark.asyncio
+async def test_foreach_loop_variable_scope():
+    """
+    测试 foreach 循环变量的作用域是否被正确管理，以防止“泄漏”。
+    """
+    # 辅助函数，用于运行脚本并返回最终的作用域
+    async def run_and_get_scope(script_body: str, initial_scope: dict):
+        rule_str = f"WHEN command THEN {{ {script_body} }} END"
+        parsed_rule = RuleParser(rule_str).parse()
+        executor = RuleExecutor(Mock(), Mock(bot_data={}), Mock())
+        await executor._execute_statement_block(parsed_rule.then_block, initial_scope)
+        return initial_scope
+
+    # 场景1: 循环变量在循环前不存在，循环后也应不存在
+    scope1 = {}
+    await run_and_get_scope("foreach (item in [1,2]) {}", scope1)
+    assert "item" not in scope1, "循环变量 'item' 在循环结束后不应存在于作用域中"
+
+    # 场景2: 循环变量 '覆盖' 了同名变量，循环后应恢复原值
+    scope2 = {"item": "original"}
+    await run_and_get_scope("foreach (item in [1,2]) {}", scope2)
+    assert scope2.get("item") == "original", "循环变量在结束后未能恢复其原始值"
+
 @pytest.mark.asyncio
 async def test_stop_action_raises_exception():
     """测试 stop() 动作是否能正确抛出 StopRuleProcessing 异常。"""
@@ -623,3 +655,39 @@ async def test_action_failure_graceful_handling(mock_update, mock_context, caplo
     assert "封禁用户 123 失败" in log_record.message
     # The exception type name "Forbidden" is not in the log, only its message.
     assert "Not enough rights" in log_record.message
+
+
+@pytest.mark.asyncio
+async def test_builtin_get_var(mock_update, mock_context, test_db_session_factory):
+    """对新的 get_var 内置函数进行单元测试。"""
+    from src.database import StateVariable
+    import json
+
+    with test_db_session_factory() as session:
+        # 准备数据
+        session.add(StateVariable(group_id=-1001, user_id=123, name="points", value=json.dumps(100)))
+        session.add(StateVariable(group_id=-1001, user_id=None, name="config", value=json.dumps({"enabled": True})))
+        session.commit()
+
+        from src.core.executor import get_var
+        executor = RuleExecutor(mock_update, mock_context, session)
+
+        # 1. 获取当前用户的变量
+        points = get_var(executor, "user.points", 0)
+        assert points == 100
+
+        # 2. 获取指定用户的变量
+        points_other = get_var(executor, "user.points", 0, user_id=123)
+        assert points_other == 100
+
+        # 3. 获取一个不存在的变量，应返回默认值
+        non_existent = get_var(executor, "user.warnings", 0, user_id=123)
+        assert non_existent == 0
+
+        # 4. 获取组变量
+        config = get_var(executor, "group.config", None)
+        assert config == {"enabled": True}
+
+        # 5. 获取一个不存在的组变量
+        bad_config = get_var(executor, "group.bad_config", {"default": True})
+        assert bad_config == {"default": True}

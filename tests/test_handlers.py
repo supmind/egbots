@@ -201,6 +201,36 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
     assert MockRuleExecutor.called
 
 
+@patch('src.bot.handlers.RuleExecutor')
+async def test_seed_rules_for_new_group(MockRuleExecutor, mock_update, mock_context, test_db_session_factory):
+    """
+    测试当机器人加入一个新群组时，是否会自动植入默认规则。
+    """
+    # --- 准备 ---
+    # 确保数据库是空的
+    with test_db_session_factory() as db:
+        assert db.query(Group).count() == 0
+        assert db.query(Rule).count() == 0
+
+    from src.bot.default_rules import DEFAULT_RULES
+    mock_executor_instance = MockRuleExecutor.return_value
+    mock_executor_instance.execute_rule = AsyncMock()
+
+    # --- 执行 ---
+    # 对一个新群组触发任意事件
+    await process_event("message", mock_update, mock_context)
+
+    # --- 验证 ---
+    # 验证数据库中是否已创建 Group 和 Rule 记录
+    with test_db_session_factory() as db:
+        assert db.query(Group).count() == 1
+        group = db.query(Group).filter_by(id=-1001).first()
+        assert group is not None
+
+        rule_count = db.query(Rule).filter_by(group_id=-1001).count()
+        assert rule_count == len(DEFAULT_RULES)
+
+
 @patch('src.bot.handlers.process_event', new_callable=AsyncMock)
 async def test_media_group_aggregation(mock_process_event, mock_update, mock_context):
     """
@@ -267,3 +297,38 @@ async def test_media_group_aggregation(mock_process_event, mock_update, mock_con
     # 验证聚合的消息ID是否正确
     message_ids = {msg.message_id for msg in update_arg.media_group_messages}
     assert message_ids == {1, 2, 3}
+
+
+@patch('src.bot.handlers.RuleExecutor')
+async def test_stop_action_halts_processing(MockRuleExecutor, mock_update, mock_context, test_db_session_factory):
+    """
+    测试 stop() 动作是否能正确地中断对后续规则的处理。
+    """
+    # --- 准备 ---
+    # 定义两个规则：一个会停止，另一个会回复。stop() 规则有更高优先级。
+    rule_stop = Rule(
+        group_id=-1001, name="Stop Rule", priority=10, is_active=True,
+        script="WHEN message WHERE user.id == 123 THEN { stop(); }"
+    )
+    rule_reply = Rule(
+        group_id=-1001, name="Reply Rule", priority=5, is_active=True,
+        script="WHEN message THEN { reply('you should not see this'); }"
+    )
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        db.add_all([rule_stop, rule_reply])
+        db.commit()
+
+    # 我们需要一个真实的执行器来抛出真实的 StopRuleProcessing 异常，
+    # 因此我们不能完全模拟 RuleExecutor。
+    # 相反，我们只模拟它内部的动作，以验证它们是否被调用。
+    mock_reply_action = AsyncMock()
+
+    # 使用 patch.dict 来临时替换动作注册表中的 'reply' 动作
+    with patch.dict('src.core.executor._ACTION_REGISTRY', {'reply': mock_reply_action}):
+        # --- 执行 ---
+        await process_event("message", mock_update, mock_context)
+
+    # --- 验证 ---
+    # 验证 reply 动作从未被调用，因为 stop() 规则应该先执行并中断流程。
+    mock_reply_action.assert_not_called()

@@ -311,6 +311,68 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
 
+async def test_full_warning_system_scenario(mock_update, mock_context, test_db_session_factory):
+    """
+    一个完整的端到端测试，模拟一个三振出局（three-strikes-you're-out）的警告系统。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    admin_id = 123
+    target_user_id = 456
+    group_id = -1001
+
+    warn_rule = """
+    WHEN command WHERE command.name == 'warn' and command.arg_count > 0 THEN {
+        target_id = int(command.arg[0]);
+        // 使用新的 get_var 函数来为动态指定的用户读取变量
+        current_warnings = get_var("user.warnings", 0, target_id);
+        new_warnings = current_warnings + 1;
+        set_var("user.warnings", new_warnings, target_id);
+
+        if (new_warnings >= 3) {
+            reply("用户 " + target_id + " 已达到3次警告，将被踢出。");
+            kick_user(target_id);
+            // 踢出后重置警告计数
+            set_var("user.warnings", 0, target_id);
+        } else {
+            reply("用户 " + target_id + " 已被警告，当前警告次数: " + new_warnings);
+        }
+    } END
+    """
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Warning System", script=warn_rule))
+        db.commit()
+
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        mock_update.effective_user.id = admin_id # 管理员发出所有警告
+
+        # --- 2. 第一次警告 ---
+        mock_update.message.text = f"/warn {target_user_id}"
+        await process_event("command", mock_update, mock_context)
+        mock_update.effective_message.reply_text.assert_called_once_with(f"用户 {target_user_id} 已被警告，当前警告次数: 1")
+        mock_update.effective_message.reply_text.reset_mock()
+
+        # --- 3. 第二次警告 ---
+        await process_event("command", mock_update, mock_context)
+        mock_update.effective_message.reply_text.assert_called_once_with(f"用户 {target_user_id} 已被警告，当前警告次数: 2")
+        mock_update.effective_message.reply_text.reset_mock()
+
+        # --- 4. 第三次警告 (导致踢出) ---
+        await process_event("command", mock_update, mock_context)
+        mock_update.effective_message.reply_text.assert_called_once_with(f"用户 {target_user_id} 已达到3次警告，将被踢出。")
+
+        # 验证踢出动作被调用
+        mock_context.bot.ban_chat_member.assert_called_once_with(group_id, target_user_id)
+        mock_context.bot.unban_chat_member.assert_called_once_with(group_id, target_user_id)
+
+        # --- 5. 验证数据库状态 ---
+        # 验证警告计数已被重置为0
+        with test_db_session_factory() as db:
+            from src.database import StateVariable
+            import json
+            final_var = db.query(StateVariable).filter_by(group_id=group_id, user_id=target_user_id, name="warnings").one()
+            assert json.loads(final_var.value) == 0
+
 
 async def test_stats_variables(mock_update, mock_context, test_db_session_factory):
     """
