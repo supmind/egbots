@@ -163,10 +163,10 @@ async def main():
     # --- 7. 启动一切 ---
     try:
         async with application:
-            # 注册我们的每日清理任务，并明确地将 session_factory 作为参数传递
+            # 注册我们的每日清理任务，并明确地将 db_url 作为参数传递
             scheduler.add_job(
                 cleanup_old_events, 'cron', hour=4, minute=0, id='daily_cleanup',
-                replace_existing=True, kwargs={'session_factory': session_factory}
+                replace_existing=True, kwargs={'db_url': db_url}
             )
 
             scheduler.start()

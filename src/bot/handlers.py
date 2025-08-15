@@ -13,7 +13,8 @@ from sqlalchemy.orm import sessionmaker, Session
 from src.utils import session_scope, generate_math_image, unmute_user_util
 from src.core.parser import RuleParser, RuleParserError
 from src.core.executor import RuleExecutor, StopRuleProcessing
-from src.database import Rule, Verification, EventLog
+from src.database import Rule, Verification, EventLog, get_session_factory
+from sqlalchemy import create_engine
 from .default_rules import DEFAULT_RULES
 
 logger = logging.getLogger(__name__)
@@ -320,21 +321,31 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # =================== 计划任务与验证流程处理器 ===================
 
-async def cleanup_old_events(session_factory: sessionmaker):
+async def cleanup_old_events(db_url: str):
     """
     一个每日运行的清理任务，用于删除超过60天的旧事件日志以防止数据库无限膨胀。
-    此函数被设计为直接由 APScheduler 调用，因此它不接收 'context' 对象，
-    而是直接接收它所需要的 'session_factory'。
+    此函数被设计为直接由 APScheduler 调用，它不依赖任何实时上下文，
+    而是使用传入的 db_url 在运行时创建自己的数据库连接。
     """
-    cutoff_time = datetime.now(timezone.utc) - timedelta(days=60)
-    logger.info(f"正在执行事件日志清理任务，将删除早于 {cutoff_time} 的所有记录...")
+    if not db_url:
+        logger.error("无法执行日志清理任务，因为没有提供数据库URL。")
+        return
+
+    logger.info("正在执行每日事件日志清理任务...")
     try:
+        # 在任务执行时动态创建数据库引擎和会话工厂
+        engine = create_engine(db_url)
+        session_factory = get_session_factory(engine)
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(days=60)
+        logger.info(f"将删除早于 {cutoff_time} 的所有事件记录...")
+
         with session_scope(session_factory) as db_session:
             deleted_count = db_session.query(EventLog).filter(EventLog.timestamp < cutoff_time).delete()
             db_session.commit()
             logger.info(f"事件日志清理完成，共删除了 {deleted_count} 条旧记录。")
     except Exception as e:
-        logger.error(f"执行事件日志清理任务时发生错误: {e}", exc_info=True)
+        logger.error(f"执行事件日志清理任务时发生严重错误: {e}", exc_info=True)
 
 async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
     """由 APScheduler 调度的作业处理器，用于执行 `WHEN schedule(...)` 规则。"""
