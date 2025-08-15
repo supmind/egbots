@@ -528,8 +528,16 @@ class RuleExecutor:
     async def delete_message(self):
         """动作：删除触发此规则的消息。"""
         if self.update.effective_message:
-            try: await self.update.effective_message.delete()
-            except Exception as e: logger.error(f"删除消息失败: {e}")
+            try:
+                await self.update.effective_message.delete()
+            except Exception as e:
+                chat_id = self.update.effective_chat.id if self.update.effective_chat else "N/A"
+                message_id = self.update.effective_message.id
+                logger.error(
+                    f"删除消息失败: {e}。"
+                    f" 群组ID: {chat_id}, 消息ID: {message_id}。"
+                    f" 请检查机器人是否是管理员并拥有删除消息的权限，以及消息是否在48小时内发送。"
+                )
 
     @action("ban_user")
     async def ban_user(self, user_id: Any = None, reason: str = ""):

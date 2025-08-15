@@ -314,6 +314,30 @@ async def test_action_delete_message():
 
 
 @pytest.mark.asyncio
+async def test_action_delete_message_failure(mock_update, mock_context, caplog):
+    """测试 delete_message 动作在 API 调用失败时是否能优雅地处理并记录详细日志。"""
+    # 模拟消息删除失败，抛出异常
+    mock_update.effective_message.delete = AsyncMock(side_effect=Exception("Message can't be deleted"))
+    mock_update.effective_chat.id = -1001
+    mock_update.effective_message.id = 987
+
+    with caplog.at_level('ERROR'):
+        await _execute_then_block("delete_message();", mock_update, mock_context)
+
+    # 验证 API 调用被尝试过
+    mock_update.effective_message.delete.assert_called_once()
+
+    # 验证错误已被正确记录
+    assert len(caplog.records) == 1
+    log_record = caplog.records[0]
+    assert log_record.levelname == 'ERROR'
+    assert "删除消息失败: Message can't be deleted。" in log_record.message
+    assert "群组ID: -1001" in log_record.message
+    assert "消息ID: 987" in log_record.message
+    assert "请检查机器人是否是管理员并拥有删除消息的权限" in log_record.message
+
+
+@pytest.mark.asyncio
 async def test_action_kick_user():
     """测试 kick_user 动作。"""
     mock_update = Mock()
