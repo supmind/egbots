@@ -18,6 +18,7 @@ async def _evaluate_expression_in_where_clause(expression_str: str, scope: dict 
     # 为执行器创建模拟对象
     mock_update = Mock()
     mock_context = Mock()
+    mock_context.bot_data = {} # 修复：确保 bot_data 是一个字典
     mock_db_session = Mock()
 
     executor = RuleExecutor(mock_update, mock_context, mock_db_session)
@@ -31,6 +32,9 @@ async def _execute_then_block(script_body: str, update: Mock, context: Mock) -> 
     """一个辅助函数，用于执行 THEN 代码块并返回执行器以供检查。"""
     rule_str = f"WHEN command THEN {{ {script_body} }} END"
     parsed_rule = RuleParser(rule_str).parse()
+    # 修复：确保传入的 context 有一个 bot_data 字典
+    if not hasattr(context, 'bot_data') or not isinstance(context.bot_data, dict):
+        context.bot_data = {}
     executor = RuleExecutor(update, context, Mock())
     await executor.execute_rule(parsed_rule)
     return executor
@@ -73,7 +77,9 @@ async def test_expression_evaluation_simple(expr, expected):
 @pytest.mark.asyncio
 async def test_variable_evaluation_with_mocked_resolver():
     """测试变量求值，包括作用域内变量和通过解析器获取的变量。"""
-    executor = RuleExecutor(Mock(), Mock(), Mock())
+    mock_context = Mock()
+    mock_context.bot_data = {}
+    executor = RuleExecutor(Mock(), mock_context, Mock())
 
     # 模拟解析器方法以隔离测试，使其能处理属性访问
     async def mock_resolve(path):
@@ -312,6 +318,7 @@ async def test_action_set_var(test_db_session_factory):
     mock_update.effective_chat.id = -1001
     mock_update.effective_user.id = 123
     mock_context = Mock()
+    mock_context.bot_data = {}
 
     with test_db_session_factory() as session:
         executor = RuleExecutor(mock_update, mock_context, session)
@@ -350,7 +357,9 @@ async def test_action_set_var(test_db_session_factory):
 async def test_foreach_on_empty_and_null():
     """测试 foreach 循环在空集合或 null 上的行为是否正常。"""
     async def run_script(script: str):
-        executor = RuleExecutor(Mock(), Mock(), Mock())
+        mock_context = Mock()
+        mock_context.bot_data = {}
+        executor = RuleExecutor(Mock(), mock_context, Mock())
         scope = {"counter": 0}
         then_block = RuleParser(f"WHEN command THEN {{ {script} }} END").parse().then_block
         await executor._execute_statement_block(then_block, scope)
@@ -423,6 +432,7 @@ async def test_action_log_with_rotation(test_db_session_factory):
     mock_update.effective_chat.id = -1001
     mock_update.effective_user.id = 123
     mock_context = Mock()
+    mock_context.bot_data = {}
 
     with test_db_session_factory() as session:
         executor = RuleExecutor(mock_update, mock_context, session)

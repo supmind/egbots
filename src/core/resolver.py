@@ -4,14 +4,16 @@ import logging
 import re
 import shlex
 import json
-from typing import Any, Dict
-from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from telegram import Update
 from telegram.ext import ContextTypes
+from cachetools import TTLCache
 
-from src.database import StateVariable
+from src.database import StateVariable, MessageLog
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,10 @@ class VariableResolver:
         self.context = context
         self.db_session = db_session
         self.per_request_cache = per_request_cache
+        # 从 bot_data 获取共享的 stats_cache，如果不存在则创建一个新的
+        if 'stats_cache' not in self.context.bot_data:
+            self.context.bot_data['stats_cache'] = TTLCache(maxsize=500, ttl=60)
+        self.stats_cache = self.context.bot_data['stats_cache']
 
     async def resolve(self, path: str) -> Any:
         """
@@ -65,6 +71,9 @@ class VariableResolver:
         # 步骤 2: 处理需要特殊计算的、已知的变量
         if path_lower == 'user.is_admin':
             return await self._resolve_computed_is_admin()
+
+        if path_lower.startswith('user.stats.'):
+            return self._resolve_user_stats(path_lower)
 
         if path_lower == 'time.unix':
             return int(datetime.now(timezone.utc).timestamp())
@@ -199,6 +208,53 @@ class VariableResolver:
                 return int(val_str)
             # 否则，将其作为普通字符串返回。这对于处理由其他系统写入的、非JSON格式的简单字符串值很有用。
             return val_str
+
+    def _resolve_user_stats(self, path: str) -> Optional[int]:
+        """
+        解析 `user.stats.*` 形式的统计变量。
+        例如: `user.stats.messages_24h`
+        此方法集成了TTL缓存，以避免对数据库的重复查询。
+        """
+        if not self.update.effective_user:
+            return 0
+
+        # 使用完整的路径和用户ID作为缓存的唯一键
+        cache_key = f"{path}_{self.update.effective_user.id}"
+
+        # 检查缓存
+        if cache_key in self.stats_cache:
+            return self.stats_cache[cache_key]
+
+        match = re.match(r'user\.stats\.messages_(\d+)(h|m|d)', path)
+        if not match:
+            return None
+
+        value = int(match.group(1))
+        unit = match.group(2)
+
+        if unit == 'h':
+            delta = timedelta(hours=value)
+        elif unit == 'm':
+            delta = timedelta(minutes=value)
+        elif unit == 'd':
+            delta = timedelta(days=value)
+        else:
+            return None # 不可能发生，但作为保险
+
+        since_time = datetime.now(timezone.utc) - delta
+
+        # 缓存未命中，查询数据库
+        count = self.db_session.query(func.count(MessageLog.id)).filter(
+            MessageLog.group_id == self.update.effective_chat.id,
+            MessageLog.user_id == self.update.effective_user.id,
+            MessageLog.timestamp >= since_time
+        ).scalar()
+
+        # 将结果存入缓存
+        self.stats_cache[cache_key] = count
+
+        return count
+
 
     async def _resolve_computed_is_admin(self) -> bool:
         """

@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from src.utils import session_scope, generate_math_image
 from src.core.parser import RuleParser, RuleParserError
 from src.core.executor import RuleExecutor, StopRuleProcessing
-from src.database import Rule, Verification
+from src.database import Rule, Verification, MessageLog
 from .default_rules import DEFAULT_RULES
 
 logger = logging.getLogger(__name__)
@@ -202,6 +202,14 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
 
     try:
         with session_scope(session_factory) as db_session:
+            # 记录消息以供统计
+            if update.effective_message and update.effective_user:
+                db_session.add(MessageLog(
+                    group_id=chat_id,
+                    user_id=update.effective_user.id,
+                    message_id=update.effective_message.message_id
+                ))
+
             # 步骤 1: 检查是否是新群组，如果是，则植入规则并强制清除（或初始化）缓存。
             if _seed_rules_if_new_group(chat_id, db_session):
                 if chat_id in rule_cache: del rule_cache[chat_id]

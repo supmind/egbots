@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database import Base, Rule, Group, Verification, Log
+from src.database import Base, Rule, Group, Verification, Log, MessageLog
 from src.bot.handlers import process_event, verification_callback_handler
 from src.utils import generate_math_image
 
@@ -310,6 +310,53 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
     with test_db_session_factory() as db:
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
+
+
+async def test_user_stats_variable_with_caching(mock_update, mock_context, test_db_session_factory):
+    """
+    集成测试：验证新的 user.stats.* 变量能否正确工作，并测试其缓存机制。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    stats_rule = """
+    WHEN command WHERE command.name == "stats" THEN {
+        reply("Messages in last 1 hour: " + user.stats.messages_1h);
+    } END
+    """
+    user_id = mock_update.effective_user.id
+    group_id = mock_update.effective_chat.id
+
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Stats Rule", script=stats_rule))
+        # 添加3条在最近1小时内的消息
+        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=1, timestamp=datetime.now(timezone.utc) - timedelta(minutes=10)))
+        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=2, timestamp=datetime.now(timezone.utc) - timedelta(minutes=20)))
+        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=3, timestamp=datetime.now(timezone.utc) - timedelta(minutes=30)))
+        # 添加1条在1小时外的消息
+        db.add(MessageLog(group_id=group_id, user_id=user_id, message_id=4, timestamp=datetime.now(timezone.utc) - timedelta(hours=2)))
+        db.commit()
+
+    # --- 2. 执行与验证 ---
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+
+        # 第一次调用，应该会查询数据库
+        mock_update.message.text = "/stats"
+        # 第一次调用，应该会查询数据库
+        mock_update.message.text = "/stats"
+        await process_event("command", mock_update, mock_context)
+        mock_update.effective_message.reply_text.assert_called_once_with("Messages in last 1 hour: 3")
+        mock_update.effective_message.reply_text.reset_mock()
+
+        # 第二次调用，应该使用缓存
+        # 为验证缓存，我们直接删除所有日志记录
+        with test_db_session_factory() as db:
+            db.query(MessageLog).delete()
+            db.commit()
+
+        # 再次调用 process_event
+        # 如果缓存有效，它应该仍然返回 '3'，而不是从空的数据库中查询并返回 '0'
+        await process_event("command", mock_update, mock_context)
+        mock_update.effective_message.reply_text.assert_called_once_with("Messages in last 1 hour: 3")
 
 
 async def test_rule_priority_execution_order(mock_update, mock_context, test_db_session_factory):

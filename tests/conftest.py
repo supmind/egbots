@@ -30,10 +30,10 @@ def mock_context(test_db_session_factory):
     这个 context 被预先填充了测试所需的关键对象，如数据库会话工厂和模拟的 bot 对象。
     """
     context = MagicMock()
-    context.bot_data = {
-        'rule_cache': {},
-        'session_factory': test_db_session_factory
-    }
+    # 修复：确保 bot_data 总是被初始化为一个字典
+    context.bot_data = {}
+    context.bot_data['rule_cache'] = {}
+    context.bot_data['session_factory'] = test_db_session_factory
     context.bot = MagicMock()
     context.bot.send_message = AsyncMock()
     context.bot.restrict_chat_member = AsyncMock()
@@ -64,6 +64,7 @@ def mock_update():
     mock_chat.id = -1001
 
     mock_message = MagicMock()
+    mock_message.message_id = 9999 # 为 message_id 提供一个具体的整数值
     mock_message.reply_text = AsyncMock()
     mock_message.delete = AsyncMock()
     mock_message.chat = mock_chat

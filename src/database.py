@@ -49,10 +49,29 @@ class Group(Base):
     rules = relationship("Rule", back_populates="group", cascade="all, delete-orphan")
     state_variables = relationship("StateVariable", back_populates="group", cascade="all, delete-orphan")
     logs = relationship("Log", back_populates="group", cascade="all, delete-orphan")
+    message_logs = relationship("MessageLog", back_populates="group", cascade="all, delete-orphan")
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式。"""
         return f"<Group(id={self.id}, name='{self.name}')>"
+
+
+class MessageLog(Base):
+    """
+    模型类：存储消息记录，用于统计分析。
+    """
+    __tablename__ = 'message_logs'
+
+    id = Column(Integer, primary_key=True)
+    group_id = Column(BigInteger, ForeignKey('groups.id', ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(BigInteger, nullable=False, index=True)
+    message_id = Column(BigInteger, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    group = relationship("Group", back_populates="message_logs")
+
+    def __repr__(self):
+        return f"<MessageLog(id={self.id}, user_id={self.user_id}, group_id={self.group_id})>"
 
 
 class Rule(Base):

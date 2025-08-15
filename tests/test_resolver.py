@@ -72,7 +72,9 @@ def mock_update() -> MagicMock:
 
 async def test_resolve_simple_context_variable(mock_update):
     """测试从 Update 对象中解析简单的变量。"""
-    resolver = VariableResolver(mock_update, Mock(), Mock(), {})
+    mock_context = Mock()
+    mock_context.bot_data = {}
+    resolver = VariableResolver(mock_update, mock_context, Mock(), {})
 
     # 测试有效路径
     assert await resolver.resolve("effective_user.id") == 123
@@ -94,8 +96,10 @@ async def test_resolve_command_variable():
         from_user=mock_user
     )
     mock_update_with_command = Update(update_id=1000, message=mock_message)
+    mock_context = Mock()
+    mock_context.bot_data = {}
 
-    resolver = VariableResolver(mock_update_with_command, Mock(), Mock(), {})
+    resolver = VariableResolver(mock_update_with_command, mock_context, Mock(), {})
 
     assert await resolver.resolve("command.name") == "test_command"
     assert await resolver.resolve("command.arg_count") == 2
@@ -112,8 +116,10 @@ async def test_resolve_command_variable_on_non_command():
     # 消息文本不以 "/" 开头
     mock_message = Message(message_id=3, date=None, chat=mock_chat, text="this is not a command", from_user=mock_user)
     mock_update_no_command = Update(update_id=1001, message=mock_message)
+    mock_context = Mock()
+    mock_context.bot_data = {}
 
-    resolver = VariableResolver(mock_update_no_command, Mock(), Mock(), {})
+    resolver = VariableResolver(mock_update_no_command, mock_context, Mock(), {})
 
     # 所有 command.* 变量都应返回 None
     assert await resolver.resolve("command.name") is None
@@ -130,8 +136,10 @@ async def test_resolve_persistent_variable_from_db(mock_update, test_db_session_
         session.add(StateVariable(group_id=-1001, user_id=555, name="user_int", value="100")) # 纯数字字符串
         session.add(StateVariable(group_id=-1001, user_id=123, name="user_negative_int", value="-50")) # 负数字符串
         session.commit()
+        mock_context = Mock()
+        mock_context.bot_data = {}
 
-        resolver = VariableResolver(mock_update, Mock(), session, {})
+        resolver = VariableResolver(mock_update, mock_context, session, {})
 
         # 1. 解析各种类型的变量
         assert await resolver.resolve("vars.group.group_str") == "a string"
@@ -157,8 +165,10 @@ async def test_resolve_persistent_variable_edge_cases(path, expected_value, mock
         # 准备一个字典类型的变量
         session.add(StateVariable(group_id=-1001, user_id=None, name="settings", value=json.dumps({"enabled": True, "mode": "strict"})))
         session.commit()
+        mock_context = Mock()
+        mock_context.bot_data = {}
 
-        resolver = VariableResolver(mock_update, Mock(), session, {})
+        resolver = VariableResolver(mock_update, mock_context, session, {})
         assert await resolver.resolve(path) == expected_value
 
 async def test_resolve_persistent_variable_numeric_string_bug(mock_update, test_db_session_factory):
@@ -169,8 +179,10 @@ async def test_resolve_persistent_variable_numeric_string_bug(mock_update, test_
         # 准备一个值为纯数字字符串（不是有效的JSON）的变量
         session.add(StateVariable(group_id=-1001, user_id=None, name="numeric_str_val", value="12345"))
         session.commit()
+        mock_context = Mock()
+        mock_context.bot_data = {}
 
-        resolver = VariableResolver(mock_update, Mock(), session, {})
+        resolver = VariableResolver(mock_update, mock_context, session, {})
 
         # 验证解析器是否能正确地将其转换为整数，而不是返回字符串 "12345"
         resolved_value = await resolver.resolve("vars.group.numeric_str_val")
@@ -185,14 +197,17 @@ async def test_resolve_deeply_nested_context_variable():
     replying_user = User(id=123, is_bot=False, first_name="Test")
     replying_message = Message(message_id=11, date=None, chat=Chat(id=-1001, type="group"), text="a reply", from_user=replying_user, reply_to_message=replied_to_message)
     mock_update_with_reply = Update(update_id=1002, message=replying_message)
+    mock_context = Mock()
+    mock_context.bot_data = {}
 
-    resolver = VariableResolver(mock_update_with_reply, Mock(), Mock(), {})
+    resolver = VariableResolver(mock_update_with_reply, mock_context, Mock(), {})
     resolved_id = await resolver.resolve("message.reply_to_message.from_user.id")
     assert resolved_id == 555
 
 async def test_resolve_computed_is_admin_with_caching(mock_update):
     """测试 user.is_admin 计算属性的解析和缓存。"""
     mock_context = Mock()
+    mock_context.bot_data = {}
     mock_context.bot.get_chat_member = AsyncMock()
 
     # 第一次调用，模拟返回管理员
@@ -217,6 +232,7 @@ async def test_resolve_computed_is_admin_with_caching(mock_update):
 async def test_resolve_computed_is_admin_on_api_error(mock_update):
     """测试当 get_chat_member API 调用失败时，user.is_admin 的回退行为。"""
     mock_context = Mock()
+    mock_context.bot_data = {}
     # 模拟 API 调用引发异常
     mock_context.bot.get_chat_member = AsyncMock(side_effect=Exception("Telegram API is down"))
 
