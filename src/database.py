@@ -147,6 +147,7 @@ class Rule(Base):
 
     # ORM 关系：与 Group 模型建立多对一关系
     group = relationship("Group", back_populates="rules")
+    state_variables = relationship("StateVariable", back_populates="rule", cascade="all, delete-orphan")
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式。"""
@@ -160,32 +161,38 @@ class StateVariable(Base):
     """
     __tablename__ = 'state_variables'
 
-    # 复合唯一约束：确保在同一群组中，变量名对于特定用户（或全局对群组）是唯一的。
+    # 复合唯一约束：确保在同一群组中，变量名对于特定用户（或全局对群组）和特定规则是唯一的。
     __table_args__ = (
-        UniqueConstraint('group_id', 'user_id', 'name', name='_group_user_name_uc'),
+        UniqueConstraint('group_id', 'user_id', 'rule_id', 'name', name='_group_user_rule_name_uc'),
     )
 
     id = Column(Integer, primary_key=True, comment="变量的唯一标识符 (自增主键)")
     group_id = Column(BigInteger, ForeignKey('groups.id', ondelete="CASCADE"),
                       nullable=False, index=True, comment="关联的群组ID")
 
-    # 关键设计：user_id 可以为 NULL。
-    # - 当 user_id 不为 NULL 时，这是一个“用户变量”。
-    # - 当 user_id 为 NULL 时，这是一个“群组变量”。
+    # 关键设计：user_id 和 rule_id 都可以为 NULL。
+    # - user_id 不为 NULL: 用户变量
+    # - user_id 为 NULL: 群组变量
+    # - rule_id 不为 NULL: 规则作用域变量
+    # - rule_id 为 NULL: 全局作用域变量
     user_id = Column(BigInteger, nullable=True, index=True,
                      comment="关联的用户ID (群组变量时为NULL)")
+    rule_id = Column(Integer, ForeignKey('rules.id', ondelete="CASCADE"),
+                     nullable=True, index=True, comment="关联的规则ID (全局变量时为NULL)")
 
     # 变量的核心数据
     name = Column(String(255), nullable=False, comment="变量的名称")
     value = Column(Text, nullable=False, comment="变量的值 (以文本形式存储)")
 
-    # ORM 关系：与 Group 模型建立多对一关系
+    # ORM 关系
     group = relationship("Group", back_populates="state_variables")
+    rule = relationship("Rule", back_populates="state_variables")
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式，并明确指出变量的作用域。"""
         scope = f"user={self.user_id}" if self.user_id else "group"
-        return f"<StateVariable(name='{self.name}', scope={scope}, group_id={self.group_id})>"
+        rule_scope = f"rule={self.rule_id}" if self.rule_id else "global"
+        return f"<StateVariable(name='{self.name}', scope={scope}, rule_scope={rule_scope}, group_id={self.group_id})>"
 
 
 class Verification(Base):

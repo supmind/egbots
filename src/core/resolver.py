@@ -29,7 +29,7 @@ class VariableResolver:
     通过将所有变量解析逻辑集中在此处，我们极大地简化了 `RuleExecutor` 的实现，
     并使得变量解析的行为（特别是缓存和数据获取）更易于管理和测试。
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, per_request_cache: Dict[str, Any]):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, per_request_cache: Dict[str, Any], rule_id: Optional[int] = None):
         """
         初始化变量解析器。
 
@@ -38,11 +38,13 @@ class VariableResolver:
             context: 当前事件的 Telegram `Context` 对象，主要用于访问 bot 实例以调用 API。
             db_session: 当前的 SQLAlchemy 数据库会话，用于查询持久化变量。
             per_request_cache: 一个在单次请求/事件处理生命周期内共享的字典，用于缓存高成本的计算结果（例如API调用）。
+            rule_id: 当前正在执行的规则的ID，用于变量作用域。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.per_request_cache = per_request_cache
+        self.rule_id = rule_id
         # 从 bot_data 获取共享的 stats_cache，如果不存在则创建一个新的
         if 'stats_cache' not in self.context.bot_data:
             self.context.bot_data['stats_cache'] = TTLCache(maxsize=500, ttl=60)
@@ -146,33 +148,43 @@ class VariableResolver:
     def _resolve_persistent_variable(self, path: str) -> Any:
         """
         解析 `vars.*` 相关的持久化变量，这些变量存储在数据库中。
-
-        此函数的核心是根据变量路径（如 `vars.user_12345.points`）动态地构建一个 SQLAlchemy 查询。
-        它支持以下几种格式:
-        - `vars.group.my_var`: 查找当前群组的变量（`user_id` 为 `NULL`）。
-        - `vars.user.my_var`: 查找当前群组内、**当前事件触发者**的变量。
-        - `vars.user_12345.my_var`: 查找当前群组内、`user_id` 为 `12345` 的特定用户的变量。
+        此方法现在支持规则作用域和全局作用域的变量。
         """
-        parts = path.split('.')
-        if len(parts) != 3: return None # 路径必须是 'vars.scope.name' 的形式
+        path_parts = path.split('.')
+        if len(path_parts) < 3: return None
 
-        _, scope_str, var_name = parts
+        # -- 作用域和变量名解析 --
+        # 检查是全局变量 (vars.global.scope.name) 还是规则内变量 (vars.scope.name)
+        if path_parts[1].lower() == 'global':
+            target_rule_id = None
+            if len(path_parts) < 4: return None # 必须是 vars.global.scope.name 的格式
+            scope_str = path_parts[2]
+            var_name = '.'.join(path_parts[3:])
+        else:
+            target_rule_id = self.rule_id
+            scope_str = path_parts[1]
+            var_name = '.'.join(path_parts[2:])
+
         scope_parts = scope_str.split('_')
         scope_name = scope_parts[0].lower()
-
         target_user_id = None
         # 如果作用域部分包含下划线（如 'user_12345'），则尝试从中解析出用户ID。
         if len(scope_parts) > 1:
+            if scope_name != 'user': # 只有用户作用域可以带ID
+                return None
             try:
-                # BUG 修复：之前使用 ''.join(scope_parts[1:]) 会错误地处理 'user_123_456' 这种情况。
-                # 正确的逻辑应该是只取下划线后的第一个部分作为ID。
                 target_user_id = int(scope_parts[1])
             except (ValueError, TypeError, IndexError):
                 logger.warning(f"在变量路径中发现无效的用户ID格式: {scope_str}")
                 return None
 
-        # 构建基础查询，首先按群组ID和变量名进行过滤。
-        query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
+        # 构建基础查询
+        logger.info(f"RESOLVER_DEBUG: group_id={self.update.effective_chat.id}, name={var_name}, rule_id={target_rule_id}")
+        query = self.db_session.query(StateVariable).filter_by(
+            group_id=self.update.effective_chat.id,
+            name=var_name,
+            rule_id=target_rule_id
+        )
 
         if scope_name == 'user':
             # 如果是用户作用域，需要进一步根据 user_id 过滤。
@@ -181,14 +193,11 @@ class VariableResolver:
             if user_id_to_query is not None:
                 query = query.filter_by(user_id=user_id_to_query)
             else:
-                # 如果既没有指定ID，也没有当前用户（例如在某些计划任务中），则无法解析用户变量。
-                return None
+                return None # 无法确定用户ID
         elif scope_name == 'group':
-            # 对于群组变量，user_id 字段在数据库中应为 NULL。
             query = query.filter(StateVariable.user_id.is_(None))
         else:
-            # 无效的作用域名称。
-            return None
+            return None # 无效的作用域
 
         variable = query.first()
         if not variable:
@@ -196,20 +205,11 @@ class VariableResolver:
 
         # 数据库中存储的是 JSON 字符串，因此需要反序列化。
         try:
-            # 尝试按标准 JSON 解析。
             return json.loads(variable.value)
         except json.JSONDecodeError:
-            # [健壮性设计] 如果 JSON 解析失败，则进入我们的“健壮性回退”逻辑。
-            # 这种情况可能发生在：
-            # 1. 变量是由旧版本的机器人或外部工具写入的，当时只存了简单的字符串或数字。
-            # 2. 管理员手动在数据库中修改了值。
-            # 我们的目标是尽可能地以符合用户直觉的方式去理解这些非标准数据，而不是直接抛出错误或返回 None。
             val_str = variable.value
-            # 健壮性改进：如果值不是有效的 JSON，但它是一个纯数字字符串（包括负数），
-            # 则应将其作为数字返回，以符合用户预期。例如，数据库中的 "123" 应该被当作数字 123 使用。
             if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
                 return int(val_str)
-            # 否则，将其作为普通字符串返回。这对于处理由其他系统写入的、非JSON格式的简单字符串值很有用。
             return val_str
 
     def _resolve_media_group_variable(self, path_lower: str) -> Any:

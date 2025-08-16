@@ -199,7 +199,51 @@ def get_var(executor: 'RuleExecutor', variable_path: str, default: Any = None, u
         return default
 
     variable = executor.db_session.query(StateVariable).filter_by(
-        group_id=group_id, user_id=db_user_id, name=var_name
+        group_id=group_id, user_id=db_user_id, name=var_name,
+        # 新增：将查询范围限定在当前规则的作用域内
+        rule_id=executor.rule_id
+    ).first()
+
+    if not variable:
+        return default
+
+    try:
+        return json.loads(variable.value)
+    except json.JSONDecodeError:
+        val_str = variable.value
+        if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
+            return int(val_str)
+        return val_str
+
+@builtin_function("get_global_var")
+def get_global_var(executor: 'RuleExecutor', variable_path: str, default: Any = None, user_id: Any = None) -> Any:
+    """
+    内置函数：从数据库中获取一个全局持久化变量的值。
+    """
+    if not isinstance(variable_path, str) or '.' not in variable_path:
+        logger.warning(f"get_global_var 的变量路径 '{variable_path}' 格式无效。")
+        return default
+
+    scope, var_name = variable_path.split('.', 1)
+    if not executor.update.effective_chat:
+        return default
+
+    group_id = executor.update.effective_chat.id
+    db_user_id = None
+
+    if scope.lower() == 'user':
+        target_user_id = executor._get_target_user_id(user_id)
+        if not target_user_id:
+            logger.warning("get_global_var 在 'user' 作用域下无法确定目标用户。")
+            return default
+        db_user_id = target_user_id
+    elif scope.lower() != 'group':
+        logger.warning(f"get_global_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
+        return default
+
+    # rule_id=None 表示查询全局变量
+    variable = executor.db_session.query(StateVariable).filter_by(
+        group_id=group_id, user_id=db_user_id, name=var_name, rule_id=None
     ).first()
 
     if not variable:
@@ -250,7 +294,7 @@ class RuleExecutor:
     执行过程就是从顶层的 `execute_rule` 方法开始，对AST进行深度优先遍历。
     当遇到一个节点时，就调用其对应的“访问”方法来处理它。这种模式将数据结构（AST）与作用于该结构的操作（执行逻辑）清晰地分离开来。
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule"):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule", rule_id: Optional[int] = None):
         """
         初始化规则执行器。
 
@@ -259,13 +303,15 @@ class RuleExecutor:
             context: 当前的 Telegram Context 对象。
             db_session: 当前的数据库会话。
             rule_name: 当前正在执行的规则的名称，用于日志记录。
+            rule_id: 当前正在执行的规则的ID，用于变量作用域。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.rule_name = rule_name
+        self.rule_id = rule_id
         self.per_request_cache: Dict[str, Any] = {}
-        self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache)
+        self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache, rule_id=self.rule_id)
 
     def _log_debug(self, message: str):
         """一个辅助函数，用于为调试日志消息自动添加规则名称前缀，便于追踪。"""
@@ -649,12 +695,30 @@ class RuleExecutor:
     async def set_var(self, variable_path: str, value: Any, user_id: Any = None):
         """
         动作：设置一个持久化变量并将其存入数据库。
+        这个变量的作用域被限定在当前的规则内。
 
         Args:
             variable_path (str): 变量的路径，必须是 'scope.name' 的格式，例如 "user.warns" 或 "group.config"。
             value: 要设置的值。可以是任何可JSON序列化的类型。如果值为 `null`，则会从数据库中删除该变量。
             user_id (optional): 目标用户的ID。此参数仅在作用域为 'user' 时有效。
         """
+        await self._set_var_generic(variable_path, value, user_id, rule_scoped=True)
+
+    @action("set_global_var")
+    async def set_global_var(self, variable_path: str, value: Any, user_id: Any = None):
+        """
+        动作：设置一个全局持久化变量并将其存入数据库。
+        这个变量的作用域是整个群组，可以被任何规则访问。
+
+        Args:
+            variable_path (str): 变量的路径，必须是 'scope.name' 的格式，例如 "user.warns" 或 "group.config"。
+            value: 要设置的值。可以是任何可JSON序列化的类型。如果值为 `null`，则会从数据库中删除该变量。
+            user_id (optional): 目标用户的ID。此参数仅在作用域为 'user' 时有效。
+        """
+        await self._set_var_generic(variable_path, value, user_id, rule_scoped=False)
+
+    async def _set_var_generic(self, variable_path: str, value: Any, user_id: Any, rule_scoped: bool):
+        """设置持久化变量的通用内部方法。"""
         if not isinstance(variable_path, str) or '.' not in variable_path:
             return logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效。")
         scope, var_name = variable_path.split('.', 1)
@@ -669,22 +733,25 @@ class RuleExecutor:
         elif scope.lower() != 'group':
             return logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
 
+        target_rule_id = self.rule_id if rule_scoped else None
+
         variable = self.db_session.query(StateVariable).filter_by(
-            group_id=group_id, user_id=db_user_id, name=var_name
+            group_id=group_id, user_id=db_user_id, name=var_name, rule_id=target_rule_id
         ).first()
 
         if value is None:
             if variable:
                 self.db_session.delete(variable)
-                logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被删除。")
+                logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}, rule: {target_rule_id}) 已被删除。")
         else:
             try: serialized_value = json.dumps(value)
             except TypeError as e: return logger.error(f"为变量 '{variable_path}' 序列化值时失败: {e}。值: {value}")
             if not variable:
-                variable = StateVariable(group_id=group_id, user_id=db_user_id, name=var_name)
+                variable = StateVariable(group_id=group_id, user_id=db_user_id, name=var_name, rule_id=target_rule_id)
             variable.value = serialized_value
             self.db_session.add(variable)
-            logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被设为: {serialized_value}")
+            self.db_session.flush() # 确保变量在同一事务中的后续查询中可见
+            logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}, rule: {target_rule_id}) 已被设为: {serialized_value}")
 
     @action("start_verification")
     async def start_verification(self):

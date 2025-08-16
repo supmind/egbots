@@ -123,7 +123,8 @@ async def test_process_event_with_broken_rule(MockRuleExecutor, mock_update, moc
     # 2. 验证好规则仍然被执行了
     MockRuleExecutor.assert_called_once()
     # 验证执行器是用好规则的解析结果初始化的
-    good_rule_ast = mock_context.bot_data['rule_cache'][-1001][0]
+    good_rule_tuple = mock_context.bot_data['rule_cache'][-1001][0]
+    good_rule_ast = good_rule_tuple[2] # AST现在是元组的第三个元素
     # 验证AST的关键部分是否与“Good Rule”匹配，而不是检查默认名称
     assert good_rule_ast.when_event == "message"
     action_call = good_rule_ast.then_block.statements[0].call

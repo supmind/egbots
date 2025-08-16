@@ -366,27 +366,30 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
             if chat_id not in rule_cache:
                 logger.info(f"缓存未命中：正在为群组 {chat_id} 从数据库加载并解析规则。")
                 rules_from_db = db_session.query(Rule).filter_by(group_id=chat_id, is_active=True).order_by(Rule.priority.desc()).all()
-                parsed_rules = []
+                # 缓存现在将存储 (rule_id, rule_name, parsed_rule_ast) 的元组
+                cached_rules = []
                 for db_rule in rules_from_db:
                     try:
-                        parsed_rules.append(RuleParser(db_rule.script).parse())
+                        parsed_ast = RuleParser(db_rule.script).parse()
+                        cached_rules.append((db_rule.id, db_rule.name, parsed_ast))
                     except RuleParserError as e:
                         logger.error(f"解析规则ID {db_rule.id} ('{db_rule.name}') 失败: {e}")
-                rule_cache[chat_id] = parsed_rules
-                logger.info(f"已为群组 {chat_id} 缓存 {len(parsed_rules)} 条已激活规则。")
+                rule_cache[chat_id] = cached_rules
+                logger.info(f"已为群组 {chat_id} 缓存 {len(cached_rules)} 条已激活规则。")
 
             rules_to_process = rule_cache.get(chat_id, [])
             if not rules_to_process: return
 
             logger.debug(f"[{chat_id}] Processing event '{event_type}' with {len(rules_to_process)} rules.")
-            for parsed_rule in rules_to_process:
+            for rule_id, rule_name, parsed_rule in rules_to_process:
                 if parsed_rule.when_event and parsed_rule.when_event.lower().startswith(event_type):
-                    logger.debug(f"[{chat_id}] Event '{event_type}' matches rule '{parsed_rule.name}'. Executing...")
+                    logger.debug(f"[{chat_id}] Event '{event_type}' matches rule '{rule_name}' (ID: {rule_id}). Executing...")
                     try:
-                        executor = RuleExecutor(update, context, db_session, parsed_rule.name)
+                        # 新增：将 rule_id 和 rule_name 传递给执行器
+                        executor = RuleExecutor(update, context, db_session, rule_name=rule_name, rule_id=rule_id)
                         await executor.execute_rule(parsed_rule)
                     except StopRuleProcessing:
-                        logger.info(f"规则 '{parsed_rule.name}' 请求停止处理后续规则。")
+                        logger.info(f"规则 '{rule_name}' 请求停止处理后续规则。")
                         break
                     except Exception as e:
                         logger.error(f"执行规则 '{parsed_rule.name}' 时发生错误: {e}", exc_info=True)
@@ -528,7 +531,8 @@ async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
 
             parsed_rule = RuleParser(db_rule.script).parse()
             mock_update = MockUpdate(chat_id=group_id)
-            executor = RuleExecutor(mock_update, context, db_session)
+            # 新增：将 rule_id 和 rule_name 传递给执行器
+            executor = RuleExecutor(mock_update, context, db_session, rule_name=db_rule.name, rule_id=db_rule.id)
             await executor.execute_rule(parsed_rule)
     except Exception as e:
         logger.error(f"执行计划任务 (规则ID: {rule_id}) 时发生严重错误: {e}", exc_info=True)
