@@ -36,9 +36,8 @@ from src.bot.handlers import (
     rules_handler,
     rule_on_off_handler,
     rule_help_handler,
-    cleanup_old_events,
-    sync_group_admins,
 )
+from src.bot.tasks import cleanup_old_events, sync_group_admins
 
 # ==================== 日志配置 ====================
 # 配置结构化日志，便于问题排查
@@ -70,34 +69,42 @@ async def load_scheduled_rules(application: Application):
                 try:
                     # 解析规则以检查是否为 `schedule` 类型的触发器
                     parsed_rule = RuleParser(rule.script).parse()
-                    if parsed_rule.when_event and parsed_rule.when_event.lower().startswith('schedule'):
-                        # 从 `schedule("...")` 中提取 Cron 表达式
-                        match = re.search(r'\("([^"]+)"\)', parsed_rule.when_event)
-                        if not match:
-                            logger.warning(f"无法从规则 {rule.id} 的 '{parsed_rule.when_event}' 中提取 Cron 表达式。")
-                            continue
-                        cron_expr = match.group(1)
+                    if not parsed_rule.when_events:
+                        continue
 
-                        # 使用唯一的 job_id (基于规则ID) 来避免重复添加或更新
-                        job_id = f"rule_{rule.id}"
+                    # 检查 when_events 列表中的任何一个事件是否是 schedule 类型
+                    for event_str in parsed_rule.when_events:
+                        if event_str.lower().startswith('schedule'):
+                            # 从 `schedule("...")` 中提取 Cron 表达式
+                            match = re.search(r'\("([^"]+)"\)', event_str)
+                            if not match:
+                                logger.warning(f"无法从规则 {rule.id} 的 '{event_str}' 中提取 Cron 表达式。")
+                                continue
 
-                        # 将 Cron 表达式的各部分映射到 add_job 的参数
-                        cron_parts = cron_expr.split()
-                        if len(cron_parts) != 5:
-                            logger.warning(f"规则 {rule.id} 的 Cron 表达式 '{cron_expr}' 格式无效，应包含5个部分。")
-                            continue
+                            cron_expr = match.group(1)
 
-                        cron_kwargs = dict(zip(['minute', 'hour', 'day', 'month', 'day_of_week'], cron_parts))
+                            # 使用唯一的 job_id (基于规则ID) 来避免重复添加或更新
+                            job_id = f"rule_{rule.id}"
 
-                        scheduler.add_job(
-                            scheduled_job_handler,
-                            'cron',
-                            id=job_id,
-                            replace_existing=True,
-                            kwargs={'rule_id': rule.id, 'group_id': rule.group_id},
-                            **cron_kwargs
-                        )
-                        count += 1
+                            # 将 Cron 表达式的各部分映射到 add_job 的参数
+                            cron_parts = cron_expr.split()
+                            if len(cron_parts) != 5:
+                                logger.warning(f"规则 {rule.id} 的 Cron 表达式 '{cron_expr}' 格式无效，应包含5个部分。")
+                                continue
+
+                            cron_kwargs = dict(zip(['minute', 'hour', 'day', 'month', 'day_of_week'], cron_parts))
+
+                            scheduler.add_job(
+                                scheduled_job_handler,
+                                'cron',
+                                id=job_id,
+                                replace_existing=True,
+                                kwargs={'rule_id': rule.id, 'group_id': rule.group_id},
+                                **cron_kwargs
+                            )
+                            count += 1
+                            # 假设一个规则只有一个 schedule 触发器，找到后即可中断
+                            break
                 except Exception as e:
                     logger.error(f"加载或解析规则ID {rule.id} ('{rule.name}') 失败: {e}", exc_info=True)
             logger.info(f"成功加载并注册了 {count} 条计划任务规则。")

@@ -369,3 +369,42 @@ async def test_resolve_time_unix(mock_update):
     # 允许最多2秒的误差，以应对测试执行的延迟
     assert abs(resolved_timestamp - expected_timestamp) <= 2
     assert isinstance(resolved_timestamp, int)
+
+
+async def test_stats_cache_concurrency_issue(mock_update, test_db_session_factory, mocker):
+    """
+    一个专门的测试，用于演示共享的 stats_cache 在并发访问下可能出现的竞争条件。
+    注意：这个测试旨在“证明问题的存在”，而不是“解决问题”。
+    在没有锁机制的情况下，我们预期底层的数据库查询会被多次调用。
+    """
+    import asyncio
+
+    with test_db_session_factory() as session:
+        # 准备数据
+        session.add(EventLog(group_id=-1001, user_id=123, event_type='message', timestamp=datetime.now(timezone.utc)))
+        session.commit()
+
+        stats_cache = TTLCache(maxsize=100, ttl=60)
+        mock_context = Mock()
+        mock_context.bot_data = {'stats_cache': stats_cache}
+
+        # 监视数据库查询的执行次数
+        query_spy = mocker.spy(session, 'query')
+
+        # 创建多个解析器实例，它们共享同一个 cache 对象
+        resolvers = [VariableResolver(mock_update, mock_context, session, {}) for _ in range(5)]
+
+        # 并发执行对同一个统计变量的解析
+        tasks = [resolver.resolve("user.stats.messages_1h") for resolver in resolvers]
+        results = await asyncio.gather(*tasks)
+
+        # 验证所有解析结果都正确
+        for r in results:
+            assert r == 1
+
+        # **核心断言**:
+        # 在一个没有锁的、非线程安全的缓存实现中，当多个协程在几乎完全相同的时间
+        # 检查缓存（`if key in cache`）时，它们都可能会发现缓存未命中。
+        # 结果是，它们都会继续执行昂贵的数据库查询，而不是只有一个查询，其他的从缓存中读取。
+        # 因此，我们断言查询的调用次数大于1，以证明这个问题的存在。
+        assert query_spy.call_count > 1, "数据库查询被调用了多次，表明存在缓存竞争条件"

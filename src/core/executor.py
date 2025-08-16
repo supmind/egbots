@@ -280,7 +280,9 @@ class RuleExecutor:
         """根据语句的AST节点类型，将其分派到正确的处理方法。"""
         stmt_type = type(stmt)
         if stmt_type is Assignment:
-            await self._visit_assignment(stmt, current_scope)
+            # 对于作为独立语句的赋值，我们需要计算其值，然后执行赋值
+            value = await self._evaluate_expression(stmt.expression, current_scope)
+            await self._visit_assignment(stmt, current_scope, value)
         elif stmt_type is ActionCallStmt:
             self._log_debug(f"正在执行动作: {stmt.call.action_name}")
             await self._visit_action_call_stmt(stmt, current_scope)
@@ -328,9 +330,11 @@ class RuleExecutor:
             if stmt.loop_var in current_scope:
                 del current_scope[stmt.loop_var]
 
-    async def _visit_assignment(self, stmt: Assignment, current_scope: Dict[str, Any]):
-        """处理对变量、属性和下标的赋值操作。"""
-        value = await self._evaluate_expression(stmt.expression, current_scope)
+    async def _visit_assignment(self, stmt: Assignment, current_scope: Dict[str, Any], value: Any):
+        """
+        处理对变量、属性和下标的赋值操作。
+        这个方法现在接受一个预先计算好的 `value`，以避免重复计算。
+        """
         target_expr = stmt.variable
 
         if isinstance(target_expr, Variable):
@@ -400,6 +404,10 @@ class RuleExecutor:
                 return target[index] if target is not None else None
             except (IndexError, KeyError, TypeError):
                 return None
+        if expr_type is Assignment:
+            value = await self._evaluate_expression(expr.expression, current_scope)
+            await self._visit_assignment(expr, current_scope, value)
+            return value
         if expr_type is BinaryOp: return await self._visit_binary_op(expr, current_scope)
         if expr_type is ActionCallExpr: return await self._visit_function_call_expr(expr, current_scope)
         if expr_type is ListConstructor:

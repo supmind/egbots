@@ -578,6 +578,52 @@ async def test_assignment_to_property_and_index():
     assert calls[0].args[0] == 'new'
     assert calls[1].args[0] == "99"
 
+
+@pytest.mark.asyncio
+async def test_chained_assignment_and_return_value():
+    """
+    TDD 测试: 验证链式赋值 (`a = b = 5`) 的正确性。
+    这个测试专门用于暴露“赋值表达式不返回值”的 bug。
+    """
+    script = """
+    a = 0;
+    b = 0;
+    c = a = b = 10; // a, b, 和 c 都应该是 10
+    reply(a);
+    reply(b);
+    reply(c);
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, Mock())
+
+    calls = mock_update.effective_message.reply_text.call_args_list
+    assert len(calls) == 3, "Reply应该被调用三次"
+    # 在修复 bug 之前，c 的值会是 None，导致第三个断言失败
+    assert calls[0].args[0] == "10", "变量 'a' 的值应该是 10"
+    assert calls[1].args[0] == "10", "变量 'b' 的值应该是 10"
+    assert calls[2].args[0] == "10", "变量 'c' 的值应该是 10 (赋值表达式的返回值)"
+
+
+@pytest.mark.asyncio
+async def test_assignment_to_null_property_fails_gracefully(caplog):
+    """测试对一个 null 对象的属性进行赋值时，系统能够优雅地失败并记录警告。"""
+    script = """
+    my_null_var = null;
+    my_null_var.some_prop = "a value"; // 这行应该会失败
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    with caplog.at_level('WARNING'):
+        await _execute_then_block(script, mock_update, Mock())
+
+    # 验证没有消息被发送
+    mock_update.effective_message.reply_text.assert_not_called()
+    # 验证记录了警告
+    assert len(caplog.records) == 1
+    assert "无法对空对象(null)的属性或下标进行赋值" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_continue_statement_in_loop():
     """测试 continue 语句能否正确地跳过当前迭代。"""
