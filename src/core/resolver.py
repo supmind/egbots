@@ -265,25 +265,28 @@ class VariableResolver:
 
         since_time = datetime.now(timezone.utc) - delta
 
-        # 构建数据库查询
-        query = self.db_session.query(func.count(EventLog.id)).filter(
+        base_query = self.db_session.query(func.count(EventLog.id)).filter(
             EventLog.group_id == self.update.effective_chat.id,
             EventLog.timestamp >= since_time
         )
 
         # 根据统计类型过滤事件
         if stat_type == 'messages':
-            query = query.filter(EventLog.event_type.in_(['message', 'command', 'photo', 'video', 'document', 'media_group']))
+            type_filter = EventLog.event_type.in_(['message', 'command', 'photo', 'video', 'document', 'media_group'])
+            base_query = base_query.filter(type_filter)
         elif stat_type == 'joins':
-            query = query.filter(EventLog.event_type == 'user_join')
+            base_query = base_query.filter(EventLog.event_type == 'user_join')
         elif stat_type == 'leaves':
-            query = query.filter(EventLog.event_type == 'user_leave')
+            base_query = base_query.filter(EventLog.event_type == 'user_leave')
 
         # 如果是用户统计，则按用户ID过滤
         if scope == 'user':
-            query = query.filter(EventLog.user_id == self.update.effective_user.id)
+            if not self.update.effective_user: return 0
+            final_query = base_query.filter(EventLog.user_id == self.update.effective_user.id)
+        else: # group scope
+            final_query = base_query
 
-        count = query.scalar() or 0
+        count = final_query.scalar() or 0
 
         # 将结果存入缓存
         self.stats_cache[cache_key] = count

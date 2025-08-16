@@ -65,15 +65,19 @@ async def test_unit_verification_wrong_answer_with_retries(mock_callback_update,
     mock_callback_update.callback_query.from_user.id = user_id
     mock_context.job_queue.get_jobs_by_name.return_value = []
 
-    # Patch the helper function that sends a new challenge
-    with patch('src.bot.handlers._send_verification_challenge', new_callable=AsyncMock) as mock_send_challenge:
+    # Patch the image generation to avoid actual image processing
+    with patch('src.bot.handlers.generate_math_image') as mock_generate_image:
+        # 模拟 generate_math_image 的返回值
+        mock_generate_image.return_value = b"imagedata"
         await verification_callback_handler(mock_callback_update, mock_context)
 
-        mock_callback_update.callback_query.edit_message_text.assert_called_once_with(
-            text="回答错误！您还有 2 次机会。正在为您生成新问题..."
-        )
-        # 修复：使用 ANY 来匹配动态创建的 db session 对象
-        mock_send_challenge.assert_awaited_once_with(user_id, group_id, mock_context, ANY)
+        # 验证 edit_message_media 被调用，而不是 edit_message_text
+        mock_callback_update.callback_query.edit_message_media.assert_called_once()
+
+        # 验证数据库中的尝试次数已更新
+        with test_db_session_factory() as db:
+            v = db.query(Verification).one()
+            assert v.attempts_made == 2
 
 async def test_unit_verification_failure_and_kick(mock_callback_update, mock_context, test_db_session_factory):
     """

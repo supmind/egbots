@@ -29,7 +29,7 @@ async def test_reload_rules_by_admin(mock_update, mock_context):
 
     # Verify
     assert -1001 not in mock_context.bot_data['rule_cache']
-    mock_context.bot.get_chat_member.assert_called_once_with(-1001, 123)
+    mock_context.bot.get_chat_member.assert_called_once_with(chat_id=-1001, user_id=123)
     mock_update.message.reply_text.assert_called_once_with("✅ 规则缓存已成功清除！")
 
 
@@ -45,7 +45,7 @@ async def test_reload_rules_by_non_admin(mock_update, mock_context):
 
     # Verify
     assert -1001 in mock_context.bot_data['rule_cache'] # Cache should not be cleared
-    mock_context.bot.get_chat_member.assert_called_once_with(-1001, 123)
+    mock_context.bot.get_chat_member.assert_called_once_with(chat_id=-1001, user_id=123)
     mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
 
 
@@ -126,10 +126,10 @@ async def test_process_event_with_broken_rule(MockRuleExecutor, mock_update, moc
     good_rule_tuple = mock_context.bot_data['rule_cache'][-1001][0]
     good_rule_ast = good_rule_tuple[2]
     # 验证AST的关键部分是否与“Good Rule”匹配
-    self.assertEqual(good_rule_ast.when_events, ["message"])
+    assert good_rule_ast.when_events == ["message"]
     action_call = good_rule_ast.then_block.statements[0].call
-    self.assertEqual(action_call.action_name, "reply")
-    self.assertEqual(action_call.args[0].value, "good")
+    assert action_call.action_name == "reply"
+    assert action_call.args[0].value == "good"
 
 async def test_verification_timeout_handler(mock_context, test_db_session_factory):
     """测试验证超时处理器是否能正确地踢出用户并清理数据库。"""
@@ -177,7 +177,7 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
         await process_event("command", mock_update, mock_context)
 
     # Verification (First Call)
-    assert "检测到新群组" in caplog.text
+        assert "正在创建并植入默认规则" in caplog.text
     assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
     # The number of loaded rules should match the number of default rules.

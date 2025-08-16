@@ -39,6 +39,17 @@ def _get_or_create_user(db_session: Session, user: TelegramUser) -> User:
         logger.info(f"数据库中未找到用户 {user.id}，已自动创建。")
     return db_user
 
+async def _is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """一个辅助函数，用于检查事件发起者是否是群组管理员。"""
+    if not update.effective_chat or not update.effective_user:
+        return False
+    try:
+        member = await context.bot.get_chat_member(chat_id=update.effective_chat.id, user_id=update.effective_user.id)
+        return member.status in ['creator', 'administrator']
+    except Exception as e:
+        logger.error(f"无法获取用户 {update.effective_user.id} 的管理员状态: {e}")
+        return False
+
 def _seed_rules_if_new_group(chat_id: int, db_session: Session) -> bool:
     """检查群组是否存在，如果不存在，则创建群组并为其植入默认规则集。"""
     group = db_session.query(Group).filter_by(id=chat_id).first()
@@ -152,8 +163,28 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     await process_event("edited_message", update, context)
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理图片消息。"""
-    await process_event("photo", update, context)
+    """处理图片消息，并为媒体组进行聚合。"""
+    if update.message and update.message.media_group_id:
+        aggregator: Dict[str, List[Message]] = context.bot_data['media_group_aggregator']
+        jobs: Dict[str, asyncio.Task] = context.bot_data['media_group_jobs']
+
+        media_group_id = str(update.message.media_group_id)
+
+        if media_group_id not in aggregator:
+            aggregator[media_group_id] = []
+            # 为这个新的媒体组安排一个延迟处理任务
+            jobs[media_group_id] = context.job_queue.run_once(
+                _process_aggregated_media_group,
+                when=timedelta(seconds=2),
+                data={'media_group_id': media_group_id},
+                name=f"media_group_{media_group_id}"
+            )
+            logger.debug(f"为新的媒体组 {media_group_id} 创建了聚合列表并安排了任务。")
+
+        aggregator[media_group_id].append(update.message)
+        logger.debug(f"已将消息 {update.message.message_id} 添加到媒体组 {media_group_id}。")
+    else:
+        await process_event("photo", update, context)
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理视频消息。"""
@@ -188,34 +219,44 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reload_rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /reload_rules 命令，用于手动清除指定群组的规则缓存。"""
-    if not update.effective_chat: return
+    if not update.effective_chat or not await _is_user_admin(update, context):
+        return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+
     chat_id = update.effective_chat.id
     if chat_id in context.bot_data.get('rule_cache', {}):
         del context.bot_data['rule_cache'][chat_id]
-        await update.message.reply_text("规则缓存已清除。下次事件触发时将从数据库重新加载。")
+        await update.message.reply_text("✅ 规则缓存已成功清除！")
     else:
         await update.message.reply_text("该群组没有活动的规则缓存。")
 
 async def rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /rules 命令，列出当前群组的所有规则。"""
-    if not update.effective_chat: return
+    if not update.effective_chat or not await _is_user_admin(update, context):
+        return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+
     session_factory: sessionmaker = context.bot_data['session_factory']
     with session_scope(session_factory) as db:
         rules = db.query(Rule).filter_by(group_id=update.effective_chat.id).order_by(Rule.id).all()
         if not rules:
             await update.message.reply_text("该群组没有定义任何规则。")
             return
-        message = "当前群组规则列表:\n\n"
+        message = "<b>本群组的规则列表:</b>\n\n"
         for r in rules:
-            status = "✅" if r.is_active else "❌"
-            message += f"`{r.id}`: {status} *{r.name}* (P: `{r.priority}`)\n"
-        await update.message.reply_text(message, parse_mode='Markdown')
+            status = "✅ [激活]" if r.is_active else "❌ [禁用]"
+            message += f"• <code>{r.id}:</code> {status} {r.name}\n"
+        await update.message.reply_text(message, parse_mode='HTML')
 
 async def rule_on_off_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /ruleon 和 /ruleoff 命令。"""
-    if not update.effective_chat or not context.args: return
+    if not update.effective_chat or not await _is_user_admin(update, context):
+        return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+
     command = update.message.text.split()[0].lower()
     enable = command == "/ruleon"
+
+    if not context.args:
+        return await update.message.reply_text(f"用法: `{command} <规则ID>`")
+
     try:
         rule_id = int(context.args[0])
         session_factory: sessionmaker = context.bot_data['session_factory']
@@ -229,23 +270,77 @@ async def rule_on_off_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             # 清除缓存以使更改立即生效
             if update.effective_chat.id in context.bot_data.get('rule_cache', {}):
                 del context.bot_data['rule_cache'][update.effective_chat.id]
-            status = "启用" if enable else "禁用"
-            await update.message.reply_text(f"规则 {rule_id} *{rule.name}* 已被{status}。", parse_mode='Markdown')
+            status = "✅ 启用" if enable else "❌ 禁用"
+            await update.message.reply_text(f"成功将规则 “{rule.name}” (ID: {rule_id}) 的状态更新为: {status}。")
     except (ValueError, IndexError):
-        await update.message.reply_text("用法: `/ruleon <ID>` 或 `/ruleoff <ID>`")
+        await update.message.reply_text(f"用法: `{command} <规则ID>`")
 
 async def rule_help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /rulehelp 命令，显示规则帮助信息。"""
-    help_text = "这是一个规则管理机器人..." # 省略详细帮助文本
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    if not update.effective_chat or not await _is_user_admin(update, context):
+        return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+
+    session_factory: sessionmaker = context.bot_data['session_factory']
+    if not context.args:
+        return await update.message.reply_text("用法: /rulehelp <规则ID>")
+
+    try:
+        rule_id = int(context.args[0])
+        with session_scope(session_factory) as db:
+            rule = db.query(Rule).filter_by(id=rule_id, group_id=update.effective_chat.id).one_or_none()
+            if not rule:
+                return await update.message.reply_text(f"错误：未找到ID为 {rule_id} 的规则。")
+
+            status = "✅ 激活" if rule.is_active else "❌ 禁用"
+            message = (
+                f"<b>规则详情 (ID: {rule.id})</b>\n"
+                f"<b>名称:</b> {rule.name}\n"
+                f"<b>状态:</b> {status}\n"
+                f"<b>优先级:</b> {rule.priority}\n"
+                f"<b>描述:</b>\n{rule.description or '未提供'}\n\n"
+                f"<b>脚本内容:</b>\n<pre>{rule.script}</pre>"
+            )
+            await update.message.reply_text(message, parse_mode='HTML')
+    except (ValueError, IndexError):
+        await update.message.reply_text("用法: /rulehelp <规则ID>")
 
 # =================== 回调处理器 ===================
 
 async def _process_aggregated_media_group(context: ContextTypes.DEFAULT_TYPE):
     """处理聚合后的媒体组。"""
-    logger.info("处理聚合媒体组...")
-    # Placeholder
-    pass
+    job = context.job
+    if not job or not job.data:
+        return
+
+    media_group_id = job.data['media_group_id']
+    aggregator: Dict[str, List[Message]] = context.bot_data['media_group_aggregator']
+
+    messages = aggregator.pop(media_group_id, [])
+    if not messages:
+        return
+
+    logger.info(f"处理媒体组 {media_group_id}，包含 {len(messages)} 条消息。")
+
+    # 创建一个合成的 Update 对象来代表整个媒体组
+    # 我们使用第一条消息作为基础
+    base_message = messages[0]
+
+    # 构建一个模拟的 Update 对象
+    class MediaGroupUpdate:
+        def __init__(self, messages: List[Message]):
+            self.media_group_messages = messages
+            self.effective_chat = base_message.chat
+            self.effective_user = base_message.from_user
+            # effective_message 设为第一条消息，以便 reply 等动作可以工作
+            self.effective_message = base_message
+            self.update_id = base_message.message_id # 使用一个消息ID作为代表
+
+    # 创建实例并调用 process_event
+    media_group_update = MediaGroupUpdate(messages)
+    await process_event('media_group', media_group_update, context)
+
+    # 清理 job 记录
+    context.bot_data.get('media_group_jobs', {}).pop(media_group_id, None)
 
 async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
     """计划任务的统一入口点。由 APScheduler 调用。"""
@@ -270,7 +365,33 @@ async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
 
 async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
     """处理用户验证超时的任务。"""
-    logger.info("处理验证超时...")
+    job = context.job
+    if not job or not job.data:
+        return
+
+    group_id = job.data.get("group_id")
+    user_id = job.data.get("user_id")
+
+    logger.info(f"用户 {user_id} 在群组 {group_id} 的验证已超时。")
+
+    session_factory: sessionmaker = context.bot_data['session_factory']
+    with session_scope(session_factory) as db:
+        verification = db.query(Verification).filter_by(group_id=group_id, user_id=user_id).first()
+        if verification:
+            try:
+                await context.bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+                await context.bot.unban_chat_member(chat_id=group_id, user_id=user_id)
+                await context.bot.send_message(chat_id=user_id, text=f"您在群组 (ID: {group_id}) 的验证已超时，已被移出群组。")
+            except Exception as e:
+                logger.error(f"验证超时后踢出用户 {user_id} 时失败: {e}")
+            finally:
+                db.delete(verification)
+                db.commit()
+
+
+async def _send_verification_challenge(context: ContextTypes.DEFAULT_TYPE, group_id: int, user_id: int, attempts: int):
+    """发送新的人机验证问题。"""
+    logger.info(f"为用户 {user_id} 在群组 {group_id} 发送新的人机验证，当前尝试次数: {attempts}")
     # This is a placeholder, real implementation would go here.
     pass
 
@@ -308,7 +429,10 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
                 db.delete(verification)
             else:
                 # 生成新的验证码并更新消息
-                new_correct_answer, image_bytes = generate_math_image()
+                num1 = random.randint(1, 10)
+                num2 = random.randint(1, 10)
+                new_correct_answer = num1 + num2
+                image_bytes = generate_math_image(f"{num1} + {num2} = ?")
                 verification.correct_answer = str(new_correct_answer)
 
                 keyboard = InlineKeyboardMarkup.from_row([
