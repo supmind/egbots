@@ -52,9 +52,7 @@ class MockUpdate:
 def _seed_rules_if_new_group(group_id: int, db_session: Session) -> bool:
     """
     检查一个群组是否为新加入的。如果是，则为其在数据库中创建记录，并预置一套默认规则。
-    这是一个提升用户初次体验（Onboarding Experience）的关键功能。
-    它确保了当机器人被添加到一个全新的群组时，它不是一个“空”的、无法响应的机器人，
-    而是立即拥有一套实用的、预先配置好的默认管理规则（如欢迎新成员），从而能够“开箱即用”。
+    这是一个提升用户初次体验的关键功能，确保机器人在加入任何群组后都能“开箱即用”。
 
     Args:
         group_id (int): 要检查的群组ID。
@@ -288,18 +286,7 @@ async def _process_aggregated_media_group(context: ContextTypes.DEFAULT_TYPE):
     if media_group_id in jobs: del jobs[media_group_id]
 
 async def _handle_media_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    处理属于媒体组的单个媒体消息，将其加入聚合器并设置延迟处理任务。
-
-    [核心逻辑] Telegram 在发送一个媒体组（例如，一次性发送多张图片）时，会为每一张图片单独发送一个 `Update`。
-    这些 `Update` 共享同一个 `media_group_id`。如果我们对每个 `Update` 都独立触发规则，就会导致规则被意外执行多次。
-
-    此函数通过一个巧妙的“延迟聚合”技巧来解决这个问题：
-    1.  当收到媒体组的第一条消息时，我们将其存入一个聚合器字典 `aggregator`，并启动一个短暂的（例如500毫秒）计时器。
-    2.  在该计时器到期前，后续属于同一个媒体组的消息会不断被添加到聚合器中。
-    3.  计时器到期后，`_process_aggregated_media_group` 函数会被调用。此时，我们已经收集到了该媒体组的所有消息。
-    4.  然后，我们将整个消息列表作为一个整体，用一个特殊的 `media_group` 事件类型来触发一次规则处理。
-    """
+    """处理属于媒体组的单个媒体消息，将其加入聚合器并设置延迟处理任务。"""
     if not update.message or not update.message.media_group_id: return
 
     media_group_id = update.message.media_group_id
@@ -326,21 +313,6 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
 
     无论是什么类型的事件（新消息、用户加入、命令等），最终都会被路由到这里进行统一处理。
     它的主要职责包括：数据库会话管理、新群组初始化、规则缓存处理、规则匹配与执行，以及健壮的错误处理。
-
-    [核心流程]
-    1.  **获取上下文**: 获取 `chat_id` 和数据库会话。
-    2.  **数据记录**: 记录事件日志，并确保用户数据在数据库中是最新的。
-    3.  **新群组检查**: 调用 `_seed_rules_if_new_group` 检查是否是新群组，如果是，则植入默认规则并清空缓存。
-    4.  **缓存处理 (Cache Handling)**:
-        - 检查 `context.bot_data['rule_cache']` 中是否存在当前群组的缓存。
-        - **缓存命中 (Cache Hit)**: 如果存在，直接从内存中获取已解析好的规则列表。
-        - **缓存未命中 (Cache Miss)**: 如果不存在，则从数据库中查询所有激活的规则，
-          使用 `RuleParser` 逐条解析它们，然后将解析得到的 `ParsedRule` 对象列表存入缓存，以备后续使用。
-          这一步是性能优化的关键，它避免了在每次事件发生时都重复查询数据库和解析规则文本。
-    5.  **规则匹配与执行**:
-        - 遍历缓存中该群组的所有规则。
-        - 如果规则的 `WHEN` 子句与当前 `event_type` 匹配，则创建一个 `RuleExecutor` 实例来执行该规则。
-    6.  **异常处理**: 捕获在规则执行期间可能发生的特定异常（如 `StopRuleProcessing`）或一般性错误，并记录日志。
     """
     if not update.effective_chat: return
     chat_id = update.effective_chat.id
@@ -366,7 +338,6 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
             if chat_id not in rule_cache:
                 logger.info(f"缓存未命中：正在为群组 {chat_id} 从数据库加载并解析规则。")
                 rules_from_db = db_session.query(Rule).filter_by(group_id=chat_id, is_active=True).order_by(Rule.priority.desc()).all()
-                # 缓存现在将存储 (rule_id, rule_name, parsed_rule_ast) 的元组
                 cached_rules = []
                 for db_rule in rules_from_db:
                     try:
@@ -382,17 +353,16 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
 
             logger.debug(f"[{chat_id}] Processing event '{event_type}' with {len(rules_to_process)} rules.")
             for rule_id, rule_name, parsed_rule in rules_to_process:
-                if parsed_rule.when_event and parsed_rule.when_event.lower().startswith(event_type):
+                if parsed_rule.when_events and event_type.lower() in [e.lower() for e in parsed_rule.when_events]:
                     logger.debug(f"[{chat_id}] Event '{event_type}' matches rule '{rule_name}' (ID: {rule_id}). Executing...")
                     try:
-                        # 新增：将 rule_id 和 rule_name 传递给执行器
-                        executor = RuleExecutor(update, context, db_session, rule_name=rule_name, rule_id=rule_id)
+                        executor = RuleExecutor(update, context, db_session, rule_name, event_type=event_type)
                         await executor.execute_rule(parsed_rule)
                     except StopRuleProcessing:
                         logger.info(f"规则 '{rule_name}' 请求停止处理后续规则。")
                         break
                     except Exception as e:
-                        logger.error(f"执行规则 '{parsed_rule.name}' 时发生错误: {e}", exc_info=True)
+                        logger.error(f"执行规则 '{rule_name}' 时发生错误: {e}", exc_info=True)
     except Exception as e:
         logger.critical(f"为群组 {chat_id} 处理事件 {event_type} 时发生严重错误: {e}", exc_info=True)
 
@@ -531,8 +501,8 @@ async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
 
             parsed_rule = RuleParser(db_rule.script).parse()
             mock_update = MockUpdate(chat_id=group_id)
-            # 新增：将 rule_id 和 rule_name 传递给执行器
-            executor = RuleExecutor(mock_update, context, db_session, rule_name=db_rule.name, rule_id=db_rule.id)
+            # 对于计划任务，event_type 就是 'schedule'
+            executor = RuleExecutor(mock_update, context, db_session, rule_name=db_rule.name, event_type='schedule')
             await executor.execute_rule(parsed_rule)
     except Exception as e:
         logger.error(f"执行计划任务 (规则ID: {rule_id}) 时发生严重错误: {e}", exc_info=True)
@@ -564,16 +534,7 @@ async def _send_verification_challenge(user_id: int, chat_id: int, context: Cont
     context.job_queue.run_once(verification_timeout_handler, timedelta(minutes=15), chat_id=user_id, data={'group_id': chat_id, 'user_id': user_id}, name=job_id)
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    处理用户点击验证链接后，通过 `/start` 命令进入私聊的事件。
-
-    [人机验证流程 - 第2步]
-    1. 用户在群组中看到验证消息，点击按钮。该按钮的 URL 包含了 payload，格式为 `verify_GROUPID_USERID`。
-    2. 用户被重定向到与机器人的私聊窗口，并自动发送 `/start verify_GROUPID_USERID`。
-    3. 此处理器捕获这个命令，解析出 `group_id` 和 `user_id`。
-    4. 验证用户身份（确保是本人在操作）。
-    5. 调用 `_send_verification_challenge`，正式向用户私聊发送验证问题。
-    """
+    """处理用户点击验证链接后，通过 `/start` 命令进入私聊的事件。"""
     if not update.effective_message or not context.args: return
     payload = context.args[0]
     if not payload.startswith("verify_"): return
@@ -592,16 +553,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_verification_challenge(user_id, group_id, context, db_session)
 
 async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
-    """
-    处理验证超时的作业，如果用户未在规定时间内完成验证，则将其踢出群组。
-
-    [人机验证流程 - 失败路径]
-    - 此函数由 `_send_verification_challenge` 中设置的 `JobQueue` 任务在15分钟后触发。
-    - 如果此时验证记录仍然存在于数据库（意味着用户尚未成功验证），此函数会执行：
-      1. 将用户踢出群组。
-      2. 向用户发送超时通知。
-      3. 从数据库中删除对应的 `Verification` 记录，清理状态。
-    """
+    """处理验证超时的作业，如果用户未在规定时间内完成验证，则将其踢出群组。"""
     job_data = context.job.data
     group_id, user_id = job_data['group_id'], job_data['user_id']
     logger.info(f"用户 {user_id} 在群组 {group_id} 的验证已超时。")
@@ -617,22 +569,7 @@ async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
         db_session.query(Verification).filter_by(user_id=user_id, group_id=group_id).delete()
 
 async def verification_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    处理用户在私聊中点击验证问题答案按钮的回调查询（CallbackQuery）。
-
-    [人机验证流程 - 第3步]
-    这是验证流程的核心判断逻辑。
-    1.  解析回调数据，格式为 `verify_GROUPID_USERID_ANSWER`。
-    2.  从数据库中查找对应的 `Verification` 记录。
-    3.  **关键**: 无论成功或失败，首先清除之前设置的超时任务，避免用户在回答后仍被踢出。
-    4.  **如果回答正确**:
-        - 调用 `unmute_user_util` 为用户恢复群内发言权限。
-        - 编辑消息，告知用户验证成功。
-        - 从数据库中删除 `Verification` 记录，完成流程。
-    5.  **如果回答错误**:
-        - 检查已尝试次数。如果超过上限，则踢出用户并清理记录。
-        - 如果仍有机会，则告知用户回答错误，并调用 `_send_verification_challenge` 重新发送一道新题目。
-    """
+    """处理用户在私聊中点击验证问题答案按钮的回调查询（CallbackQuery）。"""
     query = update.callback_query
     await query.answer()
 

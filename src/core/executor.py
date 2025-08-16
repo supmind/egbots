@@ -25,15 +25,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== 动作与内置函数注册表 (Action & Built-in Function Registries) ====================
 
-# [设计模式] 这是一个“注册表模式”（Registry Pattern）的实现。
-# 我们使用两个全局字典 `_ACTION_REGISTRY` 和 `_BUILTIN_FUNCTIONS` 来作为中心化的注册表。
-# 任何地方（甚至未来可能的插件模块）的函数都可以通过 `@action` 或 `@builtin_function` 装饰器，
-# 将自己“注册”到这个表中。
-#
-# 优点:
-# 1. **解耦**: `RuleExecutor` 的核心逻辑（如 `_visit_action_call_stmt`）无需知道任何具体的动作实现。
-#    它只需要在注册表中按名称查找并执行即可。这使得添加新动作或函数变得非常容易，完全不需要修改执行器本身。
-# 2. **可扩展性**: 未来可以轻松地实现一个插件系统，该系统只需扫描外部文件中的装饰器即可动态加载新的功能。
+# 这是一个“注册表模式”的实现，用于解耦动作/函数的定义与执行。
 _ACTION_REGISTRY: Dict[str, Callable[..., Coroutine]] = {}
 _BUILTIN_FUNCTIONS: Dict[str, Callable[..., Any]] = {}
 
@@ -199,51 +191,7 @@ def get_var(executor: 'RuleExecutor', variable_path: str, default: Any = None, u
         return default
 
     variable = executor.db_session.query(StateVariable).filter_by(
-        group_id=group_id, user_id=db_user_id, name=var_name,
-        # 新增：将查询范围限定在当前规则的作用域内
-        rule_id=executor.rule_id
-    ).first()
-
-    if not variable:
-        return default
-
-    try:
-        return json.loads(variable.value)
-    except json.JSONDecodeError:
-        val_str = variable.value
-        if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
-            return int(val_str)
-        return val_str
-
-@builtin_function("get_global_var")
-def get_global_var(executor: 'RuleExecutor', variable_path: str, default: Any = None, user_id: Any = None) -> Any:
-    """
-    内置函数：从数据库中获取一个全局持久化变量的值。
-    """
-    if not isinstance(variable_path, str) or '.' not in variable_path:
-        logger.warning(f"get_global_var 的变量路径 '{variable_path}' 格式无效。")
-        return default
-
-    scope, var_name = variable_path.split('.', 1)
-    if not executor.update.effective_chat:
-        return default
-
-    group_id = executor.update.effective_chat.id
-    db_user_id = None
-
-    if scope.lower() == 'user':
-        target_user_id = executor._get_target_user_id(user_id)
-        if not target_user_id:
-            logger.warning("get_global_var 在 'user' 作用域下无法确定目标用户。")
-            return default
-        db_user_id = target_user_id
-    elif scope.lower() != 'group':
-        logger.warning(f"get_global_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
-        return default
-
-    # rule_id=None 表示查询全局变量
-    variable = executor.db_session.query(StateVariable).filter_by(
-        group_id=group_id, user_id=db_user_id, name=var_name, rule_id=None
+        group_id=group_id, user_id=db_user_id, name=var_name
     ).first()
 
     if not variable:
@@ -263,16 +211,6 @@ class StopRuleProcessing(Exception):
     """当执行 stop() 动作时抛出，用于立即停止处理当前事件的所有后续规则。"""
     pass
 
-# [设计模式] 使用自定义异常来进行非本地控制流（Non-Local Control Flow）。
-# 在一个深度递归的树遍历解释器中（如此处的 `_execute_statement` 和 `_evaluate_expression`），
-# 如果要从一个深层嵌套的结构（例如 `foreach` 循环体）中立即跳出到外层，
-# 传统的做法是让每个函数都返回一个状态码，然后上层的每个调用点都检查这个状态码。
-# 这种方式非常繁琐且容易出错。
-#
-# 一个更优雅、更高效的替代方案是使用异常。当遇到 `break` 语句时，我们抛出 `BreakException`。
-# 这个异常会沿着调用栈向上传播，直到被 `_visit_foreach_stmt` 中的 `try...except` 块捕获。
-# 这就实现了从循环体内部直接“跳”到循环控制逻辑的效果，而无需修改中间所有函数的签名。
-# `StopRuleProcessing` 和 `ContinueException` 也遵循同样的设计原理。
 class BreakException(Exception):
     """用于从 `foreach` 循环中跳出，实现 `break` 语句。"""
     pass
@@ -287,14 +225,10 @@ class RuleExecutor:
     """
     一个AST（抽象语法树）解释器，负责执行由 `RuleParser` 生成的语法树。
 
-    [设计模式] 这个类是“访问者模式”（Visitor Pattern）的一个典型应用。
-    它包含了一系列 `_visit_*` 和 `_execute_*` 方法，每个方法都精确地知道如何处理AST中的一种特定节点类型
-    （例如，`_visit_if_stmt` 处理 `IfStmt` 节点，`_visit_binary_op` 处理 `BinaryOp` 节点）。
-
-    执行过程就是从顶层的 `execute_rule` 方法开始，对AST进行深度优先遍历。
-    当遇到一个节点时，就调用其对应的“访问”方法来处理它。这种模式将数据结构（AST）与作用于该结构的操作（执行逻辑）清晰地分离开来。
+    它通过递归地“访问”AST的每个节点（这是一种“访问者模式”的体现），对表达式求值，管理变量作用域，
+    并执行与外部世界（如Telegram API、数据库）交互的“动作”。这是整个规则引擎的核心运行时。
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule", rule_id: Optional[int] = None):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule", event_type: Optional[str] = None):
         """
         初始化规则执行器。
 
@@ -303,15 +237,15 @@ class RuleExecutor:
             context: 当前的 Telegram Context 对象。
             db_session: 当前的数据库会话。
             rule_name: 当前正在执行的规则的名称，用于日志记录。
-            rule_id: 当前正在执行的规则的ID，用于变量作用域。
+            event_type: 触发此规则的事件类型字符串。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.rule_name = rule_name
-        self.rule_id = rule_id
+        self.event_type = event_type
         self.per_request_cache: Dict[str, Any] = {}
-        self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache, rule_id=self.rule_id)
+        self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache, event_type=self.event_type)
 
     def _log_debug(self, message: str):
         """一个辅助函数，用于为调试日志消息自动添加规则名称前缀，便于追踪。"""
@@ -482,21 +416,12 @@ class RuleExecutor:
         """处理二元运算，包括算术、比较和逻辑运算。"""
         op = expr.op.lower()
 
-        # [核心逻辑] `and` 和 `or` 的短路求值（Short-circuit evaluation）。
-        # 对于 `and`，如果左侧表达式 (`expr.left`) 的求值结果为假（`False`），
-        # 那么整个表达式的结果就已经确定为 `False`，因此我们完全没有必要再去求值右侧的表达式。
         if op == 'and':
             left_val = await self._evaluate_expression(expr.left, current_scope)
-            # 只有当 left_val 为真时，才需要继续求值右侧表达式。
             return bool(await self._evaluate_expression(expr.right, current_scope)) if left_val else False
-
-        # 对于 `or`，如果左侧表达式的求值结果为真（`True`），
-        # 那么整个表达式的结果就已经确定为 `True`，因此也无需再求值右侧。
         if op == 'or':
             left_val = await self._evaluate_expression(expr.left, current_scope)
-            # 只有当 left_val 为假时，才需要继续求值右侧表达式。
             return True if left_val else bool(await self._evaluate_expression(expr.right, current_scope))
-
         if op == 'not':
             return not bool(await self._evaluate_expression(expr.right, current_scope))
 
@@ -695,30 +620,12 @@ class RuleExecutor:
     async def set_var(self, variable_path: str, value: Any, user_id: Any = None):
         """
         动作：设置一个持久化变量并将其存入数据库。
-        这个变量的作用域被限定在当前的规则内。
 
         Args:
             variable_path (str): 变量的路径，必须是 'scope.name' 的格式，例如 "user.warns" 或 "group.config"。
             value: 要设置的值。可以是任何可JSON序列化的类型。如果值为 `null`，则会从数据库中删除该变量。
             user_id (optional): 目标用户的ID。此参数仅在作用域为 'user' 时有效。
         """
-        await self._set_var_generic(variable_path, value, user_id, rule_scoped=True)
-
-    @action("set_global_var")
-    async def set_global_var(self, variable_path: str, value: Any, user_id: Any = None):
-        """
-        动作：设置一个全局持久化变量并将其存入数据库。
-        这个变量的作用域是整个群组，可以被任何规则访问。
-
-        Args:
-            variable_path (str): 变量的路径，必须是 'scope.name' 的格式，例如 "user.warns" 或 "group.config"。
-            value: 要设置的值。可以是任何可JSON序列化的类型。如果值为 `null`，则会从数据库中删除该变量。
-            user_id (optional): 目标用户的ID。此参数仅在作用域为 'user' 时有效。
-        """
-        await self._set_var_generic(variable_path, value, user_id, rule_scoped=False)
-
-    async def _set_var_generic(self, variable_path: str, value: Any, user_id: Any, rule_scoped: bool):
-        """设置持久化变量的通用内部方法。"""
         if not isinstance(variable_path, str) or '.' not in variable_path:
             return logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效。")
         scope, var_name = variable_path.split('.', 1)
@@ -733,25 +640,22 @@ class RuleExecutor:
         elif scope.lower() != 'group':
             return logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
 
-        target_rule_id = self.rule_id if rule_scoped else None
-
         variable = self.db_session.query(StateVariable).filter_by(
-            group_id=group_id, user_id=db_user_id, name=var_name, rule_id=target_rule_id
+            group_id=group_id, user_id=db_user_id, name=var_name
         ).first()
 
         if value is None:
             if variable:
                 self.db_session.delete(variable)
-                logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}, rule: {target_rule_id}) 已被删除。")
+                logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被删除。")
         else:
             try: serialized_value = json.dumps(value)
             except TypeError as e: return logger.error(f"为变量 '{variable_path}' 序列化值时失败: {e}。值: {value}")
             if not variable:
-                variable = StateVariable(group_id=group_id, user_id=db_user_id, name=var_name, rule_id=target_rule_id)
+                variable = StateVariable(group_id=group_id, user_id=db_user_id, name=var_name)
             variable.value = serialized_value
             self.db_session.add(variable)
-            self.db_session.flush() # 确保变量在同一事务中的后续查询中可见
-            logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}, rule: {target_rule_id}) 已被设为: {serialized_value}")
+            logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被设为: {serialized_value}")
 
     @action("start_verification")
     async def start_verification(self):

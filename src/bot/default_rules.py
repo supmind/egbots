@@ -1,7 +1,7 @@
 # src/bot/default_rules.py
 
 # ======================================================================================
-# 预设的默认规则列表 (v2.2 - 增加描述)
+# 预设的默认规则列表 (v3.0 - `WHEN` 支持多事件)
 # ======================================================================================
 # 当机器人被添加到一个新的群组时，此列表中的规则会自动被安装。
 # 这套规则经过精心设计，提供了一整套强大、常用且开箱即用的群组管理功能。
@@ -89,84 +89,16 @@ END
     },
     # ========================== 行为管理 (防刷屏) ==========================
     {
-        "name": "[行为] 防刷屏 (文本)",
+        "name": "[行为] 防刷屏 (合并)",
         "priority": 400,
-        "description": "检测并阻止用户在20秒内发送超过5条文本消息的刷屏行为。触发者将被临时禁言10分钟。",
+        "description": "检测并阻止用户在20秒内发送超过5条消息/图片/视频/文件/媒体组的刷屏行为。触发者将被临时禁言10分钟。",
         "script": """
-WHEN message
+WHEN message or photo or video or document or media_group
 WHERE user.is_admin == false AND user.stats.messages_20s > 5
 THEN {
     mute_user("10m");
     reply("检测到刷屏行为，您已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
-    delete_message();
-    stop();
-}
-END
-"""
-    },
-    {
-        "name": "[行为] 防刷屏 (图片)",
-        "priority": 400,
-        "description": "检测并阻止用户在20秒内发送超过5张图片的刷屏行为。触发者将被临时禁言10分钟。",
-        "script": """
-WHEN photo
-WHERE user.is_admin == false AND user.stats.messages_20s > 5
-THEN {
-    mute_user("10m");
-    reply("检测到刷屏行为，您已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
-    delete_message();
-    stop();
-}
-END
-"""
-    },
-    {
-        "name": "[行为] 防刷屏 (视频)",
-        "priority": 400,
-        "description": "检测并阻止用户在20秒内发送超过5个视频的刷屏行为。触发者将被临时禁言10分钟。",
-        "script": """
-WHEN video
-WHERE user.is_admin == false AND user.stats.messages_20s > 5
-THEN {
-    mute_user("10m");
-    reply("检测到刷屏行为，您已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
-    delete_message();
-    stop();
-}
-END
-"""
-    },
-    {
-        "name": "[行为] 防刷屏 (文件)",
-        "priority": 400,
-        "description": "检测并阻止用户在20秒内发送超过5个文件的刷屏行为。触发者将被临时禁言10分钟。",
-        "script": """
-WHEN document
-WHERE user.is_admin == false AND user.stats.messages_20s > 5
-THEN {
-    mute_user("10m");
-    reply("检测到刷屏行为，您已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
-    delete_message();
-    stop();
-}
-END
-"""
-    },
-    {
-        "name": "[行为] 防刷屏 (媒体组)",
-        "priority": 400,
-        "description": "检测并阻止用户在20秒内发送超过5个媒体组的刷屏行为。触发者将被临时禁言10分钟。",
-        "script": """
-WHEN media_group
-WHERE user.is_admin == false AND user.stats.messages_20s > 5
-THEN {
-    mute_user("10m");
-    reply("检测到刷屏行为，您已被临时禁言10分钟。");
-    log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "anti_flood");
+    log("用户 " + user.id + " 因刷屏 ("+event.type+") 被自动禁言10分钟。", "anti_flood");
     delete_message();
     stop();
 }

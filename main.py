@@ -70,11 +70,13 @@ async def load_scheduled_rules(application: Application):
                 try:
                     # 解析规则以检查是否为 `schedule` 类型的触发器
                     parsed_rule = RuleParser(rule.script).parse()
-                    if parsed_rule.when_event and parsed_rule.when_event.lower().startswith('schedule'):
+                    # 检查 when_events 列表的第一个元素是否为 schedule
+                    if parsed_rule.when_events and parsed_rule.when_events[0].lower().startswith('schedule'):
+                        event_str = parsed_rule.when_events[0]
                         # 从 `schedule("...")` 中提取 Cron 表达式
-                        match = re.search(r'\("([^"]+)"\)', parsed_rule.when_event)
+                        match = re.search(r'\("([^"]+)"\)', event_str)
                         if not match:
-                            logger.warning(f"无法从规则 {rule.id} 的 '{parsed_rule.when_event}' 中提取 Cron 表达式。")
+                            logger.warning(f"无法从规则 {rule.id} 的 '{event_str}' 中提取 Cron 表达式。")
                             continue
                         cron_expr = match.group(1)
 

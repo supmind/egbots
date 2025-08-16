@@ -29,7 +29,7 @@ class VariableResolver:
     通过将所有变量解析逻辑集中在此处，我们极大地简化了 `RuleExecutor` 的实现，
     并使得变量解析的行为（特别是缓存和数据获取）更易于管理和测试。
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, per_request_cache: Dict[str, Any], rule_id: Optional[int] = None):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, per_request_cache: Dict[str, Any], event_type: Optional[str] = None):
         """
         初始化变量解析器。
 
@@ -38,13 +38,13 @@ class VariableResolver:
             context: 当前事件的 Telegram `Context` 对象，主要用于访问 bot 实例以调用 API。
             db_session: 当前的 SQLAlchemy 数据库会话，用于查询持久化变量。
             per_request_cache: 一个在单次请求/事件处理生命周期内共享的字典，用于缓存高成本的计算结果（例如API调用）。
-            rule_id: 当前正在执行的规则的ID，用于变量作用域。
+            event_type: 触发此规则的事件类型字符串。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.per_request_cache = per_request_cache
-        self.rule_id = rule_id
+        self.event_type = event_type
         # 从 bot_data 获取共享的 stats_cache，如果不存在则创建一个新的
         if 'stats_cache' not in self.context.bot_data:
             self.context.bot_data['stats_cache'] = TTLCache(maxsize=500, ttl=60)
@@ -52,13 +52,12 @@ class VariableResolver:
 
     async def resolve(self, path: str) -> Any:
         """
-        [核心] 解析一个变量路径 (例如 'user.id', 'vars.group.my_var', 'command.arg[0]')。
+        解析一个变量路径 (例如 'user.id', 'vars.group.my_var', 'command.arg[0]')。
         这是脚本引擎和机器人实时数据之间的主要接口。
 
-        [设计模式] 此方法本质上是一个“调度中心”（Dispatcher）或“策略模式”（Strategy Pattern）的实现。
-        它不亲自处理任何复杂的解析逻辑，而是根据变量路径的特征（主要是其前缀，如 'command.' 或 'vars.'），
-        将解析任务“委托”给不同的、更具体的内部解析方法。这种设计使得每种变量的解析逻辑
-        （例如，处理命令、访问数据库、调用API）都能够被清晰地隔离，从而让代码更易于维护、测试和扩展。
+        此方法本质上是一个“调度中心”（Dispatcher）。它根据变量路径的特征（主要是其前缀），
+        将解析任务分派给不同的、更具体的内部解析方法。这种“策略模式”的设计使得每种变量的解析逻辑
+        （例如，处理命令、访问数据库、调用API）都能够被清晰地隔离，易于维护和扩展。
 
         Args:
             path (str): 要解析的点分隔变量路径。
@@ -69,6 +68,9 @@ class VariableResolver:
         path_lower = path.lower()
 
         # 步骤 1: 优先处理特殊的、有前缀的变量类型
+        if path_lower == 'event.type':
+            return self.event_type
+
         if path_lower.startswith('command'):
             return self._resolve_command_variable(path_lower)
 
@@ -98,10 +100,9 @@ class VariableResolver:
         此函数有两大设计亮点：
         1.  **智能分割 (Intelligent Splitting)**: 它不使用简单的 `text.split(' ')`，而是采用了标准库中的 `shlex.split`。
             `shlex` 是一个强大的、类似 shell 的语法解析工具，它能够正确地处理带有英文引号的参数。
-            例如，对于输入 `/kick "John Doe" a b`，`shlex.split` 会正确地将其解析为 `['/kick', 'John Doe', 'a', 'b']`，
-            而不是错误地分割 "John" 和 "Doe"。这对于创建健壮的、用户友好的命令至关重要。
-        2.  **请求内缓存 (Per-Request Caching)**: 命令的解析是一个纯计算操作。为了避免在同一次事件处理中（例如，一个规则多次访问 `command.arg[0]` 和 `command.arg[1]`）
-            重复执行 `shlex.split`，我们将首次解析的结果缓存在 `self.per_request_cache` 字典中。这个缓存的生命周期仅限于单次请求，确保了效率和数据一致性。
+            例如，对于输入 `/kick "John Doe" a b`，`shlex.split` 会正确地将其解析为 `['/kick', 'John Doe', 'a', 'b']`。
+        2.  **请求内缓存 (Per-Request Caching)**: 命令的解析是一个纯计算操作。为了避免在同一次事件处理中重复执行
+            `shlex.split`，我们将首次解析的结果缓存在 `self.per_request_cache` 字典中。
         """
         # 如果消息不是一个有效的命令（例如，不是文本消息，或文本不以 '/' 开头），则直接返回 None。
         if not self.update.message or not self.update.message.text or not self.update.message.text.startswith('/'):
@@ -148,43 +149,33 @@ class VariableResolver:
     def _resolve_persistent_variable(self, path: str) -> Any:
         """
         解析 `vars.*` 相关的持久化变量，这些变量存储在数据库中。
-        此方法现在支持规则作用域和全局作用域的变量。
+
+        此函数的核心是根据变量路径（如 `vars.user_12345.points`）动态地构建一个 SQLAlchemy 查询。
+        它支持以下几种格式:
+        - `vars.group.my_var`: 查找当前群组的变量（`user_id` 为 `NULL`）。
+        - `vars.user.my_var`: 查找当前群组内、**当前事件触发者**的变量。
+        - `vars.user_12345.my_var`: 查找当前群组内、`user_id` 为 `12345` 的特定用户的变量。
         """
-        path_parts = path.split('.')
-        if len(path_parts) < 3: return None
+        parts = path.split('.')
+        if len(parts) != 3: return None # 路径必须是 'vars.scope.name' 的形式
 
-        # -- 作用域和变量名解析 --
-        # 检查是全局变量 (vars.global.scope.name) 还是规则内变量 (vars.scope.name)
-        if path_parts[1].lower() == 'global':
-            target_rule_id = None
-            if len(path_parts) < 4: return None # 必须是 vars.global.scope.name 的格式
-            scope_str = path_parts[2]
-            var_name = '.'.join(path_parts[3:])
-        else:
-            target_rule_id = self.rule_id
-            scope_str = path_parts[1]
-            var_name = '.'.join(path_parts[2:])
-
+        _, scope_str, var_name = parts
         scope_parts = scope_str.split('_')
         scope_name = scope_parts[0].lower()
+
         target_user_id = None
         # 如果作用域部分包含下划线（如 'user_12345'），则尝试从中解析出用户ID。
         if len(scope_parts) > 1:
-            if scope_name != 'user': # 只有用户作用域可以带ID
-                return None
             try:
+                # BUG 修复：之前使用 ''.join(scope_parts[1:]) 会错误地处理 'user_123_456' 这种情况。
+                # 正确的逻辑应该是只取下划线后的第一个部分作为ID。
                 target_user_id = int(scope_parts[1])
             except (ValueError, TypeError, IndexError):
                 logger.warning(f"在变量路径中发现无效的用户ID格式: {scope_str}")
                 return None
 
-        # 构建基础查询
-        logger.info(f"RESOLVER_DEBUG: group_id={self.update.effective_chat.id}, name={var_name}, rule_id={target_rule_id}")
-        query = self.db_session.query(StateVariable).filter_by(
-            group_id=self.update.effective_chat.id,
-            name=var_name,
-            rule_id=target_rule_id
-        )
+        # 构建基础查询，首先按群组ID和变量名进行过滤。
+        query = self.db_session.query(StateVariable).filter_by(group_id=self.update.effective_chat.id, name=var_name)
 
         if scope_name == 'user':
             # 如果是用户作用域，需要进一步根据 user_id 过滤。
@@ -193,11 +184,14 @@ class VariableResolver:
             if user_id_to_query is not None:
                 query = query.filter_by(user_id=user_id_to_query)
             else:
-                return None # 无法确定用户ID
+                # 如果既没有指定ID，也没有当前用户（例如在某些计划任务中），则无法解析用户变量。
+                return None
         elif scope_name == 'group':
+            # 对于群组变量，user_id 字段在数据库中应为 NULL。
             query = query.filter(StateVariable.user_id.is_(None))
         else:
-            return None # 无效的作用域
+            # 无效的作用域名称。
+            return None
 
         variable = query.first()
         if not variable:
@@ -205,11 +199,16 @@ class VariableResolver:
 
         # 数据库中存储的是 JSON 字符串，因此需要反序列化。
         try:
+            # 尝试按标准 JSON 解析。
             return json.loads(variable.value)
         except json.JSONDecodeError:
+            # 如果 JSON 解析失败，则进入我们的“健壮性回退”逻辑。
             val_str = variable.value
+            # 健壮性改进：如果值不是有效的 JSON，但它是一个纯数字字符串（包括负数），
+            # 则应将其作为数字返回，以符合用户预期。
             if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
                 return int(val_str)
+            # 否则，将其作为普通字符串返回。这对于处理由其他系统写入的、非JSON格式的简单字符串值很有用。
             return val_str
 
     def _resolve_media_group_variable(self, path_lower: str) -> Any:
@@ -300,15 +299,12 @@ class VariableResolver:
     async def _resolve_computed_is_admin(self) -> bool:
         """
         解析需要实时 API 调用来计算的 `user.is_admin` 变量。
-
-        [核心概念] 这是一个典型的“计算属性”（Computed Property）示例。它的值不是直接存储在任何地方，
+        这是一个典型的“计算属性”（Computed Property）示例。它的值不是直接存储在任何地方，
         而是需要通过执行一段代码（在这里是调用 Telegram API 的 `get_chat_member`）来动态计算。
-        这使得我们可以向脚本语言暴露一个看似简单的变量，但其背后封装了复杂的逻辑。
 
-        [性能优化] 由于 API 调用是网络I/O操作，具有较高的延迟（可能耗时几十到几百毫秒），
-        因此对此类变量的**缓存**至关重要。我们使用 `self.per_request_cache` 来确保在同一次事件处理中，
-        无论规则脚本多少次访问 `user.is_admin`（例如在 `if` 和 `else` 块中都访问了），
-        高成本的 `get_chat_member` API 都只会被实际调用一次。这极大地提升了规则执行的性能。
+        由于 API 调用是网络I/O操作，具有较高的延迟，因此对此类变量的**缓存**至关重要。
+        我们使用 `self.per_request_cache` 来确保在同一次事件处理中，无论规则脚本
+        多少次访问 `user.is_admin`，高成本的 `get_chat_member` API 都只会被实际调用一次。
         """
         if not (self.update.effective_chat and self.update.effective_user): return False
 

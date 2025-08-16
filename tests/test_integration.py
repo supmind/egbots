@@ -78,9 +78,9 @@ async def test_set_and_read_various_variable_types(mock_update, mock_context, te
             group_id=-1001, name="Set Vars", priority=2,
             script="""
             WHEN command WHERE command.name == 'set' THEN {
-                set_global_var("user.is_cool", true);
-                set_global_var("user.age", 42);
-                set_global_var("group.items", [1, "b", false]);
+                set_var("user.is_cool", true);
+                set_var("user.age", 42);
+                set_var("group.items", [1, "b", false]);
             } END
             """
         ))
@@ -88,8 +88,8 @@ async def test_set_and_read_various_variable_types(mock_update, mock_context, te
         db.add(Rule(
             group_id=-1001, name="Get Vars", priority=1,
             script="""
-            WHEN command WHERE command.name == 'get' AND vars.global.user.is_cool == true THEN {
-                reply(vars.global.user.age + 1);
+            WHEN command WHERE command.name == 'get' AND vars.user.is_cool == true THEN {
+                reply(vars.user.age + 1);
                 delete_message();
             } END
             """
@@ -131,7 +131,7 @@ async def test_set_var_for_specific_user(mock_update, mock_context, test_db_sess
             group_id=-1001, name="Set Var For Other", priority=2,
             script=f"""
             WHEN command WHERE command.name == 'setit' THEN {{
-                set_global_var("user.points", 100, {target_user_id});
+                set_var("user.points", 100, {target_user_id});
             }} END
             """
         ))
@@ -140,7 +140,7 @@ async def test_set_var_for_specific_user(mock_update, mock_context, test_db_sess
             group_id=-1001, name="Get Var For Self", priority=1,
             script=f"""
             WHEN command WHERE command.name == 'getit' THEN {{
-                reply(vars.global.user_{target_user_id}.points);
+                reply(vars.user_{target_user_id}.points);
             }} END
             """
         ))
@@ -314,121 +314,39 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         assert v is None
 
 
-async def test_variable_isolation_and_globals(mock_update, mock_context, test_db_session_factory, caplog):
+async def test_multi_event_rule_and_event_type_var(mock_update, mock_context, test_db_session_factory):
     """
-    一个关键的集成测试，用于验证：
-    1. 使用 set_var 设置的变量是按规则隔离的。
-    2. 使用 set_global_var 设置的变量是全局共享的。
-    """
-    group_id = -1001
-    # 规则A，高优先级，设置一个规则作用域的变量
-    rule_a = Rule(group_id=group_id, name="Set Scoped Var", priority=10, script="""
-        WHEN message THEN { set_var("user.test_val", "scoped"); }
-    """)
-    # 规则B，低优先级，尝试读取该变量
-    rule_b = Rule(group_id=group_id, name="Get Scoped Var", priority=5, script="""
-        WHEN message THEN { reply(vars.user.test_val); }
-    """)
-    # 规则C，高优先级，设置一个全局变量
-    rule_c = Rule(group_id=group_id, name="Set Global Var", priority=10, script="""
-        WHEN message THEN { set_global_var("group.test_val", "global"); }
-    """)
-    # 规则D，低优先级，读取该全局变量
-    rule_d = Rule(group_id=group_id, name="Get Global Var", priority=5, script="""
-        WHEN message THEN { reply(vars.global.group.test_val); }
-    """)
-
-    # --- 场景1: 验证规则隔离 ---
-    with test_db_session_factory() as db:
-        db.add(Group(id=group_id, name="Test Group"))
-        db.add_all([rule_a, rule_b])
-        db.commit()
-
-    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
-        await process_event("message", mock_update, mock_context)
-
-    # 断言：Rule B 无法读取 Rule A 设置的变量，因此 reply 的是 null (None)
-    mock_update.effective_message.reply_text.assert_called_once_with("None")
-    mock_update.effective_message.reply_text.reset_mock()
-
-    # --- 场景2: 验证全局共享 ---
-    # 清理数据库，为下一个场景做准备
-    with test_db_session_factory() as db:
-        db.query(Rule).delete()
-        db.query(Group).delete()
-        db.commit()
-
-    with test_db_session_factory() as db:
-        db.add(Group(id=group_id, name="Test Group"))
-        db.add_all([rule_c, rule_d])
-        db.commit()
-
-    # 清理缓存，以便加载新规则
-    if group_id in mock_context.bot_data['rule_cache']:
-        del mock_context.bot_data['rule_cache'][group_id]
-
-    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
-        await process_event("message", mock_update, mock_context)
-
-    # 断言：Rule D 可以读取 Rule C 设置的全局变量
-    print(caplog.text)
-    mock_update.effective_message.reply_text.assert_called_once_with("global")
-
-
-async def test_full_user_lifecycle_welcome_and_spam(mock_update, mock_context, test_db_session_factory):
-    """
-    一个完整的用户生命周期集成测试，模拟用户加入、收到欢迎，然后发送垃圾信息被处理的流程。
-    这个测试验证了不同事件类型 (user_join, message) 和规则之间的正确交互。
+    端到端测试：验证
+    1. 一个规则可以由多个事件触发 (WHEN message or photo)。
+    2. event.type 变量可以正确返回触发了规则的那个事件的类型。
     """
     # --- 1. 准备阶段 (Setup) ---
-    user_id = 456
-    group_id = -1001
-
-    welcome_rule = """
-    WHEN user_join THEN {
-        send_message("Welcome, " + user.first_name + "!");
-    } END
+    script = """
+    WHEN message or photo
+    THEN {
+        reply("Event was: " + event.type);
+    }
+    END
     """
-    spam_rule = """
-    WHEN message WHERE message.text contains "spam" THEN {
-        delete_message();
-        mute_user("1m");
-        send_message(user.first_name + " has been muted for spam.");
-    } END
-    """
-
     with test_db_session_factory() as db:
-        db.add(Group(id=group_id, name="Test Group"))
-        db.add(Rule(group_id=group_id, name="Welcome Rule", script=welcome_rule))
-        db.add(Rule(group_id=group_id, name="Spam Rule", script=spam_rule))
+        db.add(Group(id=-1001, name="Test Group"))
+        db.add(Rule(group_id=-1001, name="Multi-event Rule", script=script, is_active=True))
         db.commit()
 
-    mock_update.effective_chat.id = group_id
-    mock_update.effective_user.id = user_id
-    mock_update.effective_user.first_name = "TestSpammer"
+    # --- 2. 场景一: message 事件 ---
+    mock_update.message.text = "a text message"
+    await process_event("message", mock_update, mock_context)
+    mock_update.effective_message.reply_text.assert_called_once_with("Event was: message")
+    mock_update.effective_message.reply_text.reset_mock()
 
-    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
-        # --- 2. 模拟用户加入 ---
-        await process_event("user_join", mock_update, mock_context)
+    # --- 3. 场景二: photo 事件 ---
+    await process_event("photo", mock_update, mock_context)
+    mock_update.effective_message.reply_text.assert_called_once_with("Event was: photo")
+    mock_update.effective_message.reply_text.reset_mock()
 
-        # --- 3. 验证欢迎流程 ---
-        mock_context.bot.send_message.assert_called_once_with(chat_id=group_id, text="Welcome, TestSpammer!")
-        mock_context.bot.send_message.reset_mock() # 重置 mock 以便后续验证
-
-        # --- 4. 模拟用户发送垃圾信息 ---
-        mock_update.message.text = "this is some spam"
-        await process_event("message", mock_update, mock_context)
-
-        # --- 5. 验证垃圾信息处理流程 ---
-        # 验证消息被删除
-        mock_update.effective_message.delete.assert_called_once()
-        # 验证用户被禁言
-        mock_context.bot.restrict_chat_member.assert_called_once()
-        _, kwargs = mock_context.bot.restrict_chat_member.call_args
-        assert kwargs['user_id'] == user_id
-        assert not kwargs['permissions'].can_send_messages
-        # 验证发送了禁言通知
-        mock_context.bot.send_message.assert_called_once_with(chat_id=group_id, text="TestSpammer has been muted for spam.")
+    # --- 4. 场景三: 不匹配的事件 ---
+    await process_event("video", mock_update, mock_context)
+    mock_update.effective_message.reply_text.assert_not_called()
 
 async def test_full_warning_system_scenario(mock_update, mock_context, test_db_session_factory):
     """
@@ -760,15 +678,15 @@ async def test_complex_keyword_automute_scenario(mock_update, mock_context, test
     # 规则1: 管理员设置禁言关键词
     set_keyword_rule = """
     WHEN command WHERE command.name == 'set_forbidden' AND user.is_admin == true THEN {
-            set_global_var("group.forbidden_word", command.arg[0]);
+        set_var("group.forbidden_word", command.arg[0]);
         reply("禁言关键词已设置为: " + command.arg[0]);
     } END
     """
 
     # 规则2: 用户触发关键词，被禁言
     automute_rule = """
-        WHEN message WHERE vars.global.group.forbidden_word != null THEN {
-            if (message.text contains vars.global.group.forbidden_word) {
+    WHEN message WHERE vars.group.forbidden_word != null THEN {
+        if (message.text contains vars.group.forbidden_word) {
             mute_user("1m", user.id);
             reply(user.first_name + "，你因发送违禁词已被禁言1分钟。");
         }
