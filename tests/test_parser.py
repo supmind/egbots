@@ -493,6 +493,72 @@ class TestNewRuleParser(unittest.TestCase):
             return f"{base}.{expr.property}"
         return ""
 
+class TestParserEnhancements(unittest.TestCase):
+    """
+    对解析器测试的进一步增强，覆盖更多边界情况和复杂场景。
+    """
+    def test_unicode_identifiers_and_strings(self):
+        """测试解析器对Unicode字符的支持。"""
+        script = 'WHEN command THEN { 变量_1 = "你好，世界🌍"; }'
+        rule = RuleParser(script).parse()
+        stmt = rule.then_block.statements[0]
+        self.assertIsInstance(stmt, Assignment)
+        self.assertEqual(stmt.variable.name, "变量_1")
+        self.assertEqual(stmt.expression.value, "你好，世界🌍")
+
+    def test_comments_in_tricky_places(self):
+        """测试在复杂语法结构中（如多行参数列表）的注释。"""
+        script = """
+        WHEN command THEN {
+            my_action( // 注释1
+                "arg1",
+                // 注释2
+                "arg2"
+                // 注释3
+            );
+        }
+        """
+        try:
+            rule = RuleParser(script).parse()
+            call = rule.then_block.statements[0].call
+            self.assertEqual(len(call.args), 2)
+            self.assertEqual(call.args[0].value, "arg1")
+            self.assertEqual(call.args[1].value, "arg2")
+        except RuleParserError as e:
+            self.fail(f"解析带有复杂注释的脚本失败: {e}")
+
+    def test_more_granular_syntax_errors(self):
+        """为更多特定语法错误添加测试，确保错误信息清晰。"""
+        test_cases = {
+            'foreach_with_literal_loop_var': ('WHEN c THEN { foreach (1 in mylist) {} }', "期望得到 token 类型 IDENTIFIER"),
+            'dict_with_non_string_key': ('WHEN c THEN { {123: "value"}; }', "期望得到 token 类型 STRING"),
+            'end_keyword_in_string': ('WHEN c THEN { x = "this is the end"; }', None), # 这应该是合法的
+            'run_on_sentence_after_brace': ('WHEN c THEN { reply("a"); } reply("b");', "在规则结束后发现意外的 token"),
+        }
+
+        for name, (script, expected_error) in test_cases.items():
+            with self.subTest(error_case=name):
+                if expected_error:
+                    with self.assertRaisesRegex(RuleParserError, expected_error):
+                        RuleParser(script).parse()
+                else:
+                    try:
+                        RuleParser(script).parse()
+                    except RuleParserError as e:
+                        self.fail(f"合法的脚本 '{name}' 解析失败: {e}")
+
+    def test_expression_as_foreach_collection(self):
+        """测试使用一个复杂的二元运算表达式作为 foreach 循环的集合。"""
+        script = "WHEN command THEN { foreach (item in list1 + list2) { } }"
+        rule = RuleParser(script).parse()
+        foreach_stmt = rule.then_block.statements[0]
+        self.assertIsInstance(foreach_stmt, ForEachStmt)
+        collection_expr = foreach_stmt.collection
+        self.assertIsInstance(collection_expr, BinaryOp)
+        self.assertEqual(collection_expr.op, "+")
+        self.assertEqual(collection_expr.left.name, "list1")
+        self.assertEqual(collection_expr.right.name, "list2")
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
 from telegram import ChatPermissions
+from datetime import datetime
 
 from src.core.parser import RuleParser
 from src.core.executor import RuleExecutor, _ACTION_REGISTRY
@@ -732,3 +733,51 @@ async def test_builtin_get_var(mock_update, mock_context, test_db_session_factor
         # 5. 获取一个不存在的组变量
         bad_config = get_var(executor, "group.bad_config", {"default": True})
         assert bad_config == {"default": True}
+
+        # 6. 为一个没有任何变量的用户获取变量，应返回默认值
+        no_vars_user = get_var(executor, "user.points", -1, user_id=888)
+        assert no_vars_user == -1
+
+
+@pytest.mark.asyncio
+async def test_set_var_with_non_serializable_value(mock_update, mock_context, test_db_session_factory, caplog):
+    """测试 set_var 在遇到无法JSON序列化的值时是否能优雅地处理并记录错误。"""
+    with test_db_session_factory() as session:
+        executor = RuleExecutor(mock_update, mock_context, session)
+
+        # datetime 对象默认无法被 json.dumps 序列化
+        non_serializable_value = datetime.now()
+
+        with caplog.at_level('ERROR'):
+            # 这个调用不应该抛出异常
+            await executor.set_var("group.bad_data", non_serializable_value)
+
+        # 验证数据库中没有创建新变量
+        assert session.query(Log).count() == 0
+
+        # 验证记录了错误日志
+        assert len(caplog.records) == 1
+        assert "序列化值时失败" in caplog.text
+        assert "is not JSON serializable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_action_in_loop(mock_update, mock_context):
+    """测试在 foreach 循环内部的 if 条件中调用 stop()。"""
+    from src.core.executor import StopRuleProcessing
+    script = """
+    items = [1, 2, 3];
+    foreach (item in items) {
+        if (item == 2) {
+            stop();
+        }
+        reply("unreachable");
+    }
+    reply("also unreachable");
+    """
+    # 期望 StopRuleProcessing 异常能从循环中冒泡出来并终止整个执行
+    with pytest.raises(StopRuleProcessing):
+        await _execute_then_block(script, mock_update, mock_context)
+
+    # 确认在 stop() 被调用后，只有 item=1 的那一次 reply 被执行了
+    mock_update.effective_message.reply_text.assert_called_once_with("unreachable")

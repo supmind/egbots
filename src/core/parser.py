@@ -186,6 +186,7 @@ class Token:
 #     这个顺序确保了像 `-10` 这样的字符串被完整地识别为一个 `NUMBER` 类型的 Token，其值为 `-10`。如果没有这个顺序，它可能会被错误地拆分为两个 Token：一个 `ARITH_OP` (`-`) 和一个 `NUMBER` (`10`)。
 # 3.  **关键字的单词边界 (Keyword Word Boundaries)**: `KEYWORD` 模式 `\b(WHEN|...)\b` 使用了单词边界 `\b`。
 #     这可以防止关键字成为其他标识符的一部分。例如，如果没有 `\b`，`my_then_variable` 这个变量名中的 `then` 部分就可能会被错误地识别为 `THEN` 关键字。
+# 4.  **字符串与标识符**: 字符串 `STRING` 规则先于标识符 `IDENTIFIER`，虽然在这里不影响，但这是良好的实践，因为字符串的开头（引号）比标识符的开头（字母）更具体。
 TOKEN_SPECIFICATION = [
     ('SKIP',         r'[ \t]+'),      # 忽略所有水平方向的空白字符（空格、制表符）。
     ('COMMENT',      r'//[^\n]*'),   # 忽略从 // 到行尾的单行注释。
@@ -208,11 +209,14 @@ TOKEN_SPECIFICATION = [
     ('ARITH_OP',     r'\+|-|\*|/'),   # 算术运算符
     ('KEYWORD',      r'\b(WHEN|WHERE|THEN|END|IF|ELSE|FOREACH|IN|BREAK|CONTINUE|TRUE|FALSE|NULL)\b'), # 所有关键字
     ('STRING',       r'"[^"]*"|\'[^\']*\''), # 匹配由双引号或单引号包裹的字符串。
-    ('IDENTIFIER',   r'[a-zA-Z_][a-zA-Z0-9_]*'), # 匹配变量名、函数名等标识符。
+    # 修复：更新IDENTIFIER的正则表达式以支持Unicode，并确保它不能以数字开头。
+    # [^\d\W] 匹配一个“非数字”且“非非单词字符”，即一个字母（包括Unicode字母）或下划线。
+    # \w* 匹配零个或多个“单词字符”（包括Unicode字母、数字和下划线）。
+    ('IDENTIFIER',   r'[^\d\W][\w]*'), # 匹配变量名、函数名等标识符。
     ('MISMATCH',     r'.'),          # 捕获所有其他不符合上述任何规则的单个字符，并标记为错误。
 ]
-# 在此处通过 re.IGNORECASE 标志实现全局不区分大小写，而不是在每个规则中使用 (?i)
-TOKEN_REGEX = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPECIFICATION), flags=re.IGNORECASE)
+# 在此通过 re.IGNORECASE 和 re.UNICODE 标志实现全局不区分大小写和Unicode支持
+TOKEN_REGEX = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPECIFICATION), flags=re.IGNORECASE | re.UNICODE)
 
 def tokenize(code: str) -> List[Token]:
     """
@@ -301,6 +305,10 @@ class RuleParser:
 
         # 在此我们不再检查 END 之后是否有多余的 token。
         # 这使得规则脚本可以包含尾随的空行或注释，而不会导致解析失败，从而提高了灵活性。
+        # 修复：增加一个检查，确保在规则结束后没有多余的、非法的 token。
+        if not self._is_at_end():
+            token = self._current_token()
+            raise RuleParserError(f"在规则结束后发现意外的 token: '{token.value}'", token.line, token.column)
         return rule
 
     def _parse_statement_block(self) -> StatementBlock:
@@ -371,12 +379,24 @@ class RuleParser:
         if self._peek_value('else'):
             self._consume_keyword('else')
             #
-            # 此处是处理 `else if` 的关键技巧:
+            # [设计模式] 此处是处理 `else if` 的关键技巧:
             # 我们的语法中没有 `elif` 关键字。`else if` 实际上被解析为一个 `else` 块，
             # 这个块内恰好包含了一个 `if` 语句。
-            # 通过将这个后续的 `if` 语句包装在一个新的 `StatementBlock` 中，
+            #
+            # 例如，对于代码 `if (c1) { s1 } else if (c2) { s2 }`，解析器会将其理解为：
+            # IfStmt(
+            #   condition=c1,
+            #   then_block=s1,
+            #   else_block=StatementBlock(
+            #     statements=[
+            #       IfStmt(condition=c2, then_block=s2, else_block=None)  // <--- 这是一个嵌套的 IfStmt
+            #     ]
+            #   )
+            # )
+            #
+            # 通过将后续的 `if` 语句包装在一个新的 `StatementBlock` 中，
             # 我们可以用现有的 `IfStmt(..., else_block=...)` 结构来优雅地表示 `else if` 链，
-            # 而无需为 AST 引入一个新的节点类型。这使得 AST 结构更加统一和简洁。
+            # 而无需为 AST 引入一个新的节点类型。这使得 AST 结构更加统一和简洁，执行器也无需处理额外的节点类型。
             #
             if self._peek_value('if'):
                 # `else if` 分支: 解析 `if` 语句并将其作为 `else` 块的唯一内容
@@ -403,17 +423,25 @@ class RuleParser:
 
     def _parse_expression(self, min_precedence=0) -> Expr:
         """
-        使用“优先级攀爬”（Pratt Parsing）算法来解析一个完整的、带优先级的表达式。
+        [核心算法] 使用“优先级攀爬”（Pratt Parsing）算法来解析一个完整的、带优先级的表达式。
         这是一个强大且优雅的算法，专门用于处理包含不同优先级和结合性（左结合/右结合）的二元运算符。
         它比传统的递归下降解析在处理表达式时更简洁、高效。
 
         工作原理简述 (以 `1 + 2 * 3` 为例):
-        1.  `_parse_unary_expression` 解析出 `1` 作为初始的 `lhs` (left-hand side)。
-        2.  进入 `while` 循环，看到下一个 token 是 `+`。`+` 的优先级 (5) > `min_precedence` (0)，循环继续。
-        3.  我们“抓住” `+`。然后递归调用 `_parse_expression` 来解析 `+` 右边的表达式，但这次传入的 `min_precedence` 是 `+` 的优先级再加一，即 6。
-        4.  在递归调用中，`*` (优先级6) 会被优先处理，返回 `BinaryOp(2, '*', 3)`。
-        5.  回到最初的调用，它现在有了 `rhs`。它将 `1`, `+`, 和这个 `rhs` 组合成 `BinaryOp(1, '+', BinaryOp(2, '*', 3))`。
-        6.  循环结束，返回最终的、正确嵌套的 AST，完美地体现了运算优先级。
+        1.  `_parse_unary_expression` 解析出原子表达式 `1` 作为初始的 `lhs` (left-hand side)。
+        2.  进入 `while` 循环，看到下一个 token 是 `+`。
+        3.  获取 `+` 的优先级（precedence=5）。因为 5 > `min_precedence` (初始为0)，所以循环继续。
+        4.  我们“抓住” `+` 这个运算符。然后，关键的一步发生：我们递归调用 `_parse_expression` 来解析 `+` 右边的所有内容，
+            但这次传入的 `min_precedence` 是 `+` 的优先级（5）。对于左结合运算符，我们通常传入 `precedence + 1`。
+        5.  在对 `+` 右侧的递归调用中 (`_parse_expression(min_precedence=6)`):
+            a. 解析出 `2` 作为 `lhs`。
+            b. 看到下一个 token 是 `*`。`*` 的优先级是 6。因为 6 >= 6，循环继续。
+            c. “抓住” `*`，然后再次递归调用 `_parse_expression(min_precedence=7)` 来解析 `*` 右边的内容。
+            d. 在这个最内层的调用中，解析出 `3`。之后没有更多的运算符，该调用返回 `Literal(3)`。
+            e. 回到处理 `*` 的那层调用，它现在有了 `lhs=2`, `op='*'`, `rhs=3`。它构建并返回 `BinaryOp(2, '*', 3)`。
+        6.  现在，回到最外层的、处理 `+` 的调用。它现在有了 `lhs=1`, `op='+'` 和 `rhs=BinaryOp(2, '*', 3)`。
+        7.  它将这三者组合成最终的AST: `BinaryOp(Literal(1), '+', BinaryOp(Literal(2), '*', Literal(3)))`。
+        8.  循环结束，返回这个正确嵌套的、完美体现了运算优先级的AST。
         """
         lhs = self._parse_unary_expression()
 
@@ -515,12 +543,15 @@ class RuleParser:
             if val_lower == 'null': return Literal(value=None)
         elif token.type == 'IDENTIFIER':
             #
-            # 这是区分“变量访问”（如 `my_var`）和“函数/动作调用”（如 `len(my_list)`）的关键逻辑。
-            # 我们向前“偷看”一个 token (`_peek_type(..., offset=1)`)，但不消耗它（即不移动解析器指针 `self.pos`）。
-            # 如果当前标识符的下一个 token 是一个左括号 `(`，我们就断定这是一个函数/动作调用，
-            # 并调用专门的 `_parse_action_call_expression` 方法来处理。
-            # 否则，它只是一个普通的变量访问，我们直接返回一个 `Variable` 节点。
-            # 这种“向前看”（lookahead）的技巧是递归下降解析器中非常常用和强大的技术。
+            # [核心逻辑] 这是区分“变量访问”（如 `my_var`）和“函数/动作调用”（如 `len(my_list)`）的关键所在。
+            # 我们使用了一种叫做“K-lookahead”的解析技术（这里 K=1），即向前“偷看”一个 token，但不消耗它（不移动解析指针 `self.pos`）。
+            #
+            # 1. 当前 token 是一个 IDENTIFIER (例如 'len')。
+            # 2. 我们通过 `_peek_type('LPAREN', offset=1)` 检查 *下一个* token 是不是一个左括号 `(`。
+            # 3. 如果是，我们就断定这是一个函数/动作调用，并立即调用专门的 `_parse_action_call_expression` 方法来完整地解析 `len(...)` 结构。
+            # 4. 如果不是，那么它就只能是一个普通的变量访问，我们直接消耗当前的 IDENTIFIER 并返回一个 `Variable` 节点。
+            #
+            # 这种“向前看”的技巧是递归下降解析器中非常常用和强大的技术，它允许我们在不回溯的情况下，根据少量未来信息来决定当前的解析路径。
             #
             if self._peek_type('LPAREN', offset=1):
                 return self._parse_action_call_expression()

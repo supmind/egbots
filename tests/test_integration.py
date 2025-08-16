@@ -313,6 +313,62 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
 
+
+async def test_full_user_lifecycle_welcome_and_spam(mock_update, mock_context, test_db_session_factory):
+    """
+    一个完整的用户生命周期集成测试，模拟用户加入、收到欢迎，然后发送垃圾信息被处理的流程。
+    这个测试验证了不同事件类型 (user_join, message) 和规则之间的正确交互。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    user_id = 456
+    group_id = -1001
+
+    welcome_rule = """
+    WHEN user_join THEN {
+        send_message("Welcome, " + user.first_name + "!");
+    } END
+    """
+    spam_rule = """
+    WHEN message WHERE message.text contains "spam" THEN {
+        delete_message();
+        mute_user("1m");
+        send_message(user.first_name + " has been muted for spam.");
+    } END
+    """
+
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Welcome Rule", script=welcome_rule))
+        db.add(Rule(group_id=group_id, name="Spam Rule", script=spam_rule))
+        db.commit()
+
+    mock_update.effective_chat.id = group_id
+    mock_update.effective_user.id = user_id
+    mock_update.effective_user.first_name = "TestSpammer"
+
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        # --- 2. 模拟用户加入 ---
+        await process_event("user_join", mock_update, mock_context)
+
+        # --- 3. 验证欢迎流程 ---
+        mock_context.bot.send_message.assert_called_once_with(chat_id=group_id, text="Welcome, TestSpammer!")
+        mock_context.bot.send_message.reset_mock() # 重置 mock 以便后续验证
+
+        # --- 4. 模拟用户发送垃圾信息 ---
+        mock_update.message.text = "this is some spam"
+        await process_event("message", mock_update, mock_context)
+
+        # --- 5. 验证垃圾信息处理流程 ---
+        # 验证消息被删除
+        mock_update.effective_message.delete.assert_called_once()
+        # 验证用户被禁言
+        mock_context.bot.restrict_chat_member.assert_called_once()
+        _, kwargs = mock_context.bot.restrict_chat_member.call_args
+        assert kwargs['user_id'] == user_id
+        assert not kwargs['permissions'].can_send_messages
+        # 验证发送了禁言通知
+        mock_context.bot.send_message.assert_called_once_with(chat_id=group_id, text="TestSpammer has been muted for spam.")
+
 async def test_full_warning_system_scenario(mock_update, mock_context, test_db_session_factory):
     """
     一个完整的端到端测试，模拟一个三振出局（three-strikes-you're-out）的警告系统。

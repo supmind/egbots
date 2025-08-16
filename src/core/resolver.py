@@ -50,12 +50,13 @@ class VariableResolver:
 
     async def resolve(self, path: str) -> Any:
         """
-        解析一个变量路径 (例如 'user.id', 'vars.group.my_var', 'command.arg[0]')。
+        [核心] 解析一个变量路径 (例如 'user.id', 'vars.group.my_var', 'command.arg[0]')。
         这是脚本引擎和机器人实时数据之间的主要接口。
 
-        此方法本质上是一个“调度中心”（Dispatcher）。它根据变量路径的特征（主要是其前缀），
-        将解析任务分派给不同的、更具体的内部解析方法。这种“策略模式”的设计使得每种变量的解析逻辑
-        （例如，处理命令、访问数据库、调用API）都能够被清晰地隔离，易于维护和扩展。
+        [设计模式] 此方法本质上是一个“调度中心”（Dispatcher）或“策略模式”（Strategy Pattern）的实现。
+        它不亲自处理任何复杂的解析逻辑，而是根据变量路径的特征（主要是其前缀，如 'command.' 或 'vars.'），
+        将解析任务“委托”给不同的、更具体的内部解析方法。这种设计使得每种变量的解析逻辑
+        （例如，处理命令、访问数据库、调用API）都能够被清晰地隔离，从而让代码更易于维护、测试和扩展。
 
         Args:
             path (str): 要解析的点分隔变量路径。
@@ -95,9 +96,10 @@ class VariableResolver:
         此函数有两大设计亮点：
         1.  **智能分割 (Intelligent Splitting)**: 它不使用简单的 `text.split(' ')`，而是采用了标准库中的 `shlex.split`。
             `shlex` 是一个强大的、类似 shell 的语法解析工具，它能够正确地处理带有英文引号的参数。
-            例如，对于输入 `/kick "John Doe" a b`，`shlex.split` 会正确地将其解析为 `['/kick', 'John Doe', 'a', 'b']`。
-        2.  **请求内缓存 (Per-Request Caching)**: 命令的解析是一个纯计算操作。为了避免在同一次事件处理中重复执行
-            `shlex.split`，我们将首次解析的结果缓存在 `self.per_request_cache` 字典中。
+            例如，对于输入 `/kick "John Doe" a b`，`shlex.split` 会正确地将其解析为 `['/kick', 'John Doe', 'a', 'b']`，
+            而不是错误地分割 "John" 和 "Doe"。这对于创建健壮的、用户友好的命令至关重要。
+        2.  **请求内缓存 (Per-Request Caching)**: 命令的解析是一个纯计算操作。为了避免在同一次事件处理中（例如，一个规则多次访问 `command.arg[0]` 和 `command.arg[1]`）
+            重复执行 `shlex.split`，我们将首次解析的结果缓存在 `self.per_request_cache` 字典中。这个缓存的生命周期仅限于单次请求，确保了效率和数据一致性。
         """
         # 如果消息不是一个有效的命令（例如，不是文本消息，或文本不以 '/' 开头），则直接返回 None。
         if not self.update.message or not self.update.message.text or not self.update.message.text.startswith('/'):
@@ -197,10 +199,14 @@ class VariableResolver:
             # 尝试按标准 JSON 解析。
             return json.loads(variable.value)
         except json.JSONDecodeError:
-            # 如果 JSON 解析失败，则进入我们的“健壮性回退”逻辑。
+            # [健壮性设计] 如果 JSON 解析失败，则进入我们的“健壮性回退”逻辑。
+            # 这种情况可能发生在：
+            # 1. 变量是由旧版本的机器人或外部工具写入的，当时只存了简单的字符串或数字。
+            # 2. 管理员手动在数据库中修改了值。
+            # 我们的目标是尽可能地以符合用户直觉的方式去理解这些非标准数据，而不是直接抛出错误或返回 None。
             val_str = variable.value
             # 健壮性改进：如果值不是有效的 JSON，但它是一个纯数字字符串（包括负数），
-            # 则应将其作为数字返回，以符合用户预期。
+            # 则应将其作为数字返回，以符合用户预期。例如，数据库中的 "123" 应该被当作数字 123 使用。
             if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
                 return int(val_str)
             # 否则，将其作为普通字符串返回。这对于处理由其他系统写入的、非JSON格式的简单字符串值很有用。
@@ -294,12 +300,15 @@ class VariableResolver:
     async def _resolve_computed_is_admin(self) -> bool:
         """
         解析需要实时 API 调用来计算的 `user.is_admin` 变量。
-        这是一个典型的“计算属性”（Computed Property）示例。它的值不是直接存储在任何地方，
-        而是需要通过执行一段代码（在这里是调用 Telegram API 的 `get_chat_member`）来动态计算。
 
-        由于 API 调用是网络I/O操作，具有较高的延迟，因此对此类变量的**缓存**至关重要。
-        我们使用 `self.per_request_cache` 来确保在同一次事件处理中，无论规则脚本
-        多少次访问 `user.is_admin`，高成本的 `get_chat_member` API 都只会被实际调用一次。
+        [核心概念] 这是一个典型的“计算属性”（Computed Property）示例。它的值不是直接存储在任何地方，
+        而是需要通过执行一段代码（在这里是调用 Telegram API 的 `get_chat_member`）来动态计算。
+        这使得我们可以向脚本语言暴露一个看似简单的变量，但其背后封装了复杂的逻辑。
+
+        [性能优化] 由于 API 调用是网络I/O操作，具有较高的延迟（可能耗时几十到几百毫秒），
+        因此对此类变量的**缓存**至关重要。我们使用 `self.per_request_cache` 来确保在同一次事件处理中，
+        无论规则脚本多少次访问 `user.is_admin`（例如在 `if` 和 `else` 块中都访问了），
+        高成本的 `get_chat_member` API 都只会被实际调用一次。这极大地提升了规则执行的性能。
         """
         if not (self.update.effective_chat and self.update.effective_user): return False
 

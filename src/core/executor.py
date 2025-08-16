@@ -25,7 +25,15 @@ logger = logging.getLogger(__name__)
 
 # ==================== 动作与内置函数注册表 (Action & Built-in Function Registries) ====================
 
-# 这是一个“注册表模式”的实现，用于解耦动作/函数的定义与执行。
+# [设计模式] 这是一个“注册表模式”（Registry Pattern）的实现。
+# 我们使用两个全局字典 `_ACTION_REGISTRY` 和 `_BUILTIN_FUNCTIONS` 来作为中心化的注册表。
+# 任何地方（甚至未来可能的插件模块）的函数都可以通过 `@action` 或 `@builtin_function` 装饰器，
+# 将自己“注册”到这个表中。
+#
+# 优点:
+# 1. **解耦**: `RuleExecutor` 的核心逻辑（如 `_visit_action_call_stmt`）无需知道任何具体的动作实现。
+#    它只需要在注册表中按名称查找并执行即可。这使得添加新动作或函数变得非常容易，完全不需要修改执行器本身。
+# 2. **可扩展性**: 未来可以轻松地实现一个插件系统，该系统只需扫描外部文件中的装饰器即可动态加载新的功能。
 _ACTION_REGISTRY: Dict[str, Callable[..., Coroutine]] = {}
 _BUILTIN_FUNCTIONS: Dict[str, Callable[..., Any]] = {}
 
@@ -211,6 +219,16 @@ class StopRuleProcessing(Exception):
     """当执行 stop() 动作时抛出，用于立即停止处理当前事件的所有后续规则。"""
     pass
 
+# [设计模式] 使用自定义异常来进行非本地控制流（Non-Local Control Flow）。
+# 在一个深度递归的树遍历解释器中（如此处的 `_execute_statement` 和 `_evaluate_expression`），
+# 如果要从一个深层嵌套的结构（例如 `foreach` 循环体）中立即跳出到外层，
+# 传统的做法是让每个函数都返回一个状态码，然后上层的每个调用点都检查这个状态码。
+# 这种方式非常繁琐且容易出错。
+#
+# 一个更优雅、更高效的替代方案是使用异常。当遇到 `break` 语句时，我们抛出 `BreakException`。
+# 这个异常会沿着调用栈向上传播，直到被 `_visit_foreach_stmt` 中的 `try...except` 块捕获。
+# 这就实现了从循环体内部直接“跳”到循环控制逻辑的效果，而无需修改中间所有函数的签名。
+# `StopRuleProcessing` 和 `ContinueException` 也遵循同样的设计原理。
 class BreakException(Exception):
     """用于从 `foreach` 循环中跳出，实现 `break` 语句。"""
     pass
@@ -225,8 +243,12 @@ class RuleExecutor:
     """
     一个AST（抽象语法树）解释器，负责执行由 `RuleParser` 生成的语法树。
 
-    它通过递归地“访问”AST的每个节点（这是一种“访问者模式”的体现），对表达式求值，管理变量作用域，
-    并执行与外部世界（如Telegram API、数据库）交互的“动作”。这是整个规则引擎的核心运行时。
+    [设计模式] 这个类是“访问者模式”（Visitor Pattern）的一个典型应用。
+    它包含了一系列 `_visit_*` 和 `_execute_*` 方法，每个方法都精确地知道如何处理AST中的一种特定节点类型
+    （例如，`_visit_if_stmt` 处理 `IfStmt` 节点，`_visit_binary_op` 处理 `BinaryOp` 节点）。
+
+    执行过程就是从顶层的 `execute_rule` 方法开始，对AST进行深度优先遍历。
+    当遇到一个节点时，就调用其对应的“访问”方法来处理它。这种模式将数据结构（AST）与作用于该结构的操作（执行逻辑）清晰地分离开来。
     """
     def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule"):
         """
@@ -414,12 +436,21 @@ class RuleExecutor:
         """处理二元运算，包括算术、比较和逻辑运算。"""
         op = expr.op.lower()
 
+        # [核心逻辑] `and` 和 `or` 的短路求值（Short-circuit evaluation）。
+        # 对于 `and`，如果左侧表达式 (`expr.left`) 的求值结果为假（`False`），
+        # 那么整个表达式的结果就已经确定为 `False`，因此我们完全没有必要再去求值右侧的表达式。
         if op == 'and':
             left_val = await self._evaluate_expression(expr.left, current_scope)
+            # 只有当 left_val 为真时，才需要继续求值右侧表达式。
             return bool(await self._evaluate_expression(expr.right, current_scope)) if left_val else False
+
+        # 对于 `or`，如果左侧表达式的求值结果为真（`True`），
+        # 那么整个表达式的结果就已经确定为 `True`，因此也无需再求值右侧。
         if op == 'or':
             left_val = await self._evaluate_expression(expr.left, current_scope)
+            # 只有当 left_val 为假时，才需要继续求值右侧表达式。
             return True if left_val else bool(await self._evaluate_expression(expr.right, current_scope))
+
         if op == 'not':
             return not bool(await self._evaluate_expression(expr.right, current_scope))
 

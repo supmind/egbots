@@ -369,3 +369,69 @@ async def test_resolve_time_unix(mock_update):
     # 允许最多2秒的误差，以应对测试执行的延迟
     assert abs(resolved_timestamp - expected_timestamp) <= 2
     assert isinstance(resolved_timestamp, int)
+
+async def test_resolve_persistent_var_for_non_existent_user(mock_update, test_db_session_factory):
+    """测试当变量名存在，但指定的用户ID在数据库中没有对应条目时的行为。"""
+    with test_db_session_factory() as session:
+        # 只为用户123设置变量
+        session.add(StateVariable(group_id=-1001, user_id=123, name="test_var", value=json.dumps("value_for_123")))
+        session.commit()
+        mock_context = Mock()
+        mock_context.bot_data = {}
+
+        resolver = VariableResolver(mock_update, mock_context, session, {})
+
+        # 查询用户999的同一个变量，应该返回 None
+        assert await resolver.resolve("vars.user_999.test_var") is None
+
+async def test_resolve_command_negative_index():
+    """测试命令参数的负数索引（不支持），应返回 None。"""
+    # 为此测试用例创建一个专用的 Update 对象，而不是修改 fixture
+    mock_user = User(id=123, is_bot=False, first_name="Test")
+    mock_chat = Chat(id=-1001, type="group")
+    mock_message = Message(
+        message_id=50,
+        date=datetime.now(timezone.utc),
+        chat=mock_chat,
+        text="/test arg1 arg2",
+        from_user=mock_user
+    )
+    mock_update_for_test = Update(update_id=1050, message=mock_message)
+
+    mock_context = Mock()
+    mock_context.bot_data = {}
+    resolver = VariableResolver(mock_update_for_test, mock_context, Mock(), {})
+
+    # 负数索引应被视为无效并返回 None
+    assert await resolver.resolve("command.arg[-1]") is None
+
+async def test_resolve_stats_variable_with_zero_result(mock_update, test_db_session_factory):
+    """测试当统计窗口内没有事件时，统计变量是否正确返回 0。"""
+    with test_db_session_factory() as session:
+        # 数据库中没有任何事件
+        mock_context = Mock()
+        mock_context.bot_data = {'stats_cache': TTLCache(maxsize=100, ttl=60)}
+        resolver = VariableResolver(mock_update, mock_context, session, {})
+
+        # 解析一个时间窗口很短的统计，预期结果为 0
+        assert await resolver.resolve("group.stats.messages_1s") == 0
+
+async def test_resolve_is_admin_for_non_admin_with_caching(mock_update):
+    """测试当用户不是管理员时，user.is_admin 的解析和缓存行为。"""
+    mock_context = Mock()
+    mock_context.bot_data = {}
+    mock_context.bot.get_chat_member = AsyncMock()
+
+    # 第一次调用，模拟返回普通成员
+    mock_context.bot.get_chat_member.return_value.status = 'member'
+
+    cache = {}
+    resolver = VariableResolver(mock_update, mock_context, Mock(), cache)
+
+    # 第一次解析，应该调用 API 并返回 False
+    assert await resolver.resolve("user.is_admin") is False
+    mock_context.bot.get_chat_member.assert_called_once_with(chat_id=-1001, user_id=123)
+
+    # 第二次解析，应该从缓存获取 False，不应再次调用 API
+    assert await resolver.resolve("user.is_admin") is False
+    mock_context.bot.get_chat_member.assert_called_once()
