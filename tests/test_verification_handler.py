@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch, ANY
 
 from src.bot.handlers import verification_callback_handler
 from src.database import Verification
+from src.utils import session_scope
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
@@ -24,9 +25,8 @@ async def test_unit_verification_success_calls_util(mock_callback_update, mock_c
     group_id, user_id, correct_answer = -1001, 123, "42"
 
     # 准备数据库
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Verification(group_id=group_id, user_id=user_id, correct_answer=correct_answer, attempts_made=1))
-        db.commit()
 
     # 准备 Mocks
     mock_callback_update.callback_query.data = f"verify_{group_id}_{user_id}_{correct_answer}"
@@ -48,7 +48,7 @@ async def test_unit_verification_success_calls_util(mock_callback_update, mock_c
         )
 
         # 验证数据库记录是否被删除
-        with test_db_session_factory() as db:
+        with session_scope(test_db_session_factory) as db:
             assert db.query(Verification).count() == 0
 
 async def test_unit_verification_wrong_answer_with_retries(mock_callback_update, mock_context, test_db_session_factory):
@@ -57,9 +57,8 @@ async def test_unit_verification_wrong_answer_with_retries(mock_callback_update,
     """
     group_id, user_id, correct_answer, wrong_answer = -1001, 123, "42", "99"
 
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Verification(group_id=group_id, user_id=user_id, correct_answer=correct_answer, attempts_made=1))
-        db.commit()
 
     mock_callback_update.callback_query.data = f"verify_{group_id}_{user_id}_{wrong_answer}"
     mock_callback_update.callback_query.from_user.id = user_id
@@ -75,7 +74,7 @@ async def test_unit_verification_wrong_answer_with_retries(mock_callback_update,
         mock_callback_update.callback_query.edit_message_media.assert_called_once()
 
         # 验证数据库中的尝试次数已更新
-        with test_db_session_factory() as db:
+        with session_scope(test_db_session_factory) as db:
             v = db.query(Verification).one()
             assert v.attempts_made == 2
 
@@ -85,9 +84,8 @@ async def test_unit_verification_failure_and_kick(mock_callback_update, mock_con
     """
     group_id, user_id, correct_answer, wrong_answer = -1001, 123, "42", "99"
 
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Verification(group_id=group_id, user_id=user_id, correct_answer=correct_answer, attempts_made=3))
-        db.commit()
 
     mock_callback_update.callback_query.data = f"verify_{group_id}_{user_id}_{wrong_answer}"
     mock_callback_update.callback_query.from_user.id = user_id
@@ -100,7 +98,7 @@ async def test_unit_verification_failure_and_kick(mock_callback_update, mock_con
     mock_callback_update.callback_query.edit_message_text.assert_called_once_with(
         text="❌ 验证失败次数过多，您已被移出群组。"
     )
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         assert db.query(Verification).count() == 0
 
 async def test_unit_verification_wrong_user(mock_callback_update, mock_context):

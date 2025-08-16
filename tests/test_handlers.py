@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 async def test_reload_rules_by_admin(mock_update, mock_context):
     """测试：管理员应能成功重载规则缓存。"""
     # 设置
-    mock_context.bot_data['rule_cache'][-1001] = ["some_cached_rule"]
+    mock_context.bot_data['rule_cache'] = {-1001: ["some_cached_rule"]}
     mock_admin = MagicMock(status='administrator')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
 
@@ -36,7 +36,7 @@ async def test_reload_rules_by_admin(mock_update, mock_context):
 async def test_reload_rules_by_non_admin(mock_update, mock_context):
     """测试：非管理员用户无法重载规则缓存。"""
     # 设置
-    mock_context.bot_data['rule_cache'][-1001] = ["some_cached_rule"]
+    mock_context.bot_data['rule_cache'] = {-1001: ["some_cached_rule"]}
     mock_member = MagicMock(status='member')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_member)
 
@@ -54,11 +54,10 @@ async def test_rules_command_by_admin(mock_update, mock_context, test_db_session
     # --- 准备 ---
     mock_admin = MagicMock(status='administrator')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Group(id=-1001, name="Test Group"))
         db.add(Rule(group_id=-1001, name="Rule 1", script="WHEN message THEN {} END", is_active=True))
         db.add(Rule(group_id=-1001, name="Rule 2", script="WHEN command THEN {} END", is_active=False))
-        db.commit()
 
     # --- 执行 ---
     await rules_handler(mock_update, mock_context)
@@ -75,8 +74,8 @@ async def test_rule_on_off_command_by_admin(mock_update, mock_context, test_db_s
     # --- 准备 ---
     mock_admin = MagicMock(status='administrator')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
-    mock_context.bot_data['rule_cache'][-1001] = ["some_cache_data"] # 预置缓存
-    with test_db_session_factory() as db:
+    mock_context.bot_data['rule_cache'] = {-1001: ["some_cache_data"]} # 预置缓存
+    with session_scope(test_db_session_factory) as db:
         db.add(Group(id=-1001, name="Test Group"))
         rule_to_toggle = Rule(group_id=-1001, name="Test Rule", script="...", is_active=True)
         db.add(rule_to_toggle)
@@ -93,7 +92,7 @@ async def test_rule_on_off_command_by_admin(mock_update, mock_context, test_db_s
     # 验证缓存已被清除
     assert -1001 not in mock_context.bot_data['rule_cache']
     # 验证数据库中的状态
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         rule = db.query(Rule).filter_by(id=rule_id).one()
         assert rule.is_active is False
 
@@ -103,13 +102,12 @@ async def test_process_event_with_broken_rule(MockRuleExecutor, mock_update, moc
     # --- 准备 ---
     mock_executor_instance = MockRuleExecutor.return_value
     mock_executor_instance.execute_rule = AsyncMock()
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Group(id=-1001, name="Test Group"))
         # 一个好的规则
         db.add(Rule(group_id=-1001, name="Good Rule", script="WHEN message THEN { reply('good'); } END"))
         # 一个坏的规则（缺少 '}'）
         db.add(Rule(group_id=-1001, name="Bad Rule", script="WHEN message THEN { reply('bad');"))
-        db.commit()
 
     # --- 执行 ---
     mock_update.effective_message.text = "hello"
@@ -136,9 +134,8 @@ async def test_verification_timeout_handler(mock_context, test_db_session_factor
     # --- 准备 ---
     group_id = -1001
     user_id = 123
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Verification(group_id=group_id, user_id=user_id, correct_answer="123"))
-        db.commit()
 
     # 模拟 Job context
     mock_job = MagicMock()
@@ -155,7 +152,7 @@ async def test_verification_timeout_handler(mock_context, test_db_session_factor
     # 2. 验证机器人向用户发送了通知
     mock_context.bot.send_message.assert_called_once_with(chat_id=user_id, text=f"您在群组 (ID: {group_id}) 的验证已超时，已被移出群组。")
     # 3. 验证数据库中的记录已被删除
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         verification_record = db.query(Verification).filter_by(user_id=user_id).first()
         assert verification_record is None
 
@@ -177,7 +174,7 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
         await process_event("command", mock_update, mock_context)
 
     # Verification (First Call)
-        assert "正在创建并植入默认规则" in caplog.text
+    assert "正在创建并植入默认规则" in caplog.text
     assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
     # The number of loaded rules should match the number of default rules.
@@ -210,7 +207,7 @@ async def test_seed_rules_for_new_group(MockRuleExecutor, mock_update, mock_cont
     """
     # --- 准备 ---
     # 确保数据库是空的
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         assert db.query(Group).count() == 0
         assert db.query(Rule).count() == 0
 
@@ -224,7 +221,7 @@ async def test_seed_rules_for_new_group(MockRuleExecutor, mock_update, mock_cont
 
     # --- 验证 ---
     # 验证数据库中是否已创建 Group 和 Rule 记录
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         assert db.query(Group).count() == 1
         group = db.query(Group).filter_by(id=-1001).first()
         assert group is not None
@@ -316,10 +313,9 @@ async def test_stop_action_halts_processing(MockRuleExecutor, mock_update, mock_
         group_id=-1001, name="Reply Rule", priority=5, is_active=True,
         script="WHEN message THEN { reply('you should not see this'); }"
     )
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Group(id=-1001, name="Test Group"))
         db.add_all([rule_stop, rule_reply])
-        db.commit()
 
     # 我们需要一个真实的执行器来抛出真实的 StopRuleProcessing 异常，
     # 因此我们不能完全模拟 RuleExecutor。
@@ -360,7 +356,7 @@ async def test_rule_help_command_by_admin(mock_update, mock_context, test_db_ses
     # --- 准备 ---
     mock_admin = MagicMock(status='administrator')
     mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Group(id=-1001, name="Test Group"))
         rule = Rule(
             group_id=-1001,
@@ -398,10 +394,9 @@ async def test_process_event_cache_invalidation(MockRuleExecutor, mock_update, m
     mock_executor_instance = MockRuleExecutor.return_value
     mock_executor_instance.execute_rule = AsyncMock()
     group_id = mock_update.effective_chat.id
-    with test_db_session_factory() as db:
+    with session_scope(test_db_session_factory) as db:
         db.add(Group(id=group_id, name="Test Group"))
         db.add(Rule(group_id=group_id, name="Test Rule", script="WHEN message THEN {} END", is_active=True))
-        db.commit()
 
     # --- 2. 第一次调用 (缓存未命中) ---
     with caplog.at_level(logging.INFO):
