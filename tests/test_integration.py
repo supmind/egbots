@@ -313,41 +313,6 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
 
-
-async def test_multi_event_rule_and_event_type_var(mock_update, mock_context, test_db_session_factory):
-    """
-    端到端测试：验证
-    1. 一个规则可以由多个事件触发 (WHEN message or photo)。
-    2. event.type 变量可以正确返回触发了规则的那个事件的类型。
-    """
-    # --- 1. 准备阶段 (Setup) ---
-    script = """
-    WHEN message or photo
-    THEN {
-        reply("Event was: " + event.type);
-    }
-    END
-    """
-    with test_db_session_factory() as db:
-        db.add(Group(id=-1001, name="Test Group"))
-        db.add(Rule(group_id=-1001, name="Multi-event Rule", script=script, is_active=True))
-        db.commit()
-
-    # --- 2. 场景一: message 事件 ---
-    mock_update.message.text = "a text message"
-    await process_event("message", mock_update, mock_context)
-    mock_update.effective_message.reply_text.assert_called_once_with("Event was: message")
-    mock_update.effective_message.reply_text.reset_mock()
-
-    # --- 3. 场景二: photo 事件 ---
-    await process_event("photo", mock_update, mock_context)
-    mock_update.effective_message.reply_text.assert_called_once_with("Event was: photo")
-    mock_update.effective_message.reply_text.reset_mock()
-
-    # --- 4. 场景三: 不匹配的事件 ---
-    await process_event("video", mock_update, mock_context)
-    mock_update.effective_message.reply_text.assert_not_called()
-
 async def test_full_warning_system_scenario(mock_update, mock_context, test_db_session_factory):
     """
     一个完整的端到端测试，模拟一个三振出局（three-strikes-you're-out）的警告系统。

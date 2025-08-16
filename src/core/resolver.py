@@ -29,7 +29,7 @@ class VariableResolver:
     通过将所有变量解析逻辑集中在此处，我们极大地简化了 `RuleExecutor` 的实现，
     并使得变量解析的行为（特别是缓存和数据获取）更易于管理和测试。
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, per_request_cache: Dict[str, Any], event_type: Optional[str] = None):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, per_request_cache: Dict[str, Any]):
         """
         初始化变量解析器。
 
@@ -38,13 +38,11 @@ class VariableResolver:
             context: 当前事件的 Telegram `Context` 对象，主要用于访问 bot 实例以调用 API。
             db_session: 当前的 SQLAlchemy 数据库会话，用于查询持久化变量。
             per_request_cache: 一个在单次请求/事件处理生命周期内共享的字典，用于缓存高成本的计算结果（例如API调用）。
-            event_type: 触发此规则的事件类型字符串。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.per_request_cache = per_request_cache
-        self.event_type = event_type
         # 从 bot_data 获取共享的 stats_cache，如果不存在则创建一个新的
         if 'stats_cache' not in self.context.bot_data:
             self.context.bot_data['stats_cache'] = TTLCache(maxsize=500, ttl=60)
@@ -68,9 +66,6 @@ class VariableResolver:
         path_lower = path.lower()
 
         # 步骤 1: 优先处理特殊的、有前缀的变量类型
-        if path_lower == 'event.type':
-            return self.event_type
-
         if path_lower.startswith('command'):
             return self._resolve_command_variable(path_lower)
 

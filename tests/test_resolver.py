@@ -369,12 +369,3 @@ async def test_resolve_time_unix(mock_update):
     # 允许最多2秒的误差，以应对测试执行的延迟
     assert abs(resolved_timestamp - expected_timestamp) <= 2
     assert isinstance(resolved_timestamp, int)
-
-async def test_resolve_event_type_variable(mock_update):
-    """测试 event.type 变量的解析。"""
-    mock_context = Mock()
-    mock_context.bot_data = {}
-    # 在初始化 Resolver 时传入 event_type
-    resolver = VariableResolver(mock_update, mock_context, Mock(), {}, event_type="test_event")
-
-    assert await resolver.resolve("event.type") == "test_event"

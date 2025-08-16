@@ -228,7 +228,7 @@ class RuleExecutor:
     它通过递归地“访问”AST的每个节点（这是一种“访问者模式”的体现），对表达式求值，管理变量作用域，
     并执行与外部世界（如Telegram API、数据库）交互的“动作”。这是整个规则引擎的核心运行时。
     """
-    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule", event_type: Optional[str] = None):
+    def __init__(self, update: Update, context: ContextTypes.DEFAULT_TYPE, db_session: Session, rule_name: str = "Unnamed Rule"):
         """
         初始化规则执行器。
 
@@ -237,15 +237,13 @@ class RuleExecutor:
             context: 当前的 Telegram Context 对象。
             db_session: 当前的数据库会话。
             rule_name: 当前正在执行的规则的名称，用于日志记录。
-            event_type: 触发此规则的事件类型字符串。
         """
         self.update = update
         self.context = context
         self.db_session = db_session
         self.rule_name = rule_name
-        self.event_type = event_type
         self.per_request_cache: Dict[str, Any] = {}
-        self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache, event_type=self.event_type)
+        self.variable_resolver = VariableResolver(update, context, db_session, self.per_request_cache)
 
     def _log_debug(self, message: str):
         """一个辅助函数，用于为调试日志消息自动添加规则名称前缀，便于追踪。"""
