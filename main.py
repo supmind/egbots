@@ -37,6 +37,7 @@ from src.bot.handlers import (
     rule_on_off_handler,
     rule_help_handler,
     cleanup_old_events,
+    sync_group_admins,
 )
 
 # ==================== 日志配置 ====================
@@ -185,6 +186,19 @@ async def main():
                 kwargs={'db_url': db_url}
             )
             logger.info("已成功添加新的 'daily_cleanup' 计划任务。")
+
+            # 添加新的管理员同步任务
+            try:
+                scheduler.remove_job('sync_admins')
+                logger.info("已成功移除旧的 'sync_admins' 计划任务。")
+            except JobLookupError:
+                logger.info("未找到旧的 'sync_admins' 计划任务，无需移除。")
+
+            scheduler.add_job(
+                sync_group_admins, 'interval', hours=1, id='sync_admins'
+            )
+            logger.info("已成功添加每小时运行的 'sync_admins' 计划任务。")
+
 
             # 加载所有基于规则的计划任务
             await load_scheduled_rules(application)

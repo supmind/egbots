@@ -58,6 +58,9 @@ def mock_update():
     mock_user = MagicMock()
     mock_user.id = 123
     mock_user.first_name = "Test"
+    mock_user.is_bot = False
+    mock_user.username = "testuser"
+    mock_user.last_name = "User"
     mock_user.mention_html.return_value = "Test User"
 
     mock_chat = MagicMock()

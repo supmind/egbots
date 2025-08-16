@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     DateTime,
     Boolean,
+    Table,
 )
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -24,8 +25,47 @@ logger = logging.getLogger(__name__)
 # 这使得 SQLAlchemy 的元数据功能可以统一管理所有的表和映射。
 Base = declarative_base()
 
+# ==================== 关联表定义 ====================
+
+# 定义 Group 和 User 之间的多对多关系。
+# 这张表本身不直接映射为 ORM 模型，而是被 SQLAlchemy 的关系机制使用。
+group_administrators = Table(
+    'group_administrators', Base.metadata,
+    Column('group_id', BigInteger, ForeignKey('groups.id', ondelete="CASCADE"), primary_key=True),
+    Column('user_id', BigInteger, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True)
+)
 
 # ==================== 数据模型定义 ====================
+class User(Base):
+    """
+    模型类：表示一个 Telegram 用户。
+    记录所有与机器人交互过的用户，无论是管理员还是普通成员。
+    """
+    __tablename__ = 'users'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=False,
+                comment="Telegram 用户的唯一 User ID")
+
+    # 用户的基本信息
+    username = Column(String(255), nullable=True)
+    first_name = Column(String(255), nullable=False)
+    last_name = Column(String(255), nullable=True)
+    is_bot = Column(Boolean, default=False, nullable=False)
+
+    # 用户的活跃状态
+    last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # ORM 关系：与 Group 建立多对多关系
+    # `administered_groups` 属性将允许我们轻松访问一个用户所管理的所有群组。
+    administered_groups = relationship(
+        "Group",
+        secondary=group_administrators,
+        back_populates="administrators"
+    )
+
+    def __repr__(self):
+        return f"<User(id={self.id}, username='{self.username}', name='{self.first_name}')>"
+
 
 class Group(Base):
     """
@@ -50,6 +90,15 @@ class Group(Base):
     state_variables = relationship("StateVariable", back_populates="group", cascade="all, delete-orphan")
     logs = relationship("Log", back_populates="group", cascade="all, delete-orphan")
     event_logs = relationship("EventLog", back_populates="group", cascade="all, delete-orphan")
+
+    # ORM 关系：与 User 建立多对多关系
+    # `administrators` 属性将允许我们轻松访问一个群组的所有管理员。
+    administrators = relationship(
+        "User",
+        secondary=group_administrators,
+        back_populates="administered_groups"
+    )
+
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式。"""

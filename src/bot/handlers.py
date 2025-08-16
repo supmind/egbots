@@ -6,14 +6,16 @@ from datetime import datetime, timedelta
 import asyncio
 from typing import Dict, List
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, Message
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, Message, User as TelegramUser
 from telegram.ext import ContextTypes
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm.exc import NoResultFound
+
 
 from src.utils import session_scope, generate_math_image, unmute_user_util
 from src.core.parser import RuleParser, RuleParserError
 from src.core.executor import RuleExecutor, StopRuleProcessing
-from src.database import Rule, Verification, EventLog, get_session_factory
+from src.database import Rule, Verification, EventLog, get_session_factory, User, Group
 from sqlalchemy import create_engine
 from .default_rules import DEFAULT_RULES
 
@@ -82,6 +84,53 @@ def _seed_rules_if_new_group(group_id: int, db_session: Session) -> bool:
         return True
     return False
 
+def _get_or_create_user(db_session: Session, telegram_user: TelegramUser) -> User:
+    """
+    根据 Telegram User 对象，获取或创建数据库中的 User 记录。
+    确保所有与机器人交互过的用户都被记录下来，并保持其信息最新。
+    """
+    if not telegram_user:
+        return None
+    try:
+        user = db_session.query(User).filter_by(id=telegram_user.id).one()
+        # 更新用户信息
+        user.username = telegram_user.username
+        user.first_name = telegram_user.first_name
+        user.last_name = telegram_user.last_name
+    except NoResultFound:
+        user = User(
+            id=telegram_user.id,
+            username=telegram_user.username,
+            first_name=telegram_user.first_name,
+            last_name=telegram_user.last_name,
+            is_bot=telegram_user.is_bot
+        )
+        db_session.add(user)
+        logger.info(f"数据库中新增用户: {user}")
+    return user
+
+async def is_group_admin(user_id: int, group_id: int, db_session: Session, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    检查一个用户是否为指定群组的管理员。
+    优先查询数据库，如果数据库没有记录，则回退到 Telegram API 进行实时检查。
+    这确保了即使同步任务延迟，群组创建者和管理员也能立即获得权限。
+    """
+    try:
+        # 1. 数据库快速检查
+        group = db_session.query(Group).filter_by(id=group_id).one_or_none()
+        if group:
+            admin_ids = {admin.id for admin in group.administrators}
+            if user_id in admin_ids:
+                return True
+
+        # 2. 回退到 Telegram API 检查
+        member = await context.bot.get_chat_member(group_id, user_id)
+        return member.status in ['creator', 'administrator']
+    except Exception as e:
+        logger.error(f"检查用户 {user_id} 在群组 {group_id} 的管理员权限时出错: {e}")
+        return False
+
+
 # =================== 管理员命令处理器 ===================
 
 async def reload_rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,22 +143,25 @@ async def reload_rules_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.effective_chat or not update.effective_user: return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    session_factory: sessionmaker = context.bot_data['session_factory']
 
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status not in ['creator', 'administrator']:
+    with session_scope(session_factory) as db_session:
+        _get_or_create_user(db_session, update.effective_user)
+        is_admin = await is_group_admin(user_id, chat_id, db_session, context)
+        if not is_admin:
             return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
 
-        rule_cache: dict = context.bot_data.get('rule_cache', {})
-        if chat_id in rule_cache:
-            del rule_cache[chat_id]
-            logger.info(f"管理员 {user_id} 已成功清除群组 {chat_id} 的规则缓存。")
-            await update.message.reply_text("✅ 规则缓存已成功清除！")
-        else:
-            await update.message.reply_text("ℹ️ 无需清除，缓存中尚无该群组的数据。")
-    except Exception as e:
-        logger.error(f"处理 /reload_rules 命令时出错: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ 清除缓存时发生错误: {e}")
+        try:
+            rule_cache: dict = context.bot_data.get('rule_cache', {})
+            if chat_id in rule_cache:
+                del rule_cache[chat_id]
+                logger.info(f"管理员 {user_id} 已成功清除群组 {chat_id} 的规则缓存。")
+                await update.message.reply_text("✅ 规则缓存已成功清除！")
+            else:
+                await update.message.reply_text("ℹ️ 无需清除，缓存中尚无该群组的数据。")
+        except Exception as e:
+            logger.error(f"处理 /reload_rules 命令时出错: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ 清除缓存时发生错误: {e}")
 
 async def rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -120,16 +172,15 @@ async def rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     if not update.effective_chat or not update.effective_user: return
     chat_id = update.effective_chat.id
-
-    try:
-        member = await context.bot.get_chat_member(chat_id, update.effective_user.id)
-        if member.status not in ['creator', 'administrator']:
-            return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
-    except Exception as e:
-        return logger.error(f"检查 /rules 命令权限时出错: {e}")
-
+    user_id = update.effective_user.id
     session_factory: sessionmaker = context.bot_data['session_factory']
+
     with session_scope(session_factory) as db_session:
+        _get_or_create_user(db_session, update.effective_user)
+        is_admin = await is_group_admin(user_id, chat_id, db_session, context)
+        if not is_admin:
+            return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+
         all_rules = db_session.query(Rule).filter(Rule.group_id == chat_id).order_by(Rule.id).all()
         if not all_rules:
             return await update.message.reply_text("本群组还没有任何规则。")
@@ -152,20 +203,18 @@ async def rule_help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_chat or not update.effective_user: return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status not in ['creator', 'administrator']:
-            return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
-    except Exception as e:
-        return logger.error(f"检查 /rulehelp 命令权限时出错: {e}")
-
-    if not context.args or not context.args[0].isdigit():
-        return await update.message.reply_text("请提供一个有效的规则ID。用法: /rulehelp <ID>")
-
-    rule_id_to_show = int(context.args[0])
     session_factory: sessionmaker = context.bot_data['session_factory']
+
     with session_scope(session_factory) as db_session:
+        _get_or_create_user(db_session, update.effective_user)
+        is_admin = await is_group_admin(user_id, chat_id, db_session, context)
+        if not is_admin:
+            return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+
+        if not context.args or not context.args[0].isdigit():
+            return await update.message.reply_text("请提供一个有效的规则ID。用法: /rulehelp <ID>")
+
+        rule_id_to_show = int(context.args[0])
         rule = db_session.query(Rule).filter_by(id=rule_id_to_show, group_id=chat_id).first()
         if not rule:
             return await update.message.reply_text(f"错误：在当前群组中未找到ID为 {rule_id_to_show} 的规则。")
@@ -188,20 +237,18 @@ async def rule_on_off_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.effective_chat or not update.effective_user: return
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status not in ['creator', 'administrator']:
-            return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
-    except Exception as e:
-        return logger.error(f"检查 /ruleon 命令权限时出错: {e}")
-
-    if not context.args or not context.args[0].isdigit():
-        return await update.message.reply_text("请提供一个有效的规则ID。用法: /ruleon <ID>")
-
-    rule_id_to_toggle = int(context.args[0])
     session_factory: sessionmaker = context.bot_data['session_factory']
+
     with session_scope(session_factory) as db_session:
+        _get_or_create_user(db_session, update.effective_user)
+        is_admin = await is_group_admin(user_id, chat_id, db_session, context)
+        if not is_admin:
+            return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+
+        if not context.args or not context.args[0].isdigit():
+            return await update.message.reply_text("请提供一个有效的规则ID。用法: /ruleon <ID>")
+
+        rule_id_to_toggle = int(context.args[0])
         rule = db_session.query(Rule).filter_by(id=rule_id_to_toggle, group_id=chat_id).first()
         if not rule:
             return await update.message.reply_text(f"错误：在当前群组中未找到ID为 {rule_id_to_toggle} 的规则。")
@@ -274,6 +321,10 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
 
     try:
         with session_scope(session_factory) as db_session:
+            # 确保用户存在于数据库中
+            if update.effective_user:
+                _get_or_create_user(db_session, update.effective_user)
+
             if update.effective_user:
                 db_session.add(EventLog(
                     group_id=chat_id, user_id=update.effective_user.id,
@@ -358,6 +409,55 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_event("document", update, context)
 
 # =================== 计划任务与验证流程处理器 ===================
+
+async def sync_group_admins(context: ContextTypes.DEFAULT_TYPE):
+    """
+    定期同步所有群组的管理员列表。
+    """
+    logger.info("开始执行管理员列表的定期同步任务...")
+    session_factory: sessionmaker = context.bot_data['session_factory']
+    with session_scope(session_factory) as db_session:
+        groups = db_session.query(Group).all()
+        for group in groups:
+            try:
+                logger.info(f"正在同步群组 {group.id} 的管理员...")
+                tg_admins = await context.bot.get_chat_administrators(chat_id=group.id)
+                tg_admin_ids = {admin.user.id for admin in tg_admins}
+
+                # 确保所有来自Telegram的管理员都在User表中
+                for admin in tg_admins:
+                    _get_or_create_user(db_session, admin.user)
+
+                db_session.flush() # 确保新用户已提交
+
+                # 更新群组的管理员关系
+                # 1. 获取数据库中当前管理员
+                current_admin_ids = {admin.id for admin in group.administrators}
+
+                # 2. 找出需要新增和删除的
+                to_add_ids = tg_admin_ids - current_admin_ids
+                to_remove_ids = current_admin_ids - tg_admin_ids
+
+                # 3. 执行更新
+                if to_add_ids:
+                    users_to_add = db_session.query(User).filter(User.id.in_(to_add_ids)).all()
+                    for user in users_to_add:
+                        group.administrators.append(user)
+                    logger.info(f"群组 {group.id}: 新增 {len(users_to_add)} 个管理员。")
+
+                if to_remove_ids:
+                    users_to_remove = [admin for admin in group.administrators if admin.id in to_remove_ids]
+                    for user in users_to_remove:
+                        group.administrators.remove(user)
+                    logger.info(f"群组 {group.id}: 移除了 {len(users_to_remove)} 个管理员。")
+
+                if not to_add_ids and not to_remove_ids:
+                    logger.info(f"群组 {group.id} 的管理员列表无变化。")
+
+            except Exception as e:
+                logger.error(f"同步群组 {group.id} 管理员时出错: {e}", exc_info=True)
+    logger.info("管理员列表定期同步任务完成。")
+
 
 async def cleanup_old_events(db_url: str):
     """
