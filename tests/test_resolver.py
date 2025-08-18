@@ -107,6 +107,9 @@ async def test_resolve_command_variable():
     ("/ban \"John Doe\" \"for spamming\"", "ban", ["John Doe", "for spamming"]),
     ("/mute 'user 123' 1h", "mute", ["user 123", "1h"]),
     ("/complex_cmd arg1 'arg 2' \"arg 3\"", "complex_cmd", ["arg1", "arg 2", "arg 3"]),
+    # 核心修复测试：验证带有 @botname 的命令是否能被正确解析
+    ("/id@my_test_bot", "id", []),
+    ("/help@some_other_bot arg1", "help", ["arg1"]),
 ])
 async def test_resolve_command_variable_parsing(command_text, expected_name, expected_args):
     """使用参数化测试来验证 shlex 对各种命令格式的解析能力。"""

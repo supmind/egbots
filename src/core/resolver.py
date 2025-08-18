@@ -119,8 +119,14 @@ class VariableResolver:
         if cache_key not in self.per_request_cache:
             # shlex.split 是处理类 shell 命令参数的理想工具，它能正确处理带引号的参数。
             parts = shlex.split(self.update.message.text)
+            # 核心修复：正确处理形如 /command@botname 的命令
+            # 1. 移除前导的 '/'
+            command_full = parts[0].lstrip('/')
+            # 2. 按 '@' 分割，并只取第一部分作为命令的真实名称
+            command_name = command_full.split('@')[0]
+
             parsed_command = {
-                "name": parts[0].lstrip('/'),
+                "name": command_name,
                 "args": parts[1:],
                 "text": self.update.message.text,
                 "full_args": " ".join(parts[1:])
