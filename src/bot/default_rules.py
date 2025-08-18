@@ -27,6 +27,12 @@ THEN {
 END
 """
     },
+    {
+        "name": "[内容] 自动删除转发消息",
+        "priority": 400,
+        "description": "自动删除所有普通用户转发的消息（来自用户或频道），以防止垃圾信息或不相关内容的传播。管理员不受此限制。",
+        "script": """WHEN message WHERE user.is_admin == false AND (message.forward_from != null OR message.forward_from_chat != null) THEN { delete_message(); log("删除了用户 " + user.id + " 转发的消息。", "antiforward"); } END"""
+    },
     # ... (other rules) ...
     {
         "name": "[清理] 删除命令与服务消息",
