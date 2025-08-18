@@ -278,7 +278,21 @@ async def _get_rule_from_command(update: Update, context: ContextTypes.DEFAULT_T
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 命令，主要用于人机验证流程。"""
     if context.args and context.args[0].startswith("verify_"):
-        await verification_callback_handler(update, context)
+        try:
+            # 解析 "verify_GROUPID_USERID" 格式的参数
+            _, group_id_str, user_id_str = context.args[0].split('_')
+            group_id, user_id = int(group_id_str), int(user_id_str)
+
+            # 验证发起命令的用户是否就是被验证者
+            if update.effective_user.id != user_id:
+                await update.message.reply_text("错误：您不能为其他用户启动验证流程。")
+                return
+
+            # 调用新的辅助函数来发送验证挑战
+            await _send_verification_challenge(context, group_id, user_id, update.message)
+
+        except (ValueError, IndexError):
+            await update.message.reply_text("验证链接无效或格式错误。")
     else:
         await update.message.reply_text("欢迎使用机器人！")
 
@@ -438,6 +452,55 @@ async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
             finally:
                 db.delete(verification)
                 # 让 session_scope 在退出时统一提交
+
+
+async def _send_verification_challenge(context: ContextTypes.DEFAULT_TYPE, group_id: int, user_id: int, message_to_reply):
+    """
+    发送一个新的验证挑战给用户。
+    这包括创建数据库记录、生成问题、发送消息和设置超时。
+    """
+    session_factory: sessionmaker = context.bot_data['session_factory']
+    with session_scope(session_factory) as db:
+        # 检查是否已存在一个验证
+        existing_verification = db.query(Verification).filter_by(group_id=group_id, user_id=user_id).first()
+        if existing_verification:
+            await message_to_reply.reply_text("您已经有一个正在进行的验证请求。")
+            return
+
+        # 1. 生成问题和答案
+        num1, num2 = random.randint(1, 10), random.randint(1, 10)
+        correct_answer = str(num1 + num2)
+        image_bytes = generate_math_image(f"{num1} + {num2} = ?")
+
+        # 2. 创建数据库记录
+        new_verification = Verification(
+            user_id=user_id,
+            group_id=group_id,
+            correct_answer=correct_answer,
+            attempts_made=0
+        )
+        db.add(new_verification)
+
+        # 3. 创建内联键盘
+        keyboard = InlineKeyboardMarkup.from_row([
+            InlineKeyboardButton(str(i), callback_data=f"verify_{group_id}_{user_id}_{i}") for i in range(10)
+        ])
+
+        # 4. 发送验证消息
+        await message_to_reply.reply_photo(
+            photo=image_bytes,
+            caption="请在15分钟内完成计算以证明您是人类。",
+            reply_markup=keyboard
+        )
+
+        # 5. 设置超时任务
+        context.job_queue.run_once(
+            verification_timeout_handler,
+            timedelta(minutes=15),
+            data={"group_id": group_id, "user_id": user_id},
+            name=f"verification_timeout_{group_id}_{user_id}"
+        )
+        logger.info(f"已为用户 {user_id} 在群组 {group_id} 中成功发送了新的人机验证。")
 
 
 async def verification_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
