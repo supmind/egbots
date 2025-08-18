@@ -74,8 +74,10 @@ END
     *   `user.stats.*`: 获取用户在特定时间窗口内的统计数据。
         *   `user.stats.messages_1h`: 当前用户在过去1小时内发送的消息总数（包括文本、图片、视频等）。
         *   支持的时间单位: `s` (秒), `m` (分钟), `h` (小时), `d` (天)。例如: `user.stats.messages_5s`。
-        *   支持的统计类型: `messages`, `joins`, `leaves`。
-    *   `group.stats.*`: 获取整个群组在特定时间窗口内的统计数据。用法同 `user.stats.*`。
+        *   支持的统计类型: `messages`。
+    *   `group.stats.*`: 获取整个群组在特定时间窗口内的统计数据。
+        *   用法同 `user.stats.*`，但支持更多的统计类型。
+        *   支持的统计类型: `messages` (群内总消息), `joins` (新用户加入), `leaves` (用户离开)。
 
 3.  **持久化变量 (读写)**: 跨规则、跨时间存在的变量，存储在数据库中。
     *   `vars.group.my_var`: 群组作用域的变量。
