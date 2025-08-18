@@ -550,6 +550,10 @@ async def test_action_log_with_rotation(test_db_session_factory):
     ("split('a b c')", None, ["a", "b", "c"]),
     # join()
     ("join(['a', 'b', 'c'], '-')", None, "a-b-c"),
+    # split() with maxsplit
+    ("split('a-b-c', '-', 1)", None, ["a", "b-c"]),
+    # join() with mixed types
+    ("join([1, 'b', true], ' ')", None, "1 b True"),
 ])
 async def test_builtin_functions(func_call, scope, expected):
     """测试内置函数的行为，包括边界情况。"""
@@ -605,6 +609,20 @@ async def test_chained_assignment_and_return_value():
     assert calls[0].args[0] == "10", "变量 'a' 的值应该是 10"
     assert calls[1].args[0] == "10", "变量 'b' 的值应该是 10"
     assert calls[2].args[0] == "10", "变量 'c' 的值应该是 10 (赋值表达式的返回值)"
+
+
+@pytest.mark.asyncio
+async def test_assignment_in_expression():
+    """TDD 测试: 验证在其他表达式（如函数调用）中使用的赋值。"""
+    script = """
+    x = 0;
+    reply(x = 5); // 赋值表达式应返回值 5
+    """
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block(script, mock_update, Mock())
+
+    mock_update.effective_message.reply_text.assert_called_once_with("5")
 
 
 @pytest.mark.asyncio

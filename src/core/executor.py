@@ -414,13 +414,9 @@ class RuleExecutor:
             except (IndexError, KeyError, TypeError):
                 return None
         if expr_type is Assignment:
-            # 代码评审意见:
-            # - [关键Bug] 这是当前实现中的一个主要逻辑缺陷。
-            #   赋值表达式（如 `a = 10`）在大多数语言中应该返回被赋的值（这里是 10）。
-            #   当前实现中，它返回的是 `_visit_assignment` 的结果，而 `_visit_assignment` 没有返回值，因此结果为 `None`。
-            #   这就导致了链式赋值 `c = a = 10` 最终使 `c` 变为了 `None`。
-            # - [修复方案] 正确的逻辑应该是：先计算右侧表达式的值，然后执行赋值操作，最后返回计算出的值。
-            #   我将在第二阶段修复此问题。
+            # [缺陷修复]
+            # 此前的实现中，赋值表达式不会返回被赋的值，导致 `a = b = 10` 这样的链式赋值失败。
+            # 现在的实现确保在执行赋值操作后，返回右侧表达式的值，符合预期。
             value = await self._evaluate_expression(expr.expression, current_scope)
             await self._visit_assignment(expr, current_scope, value)
             return value

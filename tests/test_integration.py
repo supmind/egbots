@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database import Base, Rule, Group, Verification, Log, EventLog
+from src.database import Base, Rule, Group, Verification, Log, EventLog, StateVariable
 from src.bot.handlers import process_event, verification_callback_handler
 from src.utils import generate_math_image
 
@@ -312,6 +312,116 @@ async def test_verification_callback_success(mock_update, mock_context, test_db_
     with test_db_session_factory() as db:
         v = db.query(Verification).filter_by(user_id=user_id).first()
         assert v is None
+
+async def test_integration_chain_assignment_in_warning_rule(mock_update, mock_context, test_db_session_factory):
+    """
+    集成测试: 验证链式赋值和 set_var/get_var 在“警告与自动封禁”场景中能正确工作。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    admin_id = 123
+    target_user_id = 456
+    group_id = -1001
+
+    # 脚本被修正为使用 set_var(), 这是语言规范支持的正确方法。
+    # 我们仍然可以测试链式赋值，但只针对本地变量。
+    warn_rule = f"""
+    WHEN command WHERE command.name == 'warn' THEN {{
+        target_id = int(command.arg[0]);
+
+        current_warnings = get_var("user.warnings", 0, target_id) or 0;
+
+        // 使用链式赋值更新本地变量
+        a = b = new_warns = current_warnings + 1;
+        set_var("user.warnings", new_warns, target_id);
+
+        // 验证链式赋值的返回值 (a 和 b 应该也等于 new_warns)
+        reply("用户 " + target_id + " 的最新警告次数为: " + a);
+
+        if (b >= 2) {{
+            ban_user(target_id);
+            set_var("user.warnings", null, target_id); // 清空变量
+        }}
+    }} END
+    """
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Chain Assign Warn", script=warn_rule))
+        db.commit()
+
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        mock_update.effective_user.id = admin_id
+
+        # --- 2. 第一次警告 ---
+        mock_update.message.text = f"/warn {target_user_id}"
+        await process_event("command", mock_update, mock_context)
+        # 验证 reply 使用了正确的返回值 (1)
+        mock_update.effective_message.reply_text.assert_called_once_with(f"用户 {target_user_id} 的最新警告次数为: 1")
+        mock_update.effective_message.reply_text.reset_mock()
+        mock_context.bot.ban_chat_member.assert_not_called()
+
+        # --- 3. 第二次警告 (导致封禁) ---
+        await process_event("command", mock_update, mock_context)
+        # 验证 reply 使用了正确的返回值 (2)
+        mock_update.effective_message.reply_text.assert_called_once_with(f"用户 {target_user_id} 的最新警告次数为: 2")
+        mock_context.bot.ban_chat_member.assert_called_once_with(group_id, target_user_id)
+
+        # --- 4. 验证数据库 ---
+        with test_db_session_factory() as db:
+            # 验证变量已被清空 (set_var with null)
+            final_var = db.query(StateVariable).filter_by(group_id=group_id, user_id=target_user_id, name="warnings").first()
+            assert final_var is None
+
+async def test_integration_foreach_with_actions(mock_update, mock_context, test_db_session_factory):
+    """
+    集成测试: 验证 foreach 循环与动作调用（特别是带 continue）的交互。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    admin_id = 123
+    group_id = -1001
+
+    script = """
+    WHEN command WHERE command.name == 'multikick' THEN {
+        foreach (user_id_str in command.arg) {
+            user_id = int(user_id_str);
+            if (user_id == user.id) {
+                reply("不能踢自己!");
+                continue;
+            }
+            kick_user(user_id);
+            log("Kicked " + user_id_str);
+        }
+    } END
+    """
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(Rule(group_id=group_id, name="Batch Kick Rule", script=script))
+        db.commit()
+
+    with patch('src.bot.handlers._seed_rules_if_new_group', return_value=False):
+        # --- 2. 执行 ---
+        # 命令包含管理员自己，应该被 continue 跳过
+        mock_update.effective_user.id = admin_id
+        mock_update.message.text = f"/multikick 456 {admin_id} 789"
+        await process_event("command", mock_update, mock_context)
+
+    # --- 3. 验证 ---
+    # 验证 kick_user (ban+unban) 被调用了两次
+    assert mock_context.bot.ban_chat_member.call_count == 2
+    assert mock_context.bot.unban_chat_member.call_count == 2
+    ban_calls = mock_context.bot.ban_chat_member.call_args_list
+    assert ban_calls[0].args == (group_id, 456)
+    assert ban_calls[1].args == (group_id, 789)
+
+    # 验证 reply 被调用了一次（用于提示不能踢自己）
+    mock_update.effective_message.reply_text.assert_called_once_with("不能踢自己!")
+
+    # 验证 log 动作被调用了两次
+    with test_db_session_factory() as db:
+        log_count = db.query(Log).count()
+        assert log_count == 2
+        logs = db.query(Log).order_by(Log.timestamp.asc()).all()
+        assert logs[0].message == "Kicked 456"
+        assert logs[1].message == "Kicked 789"
 
 async def test_full_warning_system_scenario(mock_update, mock_context, test_db_session_factory):
     """

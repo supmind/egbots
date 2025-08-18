@@ -11,7 +11,7 @@
 """
 
 import pytest
-from unittest.mock import Mock, AsyncMock, MagicMock
+from unittest.mock import Mock, AsyncMock, MagicMock, patch
 import json
 from datetime import datetime, timedelta, timezone
 import time
@@ -141,6 +141,28 @@ async def test_resolve_command_variable_on_non_command():
     assert await resolver.resolve("command.name") is None
     assert await resolver.resolve("command.arg_count") is None
     assert await resolver.resolve("command.arg[0]") is None
+
+async def test_resolve_command_variable_with_caching():
+    """测试 command.* 变量解析的缓存机制。"""
+    mock_user = User(id=123, is_bot=False, first_name="Test")
+    mock_chat = Chat(id=-1001, type="group")
+    mock_message = Message(message_id=2, date=datetime.now(timezone.utc), chat=mock_chat, text="/test arg1", from_user=mock_user)
+    mock_update = Update(update_id=1000, message=mock_message)
+    mock_context = Mock()
+    mock_context.bot_data = {}
+
+    cache = {}
+    resolver = VariableResolver(mock_update, mock_context, Mock(), cache)
+
+    # 使用 patch 来监视 shlex.split 的调用
+    with patch('shlex.split', return_value=['/test', 'arg1']) as mock_shlex_split:
+        # 第一次解析，应该调用 shlex.split
+        assert await resolver.resolve("command.name") == "test"
+        mock_shlex_split.assert_called_once()
+
+        # 第二次解析，应该使用缓存，不应再次调用 shlex.split
+        assert await resolver.resolve("command.arg_count") == 1
+        mock_shlex_split.assert_called_once() # 确认调用次数未增加
 
 async def test_resolve_persistent_variable_from_db(mock_update, test_db_session_factory):
     """测试从数据库中解析各种类型的持久化变量。"""

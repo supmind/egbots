@@ -29,19 +29,6 @@ def test_precompile_rule_valid():
     assert is_valid is True
     assert error is None
 
-@pytest.mark.parametrize("invalid_script, expected_error_part", [
-    ("WHEN message THEN { reply('ok') } END", "期望得到 token 类型 SEMICOLON"), # 缺少分号
-    ("WHEN message WHERE true { reply('ok'); } END", "期望得到关键字 'THEN'"), # 缺少 THEN
-    ("WHEN message THEN reply('ok'); } END", "期望得到 token 类型 LBRACE"), # 缺少左大括号
-    ("WHEN message or THEN { } END", "期望得到 token 类型 IDENTIFIER"), # or 后面缺少事件
-    ("WHEN a.b THEN { } END", "期望得到关键字 'THEN'"), # 事件不能是属性访问
-])
-def test_precompile_rule_invalid(invalid_script, expected_error_part):
-    """测试 precompile_rule 对各种无效脚本的错误报告。"""
-    is_valid, error = precompile_rule(invalid_script)
-    assert is_valid is False
-    assert error is not None
-    assert expected_error_part in error
 
 def test_parse_empty_script_fails():
     """测试解析空脚本或只有空白的脚本会失败。"""
@@ -217,6 +204,35 @@ def test_comment_parsing():
         RuleParser(script).parse()
     except RuleParserError as e:
         pytest.fail(f"解析包含注释的脚本时出错: {e}")
+
+def test_parse_schedule_event_with_cron():
+    """测试带有 Cron 表达式的 schedule 事件的解析。"""
+    script = 'WHEN schedule("*/5 * * * *") THEN { log("tick"); } END'
+    rule = RuleParser(script).parse()
+    assert rule.when_events == ['schedule("*/5 * * * *")']
+
+@pytest.mark.parametrize("invalid_script, expected_error_part", [
+    # General structure errors
+    ("WHEN message THEN { reply('ok') } END", "期望得到 token 类型 SEMICOLON"),
+    ("WHEN message WHERE true { reply('ok'); } END", "期望得到关键字 'THEN'"),
+    ("WHEN message THEN reply('ok'); } END", "期望得到 token 类型 LBRACE"),
+    ("WHEN message or THEN { } END", "期望得到 token 类型 IDENTIFIER"),
+    # Expression errors
+    ("WHEN a.b THEN { } END", "期望得到关键字 'THEN'"), # Correct error is about keyword, not token
+    ("WHEN message WHERE 1 + THEN { } END", "非预期的 token 'THEN'"),
+    # Exclusive schedule event errors
+    ("WHEN schedule() or message THEN { } END", "schedule() 事件不能与其他事件一起使用 'or'"),
+    ("WHEN message or schedule() THEN { } END", "schedule() 事件不能与其他事件一起使用 'or'"),
+    # Statement errors
+    ("WHEN message THEN { a = 1 + ; } END", "非预期的 token ';'"),
+])
+def test_detailed_error_messages(invalid_script, expected_error_part):
+    """测试 precompile_rule 对各种无效脚本的错误报告的详细程度。"""
+    is_valid, error = precompile_rule(invalid_script)
+    assert is_valid is False, f"脚本 '{invalid_script}' 本应无效但通过了编译"
+    assert error is not None
+    assert expected_error_part in error, f"对于脚本 '{invalid_script}', 错误信息 '{error}' 未包含期望的部分 '{expected_error_part}'"
+
 
 def test_default_rules_are_parsable():
     """

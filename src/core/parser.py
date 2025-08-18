@@ -233,16 +233,24 @@ class RuleParser:
 
         events = []
         while True:
-            if self._peek_type('IDENTIFIER') and self._peek_type('LPAREN', 1):
-                if events:
-                    raise RuleParserError("schedule() 事件不能与其他事件一起使用 'or'。")
+            is_schedule_call = self._peek_value('schedule') and self._peek_type('LPAREN', 1)
+
+            # 规则: schedule() 事件是排他的，不能与其他事件一起使用 'or'
+            if is_schedule_call and events:
+                raise RuleParserError("schedule() 事件不能与其他事件一起使用 'or'。", self._current_token().line, self._current_token().column)
+            if events and any(e.lower().startswith('schedule') for e in events):
+                raise RuleParserError("schedule() 事件不能与其他事件一起使用 'or'。", self._current_token().line, self._current_token().column)
+
+            if is_schedule_call:
                 call_expr = self._parse_action_call_expression()
                 args_str = ', '.join(f'"{arg.value}"' if isinstance(arg, Literal) else '...' for arg in call_expr.args)
                 events.append(f"{call_expr.action_name}({args_str})")
             else:
                 events.append(self._consume('IDENTIFIER').value)
 
-            if self._peek_type('LOGIC_OP') and self._peek_value('or'):
+            if self._peek_value('or'):
+                if any(e.lower().startswith('schedule') for e in events):
+                    raise RuleParserError("schedule() 事件不能与其他事件一起使用 'or'。", self._current_token().line, self._current_token().column)
                 self._consume_keyword('or')
                 continue
             else:
