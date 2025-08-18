@@ -211,6 +211,33 @@ async def test_expression_evaluation_edge_cases(expr, scope, expected):
 # =================== 动作执行测试 ===================
 
 @pytest.mark.asyncio
+async def test_action_reply_with_parse_mode(mock_update, mock_context):
+    """测试 reply 动作的 parse_mode 参数。"""
+    # 1. 测试 reply(text, "HTML")
+    mock_update.effective_message.reply_text = AsyncMock()
+    await _execute_then_block("reply('<b>bold</b>', 'HTML');", mock_update, mock_context)
+    mock_update.effective_message.reply_text.assert_called_once_with('<b>bold</b>', parse_mode='HTML')
+
+    # 2. 测试不带 parse_mode 的普通 reply
+    mock_update.effective_message.reply_text.reset_mock()
+    await _execute_then_block("reply('no format');", mock_update, mock_context)
+    mock_update.effective_message.reply_text.assert_called_once_with('no format')
+
+@pytest.mark.asyncio
+async def test_action_send_message_with_parse_mode(mock_update, mock_context):
+    """测试 send_message 动作的 parse_mode 参数。"""
+    # 1. 测试 send_message(text, "HTML")
+    mock_context.bot.send_message = AsyncMock()
+    mock_update.effective_chat.id = -1001
+    await _execute_then_block("send_message('<i>italic</i>', 'HTML');", mock_update, mock_context)
+    mock_context.bot.send_message.assert_called_once_with(chat_id=-1001, text='<i>italic</i>', parse_mode='HTML')
+
+    # 2. 测试不带 parse_mode 的普通 send_message
+    mock_context.bot.send_message.reset_mock()
+    await _execute_then_block("send_message('no format either');", mock_update, mock_context)
+    mock_context.bot.send_message.assert_called_once_with(chat_id=-1001, text='no format either')
+
+@pytest.mark.asyncio
 async def test_action_reply():
     """测试 reply 动作。"""
     mock_update = Mock()

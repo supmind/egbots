@@ -535,26 +535,34 @@ class RuleExecutor:
         return self.update.effective_user.id if self.update.effective_user else None
 
     @action("reply")
-    async def reply(self, text: Any):
+    async def reply(self, text: Any, parse_mode: str = None):
         """
         动作：回复触发当前规则的消息。
 
         Args:
             text: 要发送的文本内容。会被自动转换为字符串。
+            parse_mode (str, optional): 指定消息的解析模式，如 'HTML' 或 'MarkdownV2'。
         """
         if self.update.effective_message:
-            await self.update.effective_message.reply_text(str(text))
+            if parse_mode:
+                await self.update.effective_message.reply_text(str(text), parse_mode=parse_mode)
+            else:
+                await self.update.effective_message.reply_text(str(text))
 
     @action("send_message")
-    async def send_message(self, text: Any):
+    async def send_message(self, text: Any, parse_mode: str = None):
         """
         动作：在当前群组发送一条新消息。
 
         Args:
             text: 要发送的文本内容。会被自动转换为字符串。
+            parse_mode (str, optional): 指定消息的解析模式，如 'HTML' 或 'MarkdownV2'。
         """
         if self.update.effective_chat:
-            await self.context.bot.send_message(chat_id=self.update.effective_chat.id, text=str(text))
+            if parse_mode:
+                await self.context.bot.send_message(chat_id=self.update.effective_chat.id, text=str(text), parse_mode=parse_mode)
+            else:
+                await self.context.bot.send_message(chat_id=self.update.effective_chat.id, text=str(text))
 
     @action("delete_message")
     async def delete_message(self):
