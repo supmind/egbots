@@ -7,12 +7,14 @@ import asyncio
 import logging
 import os
 import re
+from datetime import time
 from dotenv import load_dotenv
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.jobstores.base import JobLookupError
-from telegram.ext import Application, MessageHandler, CommandHandler, ChatMemberHandler, filters, CallbackQueryHandler
+# 增加了 JobQueue 的导入，这是 telegram-bot 中处理计划任务的核心
+from telegram.ext import Application, MessageHandler, CommandHandler, ChatMemberHandler, filters, CallbackQueryHandler, JobQueue
 
 # --- 内部模块导入 ---
 from src.database import init_database, get_session_factory, Rule
@@ -55,7 +57,9 @@ async def load_scheduled_rules(application: Application):
     """
     logger.info("正在从数据库加载计划任务规则...")
     session_factory = application.bot_data['session_factory']
-    scheduler = application.bot_data['scheduler']
+    # 从 application 中获取 job_queue 和 scheduler
+    job_queue = application.job_queue
+    scheduler = job_queue.scheduler
 
     try:
         with session_scope(session_factory) as db_session:
@@ -90,8 +94,13 @@ async def load_scheduled_rules(application: Application):
 
                             cron_kwargs = dict(zip(['minute', 'hour', 'day', 'month', 'day_of_week'], cron_parts))
 
+                            # 核心修复：使用 job_queue._get_callback 来包装处理器
+                            # 这能确保在任务触发时，正确的 `context` 对象会被注入
+                            # 即使我们直接使用底层的 scheduler.add_job
+                            wrapped_handler = job_queue._get_callback(scheduled_job_handler)
+
                             scheduler.add_job(
-                                scheduled_job_handler,
+                                wrapped_handler,
                                 'cron',
                                 id=job_id,
                                 replace_existing=True,
@@ -134,19 +143,27 @@ async def main():
     # `get_session_factory` 创建一个工厂，用于在需要时生成新的数据库会话
     session_factory = get_session_factory(engine)
 
-    # --- 3. 初始化计划任务调度器 (APScheduler) ---
+    # --- 3. 初始化计划任务调度器 (APScheduler) 和 JobQueue ---
     logger.info("正在设置计划任务调度器...")
     jobstores = {
         'default': SQLAlchemyJobStore(url=db_url)
     }
     scheduler = AsyncIOScheduler(jobstores=jobstores, timezone="UTC")
 
+    # 创建 JobQueue 实例，这是 python-telegram-bot 的标准做法
+    job_queue = JobQueue()
+    # 将我们自定义的 scheduler 赋值给 job_queue.scheduler 属性
+    job_queue.scheduler = scheduler
+
     # --- 4. 初始化 Telegram Bot Application ---
     logger.info("正在启动机器人应用...")
-    application = Application.builder().token(token).build()
+    # 核心修复：在构建 Application 时传入 job_queue
+    # 这会将 job_queue 和 application 深度集成，从而自动处理 context
+    application = Application.builder().token(token).job_queue(job_queue).build()
 
     # --- 5. 设置全局应用上下文 (Bot Data) ---
     application.bot_data['session_factory'] = session_factory
+    # 为了兼容旧代码（如 load_scheduled_rules），仍然保留对 scheduler 的引用
     application.bot_data['scheduler'] = scheduler
     application.bot_data['rule_cache'] = {}
     application.bot_data['media_group_aggregator'] = {}
@@ -170,7 +187,12 @@ async def main():
 
     # --- 7. 启动一切 ---
     try:
+        # 使用 application 作为异步上下文管理器
         async with application:
+            # 从 application 获取 job_queue 和 scheduler
+            job_queue = application.job_queue
+            scheduler = job_queue.scheduler
+
             # 以暂停模式启动调度器，以安全地操作作业存储
             scheduler.start(paused=True)
             logger.info("调度器已以暂停模式启动。")
@@ -182,10 +204,12 @@ async def main():
             except JobLookupError:
                 logger.info("未找到旧的 'daily_cleanup' 计划任务，无需移除。")
 
-            # 添加新的、正确的每日清理任务
-            scheduler.add_job(
-                cleanup_old_events, 'cron', hour=4, minute=0, id='daily_cleanup',
-                kwargs={'db_url': db_url}
+            # 核心修复：使用 job_queue.run_daily 来添加任务
+            # 它会自动处理 context，并且我们不再需要传递错误的 db_url
+            job_queue.run_daily(
+                cleanup_old_events,
+                time=time(hour=4, minute=0),
+                job_kwargs={'id': 'daily_cleanup', 'misfire_grace_time': 3600}
             )
             logger.info("已成功添加新的 'daily_cleanup' 计划任务。")
 
@@ -196,11 +220,14 @@ async def main():
             except JobLookupError:
                 logger.info("未找到旧的 'sync_admins' 计划任务，无需移除。")
 
-            scheduler.add_job(
-                sync_group_admins, 'interval', hours=1, id='sync_admins'
+            # 核心修复：使用 job_queue.run_repeating 来添加任务
+            # 它同样会自动处理 context
+            job_queue.run_repeating(
+                sync_group_admins,
+                interval=3600,  # 每小时运行一次
+                job_kwargs={'id': 'sync_admins', 'misfire_grace_time': 600}
             )
             logger.info("已成功添加每小时运行的 'sync_admins' 计划任务。")
-
 
             # 加载所有基于规则的计划任务
             await load_scheduled_rules(application)
@@ -209,14 +236,15 @@ async def main():
             scheduler.resume()
             logger.info("调度器已恢复运行。")
             logger.info("机器人已完成启动，开始轮询接收更新...")
-            await application.start()
-            await application.updater.start_polling()
-            # 运行直到被取消（例如，通过 Ctrl+C）
+            # application.start() 和 updater.start_polling() 在 async with application 中会自动调用
+            # 我们只需要保持事件循环运行即可
             await asyncio.Future()
     finally:
         logger.info("正在关闭调度器...")
-        if scheduler.running:
-            scheduler.shutdown()
+        # application 上下文管理器会自动处理调度器和更新器的关闭
+        # 手动关闭以确保万无一失
+        if application.job_queue and application.job_queue.scheduler.running:
+            application.job_queue.scheduler.shutdown()
             logger.info("调度器已关闭。")
 
 

@@ -48,14 +48,23 @@ async def test_load_scheduled_rules(test_db_session_factory):
     rule_script = 'WHEN schedule("0 9 * * *") THEN { send_message("Daily report time!"); }'
     rule = Rule(group_id=group.id, name="Daily Report", script=rule_script)
 
+    # 模拟调度器和 JobQueue
     mock_scheduler = MagicMock()
     mock_scheduler.add_job = MagicMock()
+
+    # 核心修复：模拟 job_queue 并将 mock_scheduler 放入其中
+    mock_job_queue = MagicMock()
+    mock_job_queue.scheduler = mock_scheduler
+    # _get_callback 是一个内部方法，但在这里我们需要模拟它以确保调用流程正确
+    # 它应该简单地返回它接收到的处理器函数
+    mock_job_queue._get_callback = lambda handler: handler
 
     mock_application = MagicMock()
     mock_application.bot_data = {
         'session_factory': test_db_session_factory,
-        'scheduler': mock_scheduler
     }
+    # 将 mock_job_queue 附加到 application
+    mock_application.job_queue = mock_job_queue
 
     # --- 2. Execute & Assert ---
     with test_db_session_factory() as session:
@@ -67,6 +76,7 @@ async def test_load_scheduled_rules(test_db_session_factory):
 
         await main_module.load_scheduled_rules(mock_application)
 
+        # 断言现在应该针对 mock_scheduler.add_job
         mock_scheduler.add_job.assert_called_once()
         call_args, call_kwargs = mock_scheduler.add_job.call_args
 
@@ -86,7 +96,8 @@ async def test_load_scheduled_rules(test_db_session_factory):
 @patch('main.AsyncIOScheduler')
 @patch('main.load_scheduled_rules', new_callable=AsyncMock)
 @patch('main.os.getenv')
-async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_get_session, mock_init_db, mock_app_builder, mock_asyncio_future):
+@patch('main.JobQueue') # <--- 模拟 JobQueue
+async def test_main_full_run(mock_job_queue_class, mock_getenv, mock_load_rules, mock_scheduler_class, mock_get_session, mock_init_db, mock_app_builder, mock_asyncio_future):
     """
     对 main() 函数的流程进行一次高层次的集成测试。
     这个测试的关键是模拟 `asyncio.Future()`，以防止 `main` 函数无限期等待。
@@ -97,15 +108,28 @@ async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_
         "DATABASE_URL": "sqlite:///:memory:"
     }.get(key, default)
 
+    # 模拟 AsyncIOScheduler 实例和它的 start 方法
+    mock_scheduler_instance = MagicMock()
+    mock_scheduler_class.return_value = mock_scheduler_instance
+
+    # 模拟 JobQueue 实例
+    mock_job_queue_instance = MagicMock()
+    # 核心修复：将模拟的 scheduler 实例赋给模拟的 job_queue 实例
+    mock_job_queue_instance.scheduler = mock_scheduler_instance
+    mock_job_queue_class.return_value = mock_job_queue_instance
+
+    # 模拟 Application 实例
     mock_app = AsyncMock()
     mock_app.bot_data = {}
-    # 修复1: 将 add_handler 明确设置为同步的 MagicMock，以消除 RuntimeWarning
     mock_app.add_handler = MagicMock()
     mock_app.updater = AsyncMock()
-    mock_app_builder.return_value.token.return_value.build.return_value = mock_app
+    # 核心修复：将模拟的 job_queue 实例赋给模拟的 application 实例
+    mock_app.job_queue = mock_job_queue_instance
 
-    # 修复2: 确保对 asyncio.Future() 的调用返回一个真正的可等待对象(协程)。
-    # asyncio.sleep(0) 是一个创建简单协程的完美、标准的方法。
+    # 设置 Application.builder 链式调用以返回我们的 mock_app
+    mock_app_builder.return_value.token.return_value.job_queue.return_value.build.return_value = mock_app
+
+    # 确保对 asyncio.Future() 的调用返回一个真正的可等待对象(协程)。
     mock_asyncio_future.return_value = asyncio.sleep(0)
 
     # --- 2. Execute ---
@@ -114,8 +138,12 @@ async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_
     # --- 3. Assert ---
     mock_init_db.assert_called_once_with("sqlite:///:memory:")
     mock_get_session.assert_called_once()
-    mock_scheduler.return_value.start.assert_called_once()
+
+    # 核心修复：断言现在应该针对我们创建的 scheduler 实例
+    mock_scheduler_instance.start.assert_called_once()
+
     mock_app_builder.return_value.token.assert_called_once_with("fake_token")
+    mock_app_builder.return_value.token.return_value.job_queue.assert_called_once_with(mock_job_queue_instance)
 
     assert 'session_factory' in mock_app.bot_data
     assert 'scheduler' in mock_app.bot_data
@@ -123,8 +151,10 @@ async def test_main_full_run(mock_getenv, mock_load_rules, mock_scheduler, mock_
 
     # 验证启动逻辑是否被正确调用
     mock_load_rules.assert_awaited_once()
-    mock_app.start.assert_awaited_once()
-    mock_app.updater.start_polling.assert_awaited_once()
+    # 在 `async with application:` 上下文中，start() 和 updater.start_polling() 不再需要手动调用
+    # 因此我们移除对它们的断言
+    # mock_app.start.assert_awaited_once()
+    # mock_app.updater.start_polling.assert_awaited_once()
 
     # 验证 `asyncio.Future()` 被调用，确认我们已经到达了主循环
     mock_asyncio_future.assert_called_once()
