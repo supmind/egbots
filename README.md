@@ -119,25 +119,38 @@ END
 
 ### 2.8. 可用动作 (Actions)
 
-动作是脚本与机器人功能交互的唯一方式。对于需要指定目标用户的动作（如 `ban_user`, `mute_user` 等），其行为遵循以下简单原则：
-*   **如果提供了 `user_id` 参数**，则动作作用于指定的用户。
-*   **如果未提供 `user_id` 参数**，则动作默认作用于**触发规则的用户**（即 `user.id`）。
+动作是脚本与机器人功能交互的唯一方式。对于需要指定目标用户的动作（如 `ban_user`, `mute_user` 等），其目标用户的确定遵循一个智能、安全的优先级顺序：
+1.  **显式用户ID优先**: 如果动作调用时明确提供了 `user_id` 参数 (例如 `ban_user(12345)`), 则动作总是作用于该指定用户。
+2.  **回复消息自动识别**: 如果未提供 `user_id`，且该命令是**通过回复**另一个用户的消息来触发的，那么动作将自动作用于**被回复消息的原始作者**。这是最常见和最直观的管理场景。
+3.  **回退到触发者**: 如果以上两个条件都不满足（即没有提供`user_id`，也不是回复消息），动作将作用于**触发该规则的用户** (例如，一个用户私聊机器人或在群里直接发送命令而没有回复任何人)。
 
-这套设计哲学旨在让规则的行为变得明确且可预测。为了对**被回复消息的用户**执行操作，您必须在规则中明确地从上下文中提取其ID，如下所示：
+这套设计哲学旨在让管理员的操作尽可能简单和符合直觉，避免了意外的自我操作（例如管理员回复垃圾消息时把自己封禁）。
+
+**简化后的示例：**
+
+得益于这个智能的目标识别系统，许多常见的管理任务变得异常简单。
 ```
-// 示例：使用 /warn 命令警告被回复的用户
+// 示例 1: 使用 /ban 命令封禁被回复的用户
+// 管理员只需在群组中回复一个垃圾消息，然后输入 /ban 即可。
+WHEN command WHERE command.name == 'ban' THEN {
+  // 无需手动获取 user_id，动作会自动识别目标
+  ban_user("垃圾广告"); // 'ban_user' 会自动作用于被回复消息的作者
+  delete_message();    // 删除 /ban 命令本身
+} END
+
+// 示例 2: 警告被回复的用户
 WHEN command WHERE command.name == 'warn' THEN {
-  if (message.reply_to_message) {
-    target_id = message.reply_to_message.from_user.id;
-
-    // 使用 get_var 和 set_var 来处理指定用户的变量
-    current_warnings = get_var("user.warnings", 0, target_id);
-    set_var("user.warnings", current_warnings + 1, target_id);
-
-    reply("用户 " + target_id + " 已被警告。");
-  } else {
+  if (not message.reply_to_message) {
     reply("请回复一个用户的消息来使用此命令。");
+    stop(); // 使用 stop() 提前终止规则
   }
+
+  // set_var 和 get_var 也遵循同样的用户识别逻辑
+  // 如果提供了 user_id，则使用它；否则，它们会自动从回复中寻找目标用户。
+  current_warnings = get_var("user.warnings", 0); // 自动获取被回复用户的警告次数
+  set_var("user.warnings", current_warnings + 1);  // 自动为被回复用户增加警告次数
+
+  reply("用户已被警告。当前警告次数: " + (current_warnings + 1));
 } END
 ```
 
