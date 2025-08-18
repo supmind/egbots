@@ -54,28 +54,41 @@ END
     {
         "name": "[管理] 禁言用户",
         "priority": 500,
-        "description": "提供 /mute 命令，允许管理员通过回复消息或指定用户ID，并提供时长（如 10m, 1h, 2d）来禁言一个用户。",
+        "description": "提供 /mute 命令，允许管理员通过回复消息或指定用户ID，并提供时长（如 10m, 1h, 2d）来禁言一个用户，可附带原因。",
         "script": """
 WHEN command WHERE command.name == 'mute' AND user.is_admin == true THEN {
     target_id = null;
     duration = null;
+    reason = "";
 
     if (message.reply_to_message) {
         target_id = message.reply_to_message.from_user.id;
         if (command.arg_count > 0) {
             duration = command.arg[0];
+            if (command.arg_count > 1) {
+                reason_parts = split(command.full_args, " ", 1);
+                if (len(reason_parts) > 1) { reason = reason_parts[1]; }
+            }
         }
     } else if (command.arg_count > 1) {
         target_id = int(command.arg[0]);
         duration = command.arg[1];
+        if (command.arg_count > 2) {
+            reason_parts = split(command.full_args, " ", 2);
+            if (len(reason_parts) > 2) { reason = reason_parts[2]; }
+        }
     }
 
     if (target_id != null and duration != null) {
-        mute_user(duration, target_id);
-        reply("用户 " + target_id + " 已被成功禁言 " + duration + "。");
-        log("用户 " + target_id + " 被 " + user.id + " 禁言 " + duration + "。", "moderation");
+        mute_user(duration, target_id, reason);
+        reply_text = "用户 " + target_id + " 已被成功禁言 " + duration + "。";
+        if (reason != "") {
+            reply_text = reply_text + " 原因: " + reason;
+        }
+        reply(reply_text);
+        log("用户 " + target_id + " 被 " + user.id + " 禁言 " + duration + "。原因: " + (reason or "未提供"), "moderation");
     } else {
-        reply("使用方法:\\n- 回复用户消息: /mute <时长(e.g., 10m, 1h, 2d)>\\n- 使用ID: /mute <user_id> <时长>");
+        reply("使用方法:\\n- 回复: /mute <时长> [原因]\\n- ID: /mute <user_id> <时长> [原因]");
     }
 }
 END
@@ -127,22 +140,36 @@ END
     {
         "name": "[管理] 封禁用户",
         "priority": 500,
-        "description": "提供 /ban 命令，允许管理员通过回复消息或指定用户ID来永久封禁一个用户。",
+        "description": "提供 /ban 命令，允许管理员通过回复消息或指定用户ID来永久封禁一个用户，可附带原因。",
         "script": """
 WHEN command WHERE command.name == 'ban' AND user.is_admin == true THEN {
     target_id = null;
+    reason = "";
+
     if (message.reply_to_message) {
         target_id = message.reply_to_message.from_user.id;
+        reason = command.full_args;
     } else if (command.arg_count > 0) {
         target_id = int(command.arg[0]);
+        if (command.arg_count > 1) {
+            // 将第一个参数（用户ID）之后的所有内容都作为原因
+            reason_parts = split(command.full_args, " ", 1);
+            if(len(reason_parts) > 1) {
+                reason = reason_parts[1];
+            }
+        }
     }
 
     if (target_id != null) {
-        ban_user(target_id);
-        reply("用户 " + target_id + " 已被成功封禁。");
-        log("用户 " + target_id + " 被 " + user.id + " 封禁。", "moderation");
+        ban_user(target_id, reason);
+        reply_text = "用户 " + target_id + " 已被成功封禁。";
+        if (reason != "") {
+            reply_text = reply_text + " 原因: " + reason;
+        }
+        reply(reply_text);
+        log("用户 " + target_id + " 被 " + user.id + " 封禁。原因: " + (reason or "未提供"), "moderation");
     } else {
-        reply("使用方法: 回复一个用户的消息并输入 /ban，或使用 /ban <user_id>");
+        reply("使用方法:\n- 回复用户消息: /ban [原因]\n- 使用ID: /ban <user_id> [原因]");
     }
 }
 END

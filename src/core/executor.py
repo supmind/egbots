@@ -608,13 +608,14 @@ class RuleExecutor:
         except Exception as e: logger.error(f"踢出用户 {target_user_id} 失败: {e}")
 
     @action("mute_user")
-    async def mute_user(self, duration: str, user_id: Any = None):
+    async def mute_user(self, duration: str, user_id: Any = None, reason: str = ""):
         """
         动作：禁言一个用户一段时间。
 
         Args:
             duration (str): 禁言时长。格式为数字加上单位，例如 '1m', '2h', '3d'。
             user_id (optional): 要禁言的用户ID。如果未提供，则默认为触发规则的用户。
+            reason (str, optional): 禁言原因，将用于日志记录。
         """
         if not self.update.effective_chat: return
         target_user_id = self._get_target_user_id(user_id)
@@ -628,7 +629,10 @@ class RuleExecutor:
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=datetime.now(timezone.utc) + delta
             )
-            logger.info(f"用户 {target_user_id} 在群组 {self.update.effective_chat.id} 中已被禁言 {duration}。")
+            log_message = f"用户 {target_user_id} 在群组 {self.update.effective_chat.id} 中已被禁言 {duration}。"
+            if reason:
+                log_message += f" 原因: {reason}"
+            logger.info(log_message)
         except Exception as e: logger.error(f"禁言用户 {target_user_id} 失败: {e}")
 
     @action("unmute_user")
