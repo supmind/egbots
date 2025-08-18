@@ -74,6 +74,9 @@ async def test_set_and_read_various_variable_types(mock_update, mock_context, te
     端到端测试：验证 `set_var` 对不同数据类型（布尔、数字、列表）的序列化和反序列化是否正确。
     """
     # --- 1. 准备阶段 (Setup) ---
+    # 关键修复：确保此测试中的 update 不被误认为是回复
+    mock_update.effective_message.reply_to_message = None
+
     with test_db_session_factory() as db:
         db.add(Group(id=-1001, name="Test Group"))
         # Rule to set variables

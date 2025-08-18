@@ -523,15 +523,31 @@ class RuleExecutor:
         return self.update.effective_user.id if self.update.effective_user else None
 
     def _get_target_user_id(self, explicit_user_id: Any = None) -> Optional[int]:
-        """一个统一的辅助方法，用于确定动作的目标用户ID，确保行为一致且可预测。"""
-        # 代码评审意见:
-        # - 这是一个很好的辅助函数。它将“确定目标用户”的逻辑（优先使用显式传入的ID，否则回退到事件发起者）
-        #   集中在一个地方，避免了在每个动作中重复实现相同的逻辑，提高了代码的可维护性和一致性。
-        if explicit_user_id:
-            try: return int(explicit_user_id)
+        """
+        一个统一的辅助方法，用于确定动作的目标用户ID，确保行为一致且可预测。
+
+        此方法遵循以下优先级顺序来确定目标用户：
+        1.  如果动作调用时明确提供了 `explicit_user_id`，则优先使用该ID。
+        2.  如果未提供 `explicit_user_id`，检查当前消息是否为对另一条消息的回复。如果是，则目标为被回复消息的原始发件人。
+        3.  如果以上条件都不满足，则目标为触发当前事件的用户。
+        """
+        # 1. 优先使用显式提供的 user_id
+        if explicit_user_id is not None:
+            try:
+                return int(explicit_user_id)
             except (ValueError, TypeError):
                 logger.warning(f"提供的 user_id '{explicit_user_id}' 不是一个有效的用户ID。")
                 return None
+
+        # 2. 其次，检查是否是对消息的回复，如果是，则目标是被回复者
+        if (
+            self.update.effective_message and
+            self.update.effective_message.reply_to_message and
+            self.update.effective_message.reply_to_message.from_user
+        ):
+            return self.update.effective_message.reply_to_message.from_user.id
+
+        # 3. 最后，回退到事件的发起者
         return self.update.effective_user.id if self.update.effective_user else None
 
     @action("reply")

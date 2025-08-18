@@ -145,6 +145,63 @@ async def test_action_ban_user(mock_update, mock_context):
     # ban_chat_member doesn't have a reason argument in the library version used,
     # but the action itself logs it. We are just testing the bot call here.
 
+
+@pytest.mark.asyncio
+async def test_action_targets_replied_user_by_default(mock_context):
+    """
+    测试：当动作未明确指定 user_id 时，它应该默认作用于被回复消息的用户。
+    这是对核心业务逻辑 bug 的关键测试。
+    """
+    # 1. 准备 Mocks
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    # 模拟消息发送者（管理员）
+    mock_update.effective_user = Mock()
+    mock_update.effective_user.id = 111  # 管理员 ID
+    # 模拟被回复的消息
+    mock_update.effective_message.reply_to_message = Mock()
+    mock_update.effective_message.reply_to_message.from_user = Mock()
+    mock_update.effective_message.reply_to_message.from_user.id = 999  # 被回复的用户 ID
+
+    mock_context.bot.ban_chat_member = AsyncMock()
+
+    # 2. 执行不带 user_id 的 ban_user 动作
+    await _execute_then_block("ban_user(null, 'spam');", mock_update, mock_context)
+
+    # 3. 断言
+    # API 应该被调用，并且目标是被回复的用户 (999)，而不是管理员 (111)
+    mock_context.bot.ban_chat_member.assert_called_once()
+    call_args = mock_context.bot.ban_chat_member.call_args
+    assert call_args.args[0] == -1001
+    assert call_args.args[1] == 999
+
+
+@pytest.mark.asyncio
+async def test_action_targets_self_when_not_reply(mock_context):
+    """
+    测试：当动作未明确指定 user_id 且不是回复时，它应该作用于消息发送者本人。
+    """
+    # 1. 准备 Mocks
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    # 模拟消息发送者（管理员）
+    mock_update.effective_user = Mock()
+    mock_update.effective_user.id = 111  # 管理员 ID
+    # 关键：确保没有回复消息
+    mock_update.effective_message.reply_to_message = None
+
+    mock_context.bot.ban_chat_member = AsyncMock()
+
+    # 2. 执行不带 user_id 的 ban_user 动作
+    await _execute_then_block("ban_user(null, 'spam');", mock_update, mock_context)
+
+    # 3. 断言
+    # API 应该被调用，并且目标是发送者自己 (111)
+    mock_context.bot.ban_chat_member.assert_called_once()
+    call_args = mock_context.bot.ban_chat_member.call_args
+    assert call_args.args[0] == -1001
+    assert call_args.args[1] == 111
+
 @pytest.mark.asyncio
 async def test_action_mute_user(mock_update, mock_context):
     """测试 mute_user 动作。"""
@@ -248,19 +305,20 @@ async def test_action_reply():
     mock_update.effective_message.reply_text.assert_called_once_with('hello world')
 
 @pytest.mark.asyncio
-async def test_action_unmute_user_targeting():
+async def test_action_unmute_user_targeting(mock_context):
     """测试 unmute_user 动作的目标判定是否符合新规则。"""
     # 1. 设置 Mocks
     mock_update = Mock()
     mock_update.effective_chat.id = 12345
     mock_update.effective_user.id = 9876  # 动作发起者ID
-    mock_context = Mock()
-    mock_context.bot.restrict_chat_member = AsyncMock()
+    mock_update.effective_message.reply_to_message = None # 确保不是回复
 
     # unmute_user 会调用 get_chat 来获取默认权限，因此也需要 mock
     mock_chat = Mock()
     mock_chat.permissions = ChatPermissions(can_send_messages=True, can_send_other_messages=True)
     mock_context.bot.get_chat = AsyncMock(return_value=mock_chat)
+    mock_context.bot.restrict_chat_member = AsyncMock()
+
 
     # --- 场景1: 未提供 user_id，应作用于发起者 ---
     await _execute_then_block("unmute_user();", mock_update, mock_context)
@@ -387,6 +445,7 @@ async def test_action_set_var(test_db_session_factory):
     mock_update = Mock()
     mock_update.effective_chat.id = -1001
     mock_update.effective_user.id = 123
+    mock_update.effective_message.reply_to_message = None # 确保不是回复
     mock_context = Mock()
     mock_context.bot_data = {}
 
@@ -899,6 +958,10 @@ async def test_builtin_get_var(mock_update, mock_context, test_db_session_factor
     """对新的 get_var 内置函数进行单元测试。"""
     from src.database import StateVariable
     import json
+
+    # 为这个测试专门配置 mock_update
+    mock_update.effective_user.id = 123
+    mock_update.effective_message.reply_to_message = None
 
     with test_db_session_factory() as session:
         # 准备数据
