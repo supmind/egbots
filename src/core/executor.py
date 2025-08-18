@@ -207,12 +207,17 @@ def get_var(executor: 'RuleExecutor', variable_path: str, default: Any = None, u
         return default
 
     try:
+        # 代码评审意见:
+        # - 简化了变量的读取逻辑。
+        # - `set_var` 动作确保所有值都通过 `json.dumps` 存储，
+        #   因此在读取时，我们应该只依赖 `json.loads`。
+        # - 移除了对旧的、非JSON格式数据的回退处理，这使得数据流更加一致和可预测。
+        #   如果数据库中存在旧格式的数据，应通过一次性的迁移脚本来处理，而不是在运行时代码中保留兼容逻辑。
         return json.loads(variable.value)
     except json.JSONDecodeError:
-        val_str = variable.value
-        if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
-            return int(val_str)
-        return val_str
+        # 如果JSON解析失败，这是一个数据损坏的迹象。记录错误并返回默认值。
+        logger.error(f"解析持久化变量 '{var_name}' (ID: {variable.id}) 的值时失败。原始值: '{variable.value}'")
+        return default
 
 # ==================== 自定义控制流异常 ====================
 

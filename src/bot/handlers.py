@@ -42,7 +42,10 @@ def _get_or_create_user(db_session: Session, user: TelegramUser) -> User:
             is_bot=user.is_bot
         )
         db_session.add(db_user)
-        db_session.commit()
+        # 代码评审意见:
+        # - 移除了这里的 db_session.commit()。
+        # - 让外层的 `session_scope` 来统一管理事务的提交，
+        #   可以确保在一个请求的整个生命周期中所有数据库操作的原子性。
         logger.info(f"数据库中未找到用户 {user.id}，已自动创建。")
     return db_user
 
@@ -78,7 +81,11 @@ def _seed_rules_if_new_group(chat_id: int, db_session: Session) -> bool:
                 is_active=True
             )
             db_session.add(new_rule)
-        db_session.commit()
+
+        # 将新创建的对象刷入当前事务，但不提交
+        # 这使得后续在同一个事务中的查询可以立即看到这些新规则
+        db_session.flush()
+
         logger.info(f"群组 {chat_id} 的默认规则已成功植入。")
         return True
     return False
@@ -239,6 +246,33 @@ async def user_leave_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """处理用户离开事件。"""
     await process_event("user_leave", update, context)
 
+# =================== 命令处理器辅助函数 ===================
+async def _get_rule_from_command(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Session) -> Rule | None:
+    """
+    一个用于命令处理器的辅助函数，用于验证管理员权限并从命令参数中获取规则。
+    """
+    if not await _is_user_admin(update, context):
+        await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+        return None
+
+    if not context.args:
+        command = update.message.text.split()[0]
+        await update.message.reply_text(f"用法: {command} <规则ID>")
+        return None
+
+    try:
+        rule_id = int(context.args[0])
+        rule = db.query(Rule).filter_by(id=rule_id, group_id=update.effective_chat.id).one_or_none()
+        if not rule:
+            await update.message.reply_text(f"错误：未找到ID为 {rule_id} 的规则。")
+            return None
+        return rule
+    except (ValueError, IndexError):
+        command = update.message.text.split()[0]
+        await update.message.reply_text(f"用法: {command} <规则ID>")
+        return None
+
+
 # =================== 命令处理器 ===================
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,61 +313,68 @@ async def rules_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def rule_on_off_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /ruleon 和 /ruleoff 命令。"""
-    if not update.effective_chat or not await _is_user_admin(update, context):
-        return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
+    session_factory: sessionmaker = context.bot_data['session_factory']
+    with session_scope(session_factory) as db:
+        rule = await _get_rule_from_command(update, context, db)
+        if not rule:
+            return
 
-    command = update.message.text.split()[0].lower()
-    enable = command == "/ruleon"
+        command = update.message.text.split()[0].lower()
+        enable = command == "/ruleon"
+        rule.is_active = enable
 
-    if not context.args:
-        return await update.message.reply_text(f"用法: `{command} <规则ID>`")
+        # 清除缓存以使更改立即生效
+        if update.effective_chat.id in context.bot_data.get('rule_cache', {}):
+            del context.bot_data['rule_cache'][update.effective_chat.id]
 
-    try:
-        rule_id = int(context.args[0])
-        session_factory: sessionmaker = context.bot_data['session_factory']
-        with session_scope(session_factory) as db:
-            rule = db.query(Rule).filter_by(id=rule_id, group_id=update.effective_chat.id).one_or_none()
-            if not rule:
-                await update.message.reply_text(f"错误：未找到ID为 {rule_id} 的规则。")
-                return
-            rule.is_active = enable
-            db.commit()
-            # 清除缓存以使更改立即生效
-            if update.effective_chat.id in context.bot_data.get('rule_cache', {}):
-                del context.bot_data['rule_cache'][update.effective_chat.id]
-            status = "✅ 启用" if enable else "❌ 禁用"
-            await update.message.reply_text(f"成功将规则 “{rule.name}” (ID: {rule_id}) 的状态更新为: {status}。")
-    except (ValueError, IndexError):
-        await update.message.reply_text(f"用法: `{command} <规则ID>`")
+        status = "✅ 启用" if enable else "❌ 禁用"
+        await update.message.reply_text(f"成功将规则 “{rule.name}” (ID: {rule.id}) 的状态更新为: {status}。")
 
 async def rule_help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /rulehelp 命令，显示规则帮助信息。"""
-    if not update.effective_chat or not await _is_user_admin(update, context):
-        return await update.message.reply_text("抱歉，只有群组管理员才能使用此命令。")
-
     session_factory: sessionmaker = context.bot_data['session_factory']
-    if not context.args:
-        return await update.message.reply_text("用法: /rulehelp <规则ID>")
+    with session_scope(session_factory) as db:
+        rule = await _get_rule_from_command(update, context, db)
+        if not rule:
+            return
 
-    try:
-        rule_id = int(context.args[0])
-        with session_scope(session_factory) as db:
-            rule = db.query(Rule).filter_by(id=rule_id, group_id=update.effective_chat.id).one_or_none()
-            if not rule:
-                return await update.message.reply_text(f"错误：未找到ID为 {rule_id} 的规则。")
+        status = "✅ 激活" if rule.is_active else "❌ 禁用"
+        message = (
+            f"<b>规则详情 (ID: {rule.id})</b>\n"
+            f"<b>名称:</b> {rule.name}\n"
+            f"<b>状态:</b> {status}\n"
+            f"<b>优先级:</b> {rule.priority}\n"
+            f"<b>描述:</b>\n{rule.description or '未提供'}\n\n"
+            f"<b>脚本内容:</b>\n<pre>{rule.script}</pre>"
+        )
+        await update.message.reply_text(message, parse_mode='HTML')
 
-            status = "✅ 激活" if rule.is_active else "❌ 禁用"
-            message = (
-                f"<b>规则详情 (ID: {rule.id})</b>\n"
-                f"<b>名称:</b> {rule.name}\n"
-                f"<b>状态:</b> {status}\n"
-                f"<b>优先级:</b> {rule.priority}\n"
-                f"<b>描述:</b>\n{rule.description or '未提供'}\n\n"
-                f"<b>脚本内容:</b>\n<pre>{rule.script}</pre>"
-            )
-            await update.message.reply_text(message, parse_mode='HTML')
-    except (ValueError, IndexError):
-        await update.message.reply_text("用法: /rulehelp <规则ID>")
+# =================== 辅助类 ===================
+class MediaGroupUpdate:
+    """一个合成的 Update-like 对象，用于代表一个完整的媒体组。"""
+    def __init__(self, messages: List[Message]):
+        base_message = messages[0]
+        # `media_group.messages` in rule script
+        self.media_group_messages = messages
+        # `media_group.caption` in rule script
+        self.caption = base_message.caption
+        # `media_group.message_count` in rule script
+        self.message_count = len(messages)
+        # Standard attributes to make it work with the executor
+        self.effective_chat = base_message.chat
+        self.effective_user = base_message.from_user
+        self.effective_message = base_message
+        self.update_id = base_message.message_id
+
+class ScheduledUpdate:
+    """一个合成的 Update-like 对象，用于计划任务。"""
+    def __init__(self, chat_id: int, bot):
+        # Create a shell effective_chat and effective_user
+        self.effective_chat = type("EffectiveChat", (), {"id": chat_id})()
+        self.effective_user = bot
+        self.effective_message = None
+        self.update_id = None
+
 
 # =================== 回调处理器 ===================
 
@@ -352,20 +393,6 @@ async def _process_aggregated_media_group(context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"处理媒体组 {media_group_id}，包含 {len(messages)} 条消息。")
 
-    # 创建一个合成的 Update 对象来代表整个媒体组
-    # 我们使用第一条消息作为基础
-    base_message = messages[0]
-
-    # 构建一个模拟的 Update 对象
-    class MediaGroupUpdate:
-        def __init__(self, messages: List[Message]):
-            self.media_group_messages = messages
-            self.effective_chat = base_message.chat
-            self.effective_user = base_message.from_user
-            # effective_message 设为第一条消息，以便 reply 等动作可以工作
-            self.effective_message = base_message
-            self.update_id = base_message.message_id # 使用一个消息ID作为代表
-
     # 创建实例并调用 process_event
     media_group_update = MediaGroupUpdate(messages)
     await process_event('media_group', media_group_update, context)
@@ -383,14 +410,7 @@ async def scheduled_job_handler(context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"正在执行计划任务，规则ID: {rule_id}, 群组ID: {group_id}")
 
     # 模拟一个 Update 对象，因为 process_event 需要它
-    class MockUpdate:
-        def __init__(self, chat_id):
-            self.effective_chat = lambda: None
-            self.effective_chat.id = chat_id
-            self.effective_user = None
-            self.effective_message = None
-
-    mock_update = MockUpdate(group_id)
+    mock_update = ScheduledUpdate(chat_id=group_id, bot=context.bot)
     await process_event('schedule', mock_update, context)
 
 
@@ -417,14 +437,7 @@ async def verification_timeout_handler(context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"验证超时后踢出用户 {user_id} 时失败: {e}")
             finally:
                 db.delete(verification)
-                db.commit()
-
-
-async def _send_verification_challenge(context: ContextTypes.DEFAULT_TYPE, group_id: int, user_id: int, attempts: int):
-    """发送新的人机验证问题。"""
-    logger.info(f"为用户 {user_id} 在群组 {group_id} 发送新的人机验证，当前尝试次数: {attempts}")
-    # This is a placeholder, real implementation would go here.
-    pass
+                # 让 session_scope 在退出时统一提交
 
 
 async def verification_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -473,4 +486,4 @@ async def verification_callback_handler(update: Update, context: ContextTypes.DE
                     media={"media": image_bytes, "type": "photo"},
                     reply_markup=keyboard
                 )
-        db.commit()
+        # 让 session_scope 在退出时统一提交

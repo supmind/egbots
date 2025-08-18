@@ -204,17 +204,11 @@ class VariableResolver:
 
         # 数据库中存储的是 JSON 字符串，因此需要反序列化。
         try:
-            # 尝试按标准 JSON 解析。
             return json.loads(variable.value)
         except json.JSONDecodeError:
-            # 如果 JSON 解析失败，则进入我们的“健壮性回退”逻辑。
-            val_str = variable.value
-            # 健壮性改进：如果值不是有效的 JSON，但它是一个纯数字字符串（包括负数），
-            # 则应将其作为数字返回，以符合用户预期。
-            if val_str.isdigit() or (val_str.startswith('-') and val_str[1:].isdigit()):
-                return int(val_str)
-            # 否则，将其作为普通字符串返回。这对于处理由其他系统写入的、非JSON格式的简单字符串值很有用。
-            return val_str
+            # `set_var` 保证了所有值都是 JSON 编码的。如果解析失败，说明数据已损坏。
+            logger.error(f"解析持久化变量 '{var_name}' (ID: {variable.id}) 的值时失败。原始值: '{variable.value}'")
+            return None
 
     def _resolve_media_group_variable(self, path_lower: str) -> Any:
         """

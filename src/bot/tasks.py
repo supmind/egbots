@@ -1,12 +1,13 @@
 # src/bot/tasks.py
 
 import logging
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import sessionmaker
 from telegram.ext import ContextTypes
 
-from src.database import EventLog, Group
+from src.database import EventLog, Group, StateVariable
 from src.utils import session_scope
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ async def cleanup_old_events(context: ContextTypes.DEFAULT_TYPE):
         with session_scope(session_factory) as db:
             thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
             deleted_count = db.query(EventLog).filter(EventLog.timestamp < thirty_days_ago).delete()
-            db.commit()
+            # session_scope will commit
             logger.info(f"成功删除了 {deleted_count} 条超过30天的旧事件日志。")
     except Exception as e:
         logger.error(f"执行旧事件日志清理任务时出错: {e}", exc_info=True)
@@ -52,9 +53,6 @@ async def sync_group_admins(context: ContextTypes.DEFAULT_TYPE):
                     # 我们需要手动调用 RuleExecutor 的 set_var 方法，因为它处理数据库交互
                     # 但在这里直接调用它会造成循环依赖。
                     # 因此，我们直接操作数据库，模拟 set_var 的行为。
-                    from src.database import StateVariable
-                    import json
-
                     var_name = "group_admins_list"
                     variable = db.query(StateVariable).filter_by(
                         group_id=group.id, user_id=None, name=var_name
@@ -69,7 +67,6 @@ async def sync_group_admins(context: ContextTypes.DEFAULT_TYPE):
 
                 except Exception as e:
                     logger.error(f"为群组 {group.id} 同步管理员时失败: {e}")
-            db.commit()
-
+            # session_scope will commit
     except Exception as e:
         logger.error(f"执行同步群组管理员任务时发生严重错误: {e}", exc_info=True)
