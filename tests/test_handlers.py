@@ -9,7 +9,8 @@ from sqlalchemy.orm import sessionmaker
 from src.bot.handlers import (
     reload_rules_handler, process_event, rules_handler,
     rule_on_off_handler, verification_timeout_handler,
-    media_message_handler, _process_aggregated_media_group, rule_help_handler
+    media_message_handler, _process_aggregated_media_group, rule_help_handler,
+    start_handler, verification_callback_handler
 )
 from src.database import Base, Rule, Group, Log, Verification
 from src.utils import session_scope
@@ -382,6 +383,144 @@ async def test_rule_on_off_command_by_non_admin(mock_update, mock_context):
     await rule_on_off_handler(mock_update, mock_context)
 
     mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
+
+
+async def test_rules_command_no_rules(mock_update, mock_context, test_db_session_factory):
+    """测试：当群组中没有规则时，/rules 命令应返回相应的消息。"""
+    # --- 准备 ---
+    mock_admin = MagicMock(status='administrator')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+    with session_scope(test_db_session_factory) as db:
+        db.add(Group(id=-1001, name="Test Group"))
+        # 核心：确保没有任何规则
+        assert db.query(Rule).count() == 0
+
+    # --- 执行 ---
+    await rules_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.message.reply_text.assert_called_once_with("该群组没有定义任何规则。")
+
+
+async def test_rule_command_no_args(mock_update, mock_context, test_db_session_factory):
+    """测试：当 /ruleon, /ruleoff, /rulehelp 命令没有提供参数时，应返回用法信息。"""
+    # --- 准备 ---
+    mock_admin = MagicMock(status='administrator')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+    mock_context.args = [] # 没有参数
+    mock_update.message.text = "/ruleon" # 模拟命令文本
+
+    # --- 执行 ---
+    await rule_on_off_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.message.reply_text.assert_called_once_with("用法: /ruleon <规则ID>")
+
+
+async def test_rule_command_non_existent_id(mock_update, mock_context, test_db_session_factory):
+    """测试：当 /ruleon, /ruleoff, /rulehelp 命令提供了不存在的规则ID时，应返回错误。"""
+    # --- 准备 ---
+    mock_admin = MagicMock(status='administrator')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+    mock_context.args = ["999"] # 不存在的规则ID
+
+    # --- 执行 ---
+    await rule_help_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.message.reply_text.assert_called_once_with("错误：未找到ID为 999 的规则。")
+
+
+async def test_rule_command_invalid_arg_type(mock_update, mock_context, test_db_session_factory):
+    """测试：当 /ruleon, /ruleoff, /rulehelp 命令提供了非数字参数时，应返回用法信息。"""
+    # --- 准备 ---
+    mock_admin = MagicMock(status='administrator')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+    mock_context.args = ["abc"] # 非数字参数
+    mock_update.message.text = "/rulehelp"
+
+    # --- 执行 ---
+    await rule_help_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.message.reply_text.assert_called_once_with("用法: /rulehelp <规则ID>")
+
+
+async def test_reload_rules_no_cache(mock_update, mock_context):
+    """测试：当一个群组没有缓存时，/reload_rules 命令应返回相应的消息。"""
+    # --- 准备 ---
+    mock_admin = MagicMock(status='administrator')
+    mock_context.bot.get_chat_member = AsyncMock(return_value=mock_admin)
+    # 确保缓存为空或不包含该 chat_id
+    mock_context.bot_data['rule_cache'] = {}
+
+    # --- 执行 ---
+    await reload_rules_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.message.reply_text.assert_called_once_with("该群组没有活动的规则缓存。")
+
+
+async def test_start_handler_invalid_args(mock_update, mock_context):
+    """测试：当 /start 命令带有无效的 'verify_' 参数时，应返回错误消息。"""
+    # --- 准备 ---
+    mock_context.args = ["verify_invalid_format"]
+
+    # --- 执行 ---
+    await start_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.message.reply_text.assert_called_once_with("验证链接无效或格式错误。")
+
+
+async def test_verification_callback_no_record(mock_update, mock_context, test_db_session_factory):
+    """测试：当验证回调发生，但数据库中没有相应的验证记录时，应返回过期消息。"""
+    # --- 准备 ---
+    # 确保数据库中没有验证记录
+    with session_scope(test_db_session_factory) as db:
+        assert db.query(Verification).count() == 0
+
+    mock_update.callback_query.data = "verify_-1001_123_42"
+    mock_update.callback_query.from_user.id = 123
+    mock_update.callback_query.answer = AsyncMock()
+    mock_update.callback_query.edit_message_text = AsyncMock()
+
+    # --- 执行 ---
+    await verification_callback_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.callback_query.answer.assert_awaited_once()
+    mock_update.callback_query.edit_message_text.assert_awaited_once_with(text="验证已过期或不存在。")
+
+
+@patch('src.bot.handlers.generate_math_image', return_value=b'new_image_bytes')
+async def test_verification_callback_wrong_answer_retries(mock_generate_math_image, mock_update, mock_context, test_db_session_factory):
+    """测试：当用户提供了错误的验证答案但仍有剩余次数时，应生成新的验证码。"""
+    # --- 准备 ---
+    group_id = -1001
+    user_id = 123
+    with session_scope(test_db_session_factory) as db:
+        v = Verification(group_id=group_id, user_id=user_id, correct_answer="42", attempts_made=1)
+        db.add(v)
+        db.commit()
+
+    mock_update.callback_query.data = f"verify_{group_id}_{user_id}_99" # 错误答案
+    mock_update.callback_query.from_user.id = user_id
+    mock_update.callback_query.answer = AsyncMock()
+    mock_update.callback_query.edit_message_media = AsyncMock()
+
+    # --- 执行 ---
+    await verification_callback_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    mock_update.callback_query.answer.assert_awaited_once()
+    # 验证是否调用了 edit_message_media 来更新验证码图片和键盘
+    mock_update.callback_query.edit_message_media.assert_awaited_once()
+    # 验证数据库中的记录是否已更新
+    with session_scope(test_db_session_factory) as db:
+        v = db.query(Verification).filter_by(user_id=user_id).one()
+        assert v.attempts_made == 2 # 尝试次数增加
+        assert v.correct_answer != "42" # 答案已更新
 
 
 async def test_rule_help_command_by_admin(mock_update, mock_context, test_db_session_factory):

@@ -194,3 +194,76 @@ def test_event_log_repr():
     """测试 EventLog 模型的 __repr__ 方法。"""
     event_log = EventLog(id=1, event_type="message", user_id=123, group_id=-1001)
     assert repr(event_log) == "<EventLog(id=1, type='message', user_id=123, group_id=-1001)>"
+
+
+# =================== 工具函数测试 ===================
+
+def test_init_database_with_malformed_url(caplog):
+    """测试 init_database 在收到格式错误的URL时，能否优雅地记录日志。"""
+    from src.database import init_database
+    import logging
+    with caplog.at_level(logging.INFO):
+        # [修复] 提供一个真正格式错误的URL以触发URL解析的except块
+        # 这个URL缺少驱动名称，会导致URL解析失败
+        try:
+            init_database("i-am-not-a-url")
+        except Exception:
+            # 捕获后续的 create_engine 错误，因为我们只关心日志
+            pass
+    assert "正在初始化数据库连接..." in caplog.text
+    assert "类型:" not in caplog.text # 确认没有打印出类型
+
+
+def test_set_state_variable_deletion(session):
+    """测试 set_state_variable_in_db 函数能否正确删除一个已存在的变量。"""
+    from src.database import set_state_variable_in_db
+    group_id = -1001
+    user_id = 123
+    var_name = "test_var"
+
+    # 1. 先创建一个变量
+    session.add(Group(id=group_id, name="Test Group"))
+    session.add(StateVariable(group_id=group_id, user_id=user_id, name=var_name, value='"test"'))
+    session.commit()
+    assert session.query(StateVariable).count() == 1
+
+    # 2. 调用函数删除该变量
+    set_state_variable_in_db(session, group_id, var_name, None, user_id=user_id)
+    session.commit()
+
+    # 3. 验证变量已被删除
+    assert session.query(StateVariable).count() == 0
+
+
+def test_db_models_repr():
+    """
+    测试所有数据库模型的 __repr__ 方法，以确保它们能正常工作。
+    这个测试合并了之前 test_database_models.py 的内容。
+    """
+    # 为了简单起见，这些对象没有提交到数据库，我们只测试 repr 的字符串格式化
+    user = User(id=123, username="testuser", first_name="Test")
+    assert repr(user) == "<User(id=123, username='testuser', name='Test')>"
+
+    group_with_name = Group(id=-1001, name="Test Group")
+    assert repr(group_with_name) == "<Group(id=-1001, name='Test Group')>"
+
+    group_no_name = Group(id=-1002)
+    assert repr(group_no_name) == "<Group(id=-1002, name='N/A')>"
+
+    event = EventLog(id=1, event_type='message', user_id=123, group_id=-1001)
+    assert repr(event) == "<EventLog(id=1, type='message', user_id=123, group_id=-1001)>"
+
+    rule = Rule(id=1, name="Test Rule", group_id=-1001)
+    assert repr(rule) == "<Rule(id=1, name='Test Rule', group_id=-1001)>"
+
+    group_var = StateVariable(name="config", group_id=-1001)
+    assert repr(group_var) == "<StateVariable(name='config', scope=group, group_id=-1001)>"
+
+    user_var = StateVariable(name="points", group_id=-1001, user_id=123)
+    assert repr(user_var) == "<StateVariable(name='points', scope=user=123, group_id=-1001)>"
+
+    verification = Verification(user_id=123, group_id=-1001, attempts_made=2)
+    assert repr(verification) == "<Verification(user_id=123, group_id=-1001, attempts=2)>"
+
+    log = Log(id=1, group_id=-1001, actor_user_id=123, tag="test")
+    assert repr(log) == "<Log(id=1, group_id=-1001, actor=123, tag='test')>"

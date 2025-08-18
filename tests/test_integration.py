@@ -476,7 +476,14 @@ async def test_media_group_is_processed_as_single_event(mock_update, mock_contex
     msg2.from_user = mock_update.effective_user
 
     # 修复：不再模拟 process_event，而是模拟更深层的 RuleExecutor，以允许 EventLog 被真实地创建
-    with patch('src.bot.handlers.RuleExecutor', new_callable=AsyncMock) as mock_executor:
+    # [修复] 正确地 patch 类，为其返回的实例配置一个 AsyncMock 方法
+    with patch('src.bot.handlers.RuleExecutor', autospec=True) as MockRuleExecutor:
+        # MockRuleExecutor 是 RuleExecutor 类的模拟
+        # MockRuleExecutor.return_value 是当 RuleExecutor() 被调用时返回的实例的模拟
+        mock_instance = MockRuleExecutor.return_value
+        # 我们希望这个实例的 execute_rule 方法是一个我们可以检查的异步 mock
+        mock_instance.execute_rule = AsyncMock()
+
         # --- 2. 执行阶段 (Act) ---
         from src.bot.handlers import media_message_handler
         # 为测试初始化聚合器字典和模拟的 job_queue
@@ -504,8 +511,10 @@ async def test_media_group_is_processed_as_single_event(mock_update, mock_contex
         await callback_func(mock_context)
 
         # --- 3. 验证阶段 (Assert) ---
-        # 验证 RuleExecutor 至少被调用过一次（因为它会尝试为 media_group 事件寻找匹配规则）
-        mock_executor.assert_called()
+        # 验证 RuleExecutor 类被实例化了至少一次
+        MockRuleExecutor.assert_called()
+        # 验证实例上的 execute_rule 方法被 await 调用了至少一次
+        mock_instance.execute_rule.assert_awaited()
 
         # 验证数据库中只记录了一个 media_group 事件
         with test_db_session_factory() as db:

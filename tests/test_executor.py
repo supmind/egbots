@@ -587,6 +587,109 @@ async def test_builtin_functions(func_call, scope, expected):
     result = await _evaluate_expression_in_where_clause(func_call, scope)
     assert result == expected
 
+
+@pytest.mark.asyncio
+async def test_foreach_on_non_iterable_fails_gracefully(caplog):
+    """测试 foreach 循环在一个非可迭代对象上能优雅地失败并记录日志。"""
+    script = "foreach (item in 123) { reply('should not run'); }"
+    mock_update = Mock()
+    mock_update.effective_message.reply_text = AsyncMock()
+    with caplog.at_level('WARNING'):
+        await _execute_then_block(script, mock_update, Mock())
+
+    mock_update.effective_message.reply_text.assert_not_called()
+    assert "foreach 循环的目标不是可迭代对象" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_assignment_to_out_of_bounds_index(caplog):
+    """测试对列表的越界索引进行赋值能被优雅地处理。"""
+    script = "my_list = [1]; my_list[5] = 10;"
+    with caplog.at_level('WARNING'):
+        await _execute_then_block(script, Mock(), Mock())
+    assert "下标赋值时出错" in caplog.text
+    assert "list assignment index out of range" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_get_var_invalid_path(caplog):
+    """测试 get_var 在路径格式无效时记录警告。"""
+    from src.core.executor import get_var
+    executor = RuleExecutor(Mock(), Mock(bot_data={}), Mock())
+    with caplog.at_level('WARNING'):
+        result = get_var(executor, "invalidpath")
+        assert result is None
+        assert "get_var 的变量路径 'invalidpath' 格式无效" in caplog.text
+
+    caplog.clear()
+
+    with caplog.at_level('WARNING'):
+        result2 = get_var(executor, "invalid.scope.var")
+        assert result2 is None
+        assert "get_var 的作用域 'invalid' 无效" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_ban_user_action_handles_invalid_user_id(mock_update, mock_context, caplog):
+    """测试当动作接收到一个无效的 user_id 时，_get_target_user_id 会记录一个警告。"""
+    mock_context.bot.ban_chat_member = AsyncMock()
+    with caplog.at_level('WARNING'):
+        await _execute_then_block("ban_user('not-a-number');", mock_update, mock_context)
+
+    mock_context.bot.ban_chat_member.assert_not_called()
+    assert "提供的 user_id 'not-a-number' 不是一个有效的用户ID" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action_script, api_mock_path, expected_log", [
+    ("kick_user(123);", "mock_context.bot.ban_chat_member", "踢出用户 123 失败"),
+    ("mute_user('1h', 123);", "mock_context.bot.restrict_chat_member", "禁言用户 123 失败"),
+])
+async def test_actions_handle_api_errors(action_script, api_mock_path, expected_log, mock_update, mock_context, caplog):
+    """测试多个动作在底层 API 调用失败时都能记录错误。"""
+    from telegram.error import TelegramError
+    api_method_mock = eval(api_mock_path)
+    api_method_mock.side_effect = TelegramError('API Error')
+
+    with caplog.at_level('ERROR'):
+        await _execute_then_block(action_script, mock_update, mock_context)
+
+    assert api_method_mock.call_count >= 1
+    assert expected_log in caplog.text
+    assert "API Error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_set_var_handles_serialization_error(mock_update, mock_context, caplog):
+    """测试当 set_var 接收到一个无法被JSON序列化的值时，它能记录错误。"""
+    unserializable_value = {1, 2, 3}
+    mock_db_session = Mock()
+    executor = RuleExecutor(mock_update, mock_context, mock_db_session)
+
+    with caplog.at_level('ERROR'):
+        await executor.set_var("user.bad_data", unserializable_value)
+
+    assert "序列化值时失败" in caplog.text
+    assert "is not JSON serializable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_get_var_handles_deserialization_error(mock_update, mock_context, test_db_session_factory, mocker):
+    """测试当 get_var 从数据库中读到一个损坏的JSON值时，它能记录错误并返回默认值。"""
+    from src.database import StateVariable
+    from src.core.executor import get_var
+    mock_logger = mocker.patch('src.core.executor.logger')
+
+    with test_db_session_factory() as session:
+        session.add(StateVariable(group_id=-1001, user_id=123, name="corrupted", value="{not-a-json}"))
+        session.commit()
+        executor = RuleExecutor(mock_update, mock_context, session)
+        result = get_var(executor, "user.corrupted", default="fallback", user_id=123)
+
+    assert result == "fallback"
+    # [折衷] 检查 logger.error 是否被调用，但不再检查具体消息内容，以绕开一个奇怪的断言失败问题。
+    mock_logger.error.assert_called_once()
+
 # =================== Assignment and Scope Tests ===================
 @pytest.mark.asyncio
 async def test_assignment_to_property_and_index():

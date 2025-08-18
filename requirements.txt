@@ -9,6 +9,7 @@ python-dotenv
 pytest
 pytest-asyncio
 pytest-mock
+pytest-cov
 cachetools
 
 # Image Generation

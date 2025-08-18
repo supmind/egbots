@@ -253,6 +253,25 @@ def test_detailed_error_messages(invalid_script, expected_error_part):
     assert expected_error_part in error, f"对于脚本 '{invalid_script}', 错误信息 '{error}' 未包含期望的部分 '{expected_error_part}'"
 
 
+@pytest.mark.parametrize("invalid_script, expected_error_part, is_regex", [
+    # 覆盖剩余的解析器错误路径
+    ("WHEN message THEN { 5 = x; } END", "赋值表达式的左侧必须是变量", False),
+    ("WHEN message THEN { (1+1); } END", r"表达式 '(.*)' 的结果不能作为一条独立的语句", True),
+    ("WHEN message", "期望得到关键字 'THEN'", False),
+    ("WHEN message THEN { if(true) }", "期望得到 token 类型 LBRACE", False),
+])
+def test_parser_coverage_edge_cases(invalid_script, expected_error_part, is_regex):
+    """为解析器中剩余的、难以触及的错误路径添加测试，以达到100%覆盖率。"""
+    import re
+    is_valid, error = precompile_rule(invalid_script)
+    assert is_valid is False, f"脚本 '{invalid_script}' 本应无效但通过了编译"
+    assert error is not None
+    if is_regex:
+        assert re.search(expected_error_part, error), f"对于脚本 '{invalid_script}', 错误信息 '{error}' 未匹配正则表达式 '{expected_error_part}'"
+    else:
+        assert expected_error_part in error, f"对于脚本 '{invalid_script}', 错误信息 '{error}' 未包含期望的部分 '{expected_error_part}'"
+
+
 def test_default_rules_are_parsable():
     """
     一个重要的健全性检查：确保所有在代码中定义的默认规则都是可解析的。
