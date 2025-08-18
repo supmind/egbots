@@ -439,6 +439,41 @@ async def test_resolve_stats_variable_invalid_inputs(invalid_path, mock_update, 
     assert await resolver.resolve(invalid_path) is None
 
 
+async def test_resolve_stats_time_boundary(mock_update, test_db_session_factory):
+    """
+    一个专门的测试，用于精确验证统计信息的时间窗口边界条件。
+    这个测试通过“冻结时间”来消除测试执行延迟带来的不确定性。
+    """
+    # 定义一个固定的“当前时间”，以确保测试的可重复性
+    frozen_now = datetime(2025, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    user_id = mock_update.effective_user.id
+    group_id = mock_update.effective_chat.id
+
+    with test_db_session_factory() as session:
+        # 准备事件数据，精确地分布在1小时的边界上
+        session.add_all([
+            # 59分59秒前 (在1小时内)
+            EventLog(group_id=group_id, user_id=user_id, event_type='message', timestamp=frozen_now - timedelta(minutes=59, seconds=59)),
+            # 刚好60分钟前 (在1小时内)
+            EventLog(group_id=group_id, user_id=user_id, event_type='message', timestamp=frozen_now - timedelta(hours=1)),
+            # 60分1秒前 (在1小时外)
+            EventLog(group_id=group_id, user_id=user_id, event_type='message', timestamp=frozen_now - timedelta(hours=1, seconds=1)),
+        ])
+        session.commit()
+
+        mock_context = Mock()
+        mock_context.bot_data = {'stats_cache': TTLCache(maxsize=100, ttl=60)}
+
+        # 使用 patch 来“冻结” `datetime.now`，使其返回我们定义的固定时间
+        with patch('src.core.resolver.datetime') as mock_dt:
+            mock_dt.now.return_value = frozen_now
+            resolver = VariableResolver(mock_update, mock_context, session, {})
+
+            # 查询 user.stats.messages_1h，应该只包含前两个事件
+            result = await resolver.resolve("user.stats.messages_1h")
+            assert result == 2, "未能正确处理时间窗口的边界条件"
+
+
 # @pytest.mark.asyncio
 # async def test_resolve_stats_variable_api_error(mock_update, mock_context, test_db_session_factory):
 #     """

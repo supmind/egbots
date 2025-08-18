@@ -65,27 +65,49 @@ async def test_create_group_and_rule(session):
 async def test_cascade_delete(session):
     """
     测试：验证级联删除 (cascade delete) 功能。
-    当一个 Group 被删除时，其下所有关联的 Rule 和 StateVariable 都应被自动删除。
+    当一个 Group 被删除时，其下所有关联的子对象都应被自动删除。
     """
-    # 1. 创建一个新的群组和其关联对象
-    group_to_delete = Group(id=-1002, name="待删除群组")
-    rule_to_delete = Rule(group=group_to_delete, name="临时规则", script="WHEN message THEN stop()")
+    # 1. 创建一个群组及其所有类型的关联子对象
+    group_id = -1002
+    user_id = 12345
+
+    group_to_delete = Group(id=group_id, name="待删除群组")
+    admin_user = User(id=user_id, first_name="Admin")
+
+    # 建立多对多关系
+    group_to_delete.administrators.append(admin_user)
+
+    # 创建一对多关系的对象
+    rule_to_delete = Rule(group=group_to_delete, name="临时规则", script="...")
     var_to_delete = StateVariable(group=group_to_delete, name="临时变量", value="123")
-    session.add_all([group_to_delete, rule_to_delete, var_to_delete])
+    log_to_delete = Log(group=group_to_delete, actor_user_id=user_id, message="log message")
+    event_log_to_delete = EventLog(group=group_to_delete, user_id=user_id, event_type="message")
+
+    session.add_all([group_to_delete, admin_user, rule_to_delete, var_to_delete, log_to_delete, event_log_to_delete])
     session.commit()
 
-    # 确认对象已创建
+    # 确认所有对象都已创建
+    assert session.query(Group).count() == 1
     assert session.query(Rule).count() == 1
     assert session.query(StateVariable).count() == 1
+    assert session.query(Log).count() == 1
+    assert session.query(EventLog).count() == 1
+    assert session.query(User).count() == 1
+    # 验证多对多关系已建立
+    assert session.query(Group).one().administrators[0].id == user_id
 
     # 2. 删除群组
     session.delete(group_to_delete)
     session.commit()
 
-    # 3. 断言：关联的 Rule 和 StateVariable 应该也消失了
-    assert session.query(Group).filter_by(id=-1002).first() is None
+    # 3. 断言：所有关联的对象都应被级联删除
+    assert session.query(Group).count() == 0
     assert session.query(Rule).count() == 0
     assert session.query(StateVariable).count() == 0
+    assert session.query(Log).count() == 0
+    assert session.query(EventLog).count() == 0
+    # User 对象不应被删除，因为它不是 Group 的“子”对象
+    assert session.query(User).count() == 1
 
 
 @pytest.mark.skip(reason="SQLite in-memory DB may not reliably enforce UNIQUE constraints across all connections, leading to flaky tests. The constraint is valid and will be enforced by PostgreSQL in production.")

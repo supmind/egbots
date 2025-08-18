@@ -523,6 +523,39 @@ async def test_verification_callback_wrong_answer_retries(mock_generate_math_ima
         assert v.correct_answer != "42" # 答案已更新
 
 
+@patch('src.bot.handlers.unmute_user_util', new_callable=AsyncMock)
+async def test_verification_callback_correct_answer(mock_unmute_util, mock_update, mock_context, test_db_session_factory):
+    """测试：当用户提供了正确的验证答案时，应被解除禁言并删除验证记录。"""
+    # --- 准备 ---
+    group_id = -1001
+    user_id = 123
+    correct_answer = "42"
+    with session_scope(test_db_session_factory) as db:
+        v = Verification(group_id=group_id, user_id=user_id, correct_answer=correct_answer, attempts_made=0)
+        db.add(v)
+        db.commit()
+
+    mock_update.callback_query.data = f"verify_{group_id}_{user_id}_{correct_answer}" # 正确答案
+    mock_update.callback_query.from_user.id = user_id
+    mock_update.callback_query.answer = AsyncMock()
+    mock_update.callback_query.edit_message_text = AsyncMock()
+
+    # --- 执行 ---
+    await verification_callback_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    # 1. 验证回调已被应答
+    mock_update.callback_query.answer.assert_awaited_once()
+    # 2. 验证成功消息已被发送
+    mock_update.callback_query.edit_message_text.assert_awaited_once_with(text="✅ 验证成功！您现在可以在群组中发言了。")
+    # 3. 验证 unmute 工具函数被调用
+    mock_unmute_util.assert_awaited_once_with(mock_context, group_id, user_id)
+    # 4. 验证数据库中的记录已被删除
+    with session_scope(test_db_session_factory) as db:
+        v = db.query(Verification).filter_by(user_id=user_id).first()
+        assert v is None
+
+
 async def test_rule_help_command_by_admin(mock_update, mock_context, test_db_session_factory):
     """测试：管理员使用 /rulehelp 命令应能看到规则的详细信息。"""
     # --- 准备 ---
@@ -599,3 +632,50 @@ async def test_process_event_cache_invalidation(MockRuleExecutor, mock_update, m
     assert "缓存未命中" in caplog.text
     # 因为规则仍然是激活的，所以执行器应该被调用
     MockRuleExecutor.assert_called()
+
+
+@patch('src.bot.handlers.process_event', new_callable=AsyncMock)
+async def test_user_join_handler(mock_process_event, mock_update):
+    """测试：user_join_handler 应为单个入群用户正确调用 process_event。"""
+    # --- 准备 ---
+    # mock_update fixture 已经模拟了一个单一用户加入的场景
+    from src.bot.handlers import user_join_handler
+
+    # --- 执行 ---
+    await user_join_handler(mock_update, MagicMock())
+
+    # --- 验证 ---
+    # 验证 process_event 被正确地调用了一次
+    mock_process_event.assert_called_once()
+
+    # 验证传递给 process_event 的参数是正确的
+    call_args = mock_process_event.call_args[0]
+    event_type_arg = call_args[0]
+    update_arg = call_args[1]
+
+    assert event_type_arg == 'user_join'
+    # 验证传递的 update 对象就是原始的 update 对象
+    assert update_arg is mock_update
+
+
+@patch('src.bot.handlers._send_verification_challenge', new_callable=AsyncMock)
+async def test_start_handler_with_valid_token(mock_send_challenge, mock_update, mock_context):
+    """测试：当 /start 命令带有合法的 'verify_' token 时，应调用验证挑战函数。"""
+    # --- 准备 ---
+    group_id = -1001
+    user_id = 123
+    mock_context.args = [f"verify_{group_id}_{user_id}"]
+    # 确保命令发起者就是被验证者
+    mock_update.effective_user.id = user_id
+
+    # --- 执行 ---
+    await start_handler(mock_update, mock_context)
+
+    # --- 验证 ---
+    # 验证 _send_verification_challenge 被以正确的参数调用
+    mock_send_challenge.assert_awaited_once_with(
+        mock_context,
+        group_id,
+        user_id,
+        mock_update.message
+    )

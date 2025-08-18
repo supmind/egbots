@@ -236,19 +236,15 @@ async def media_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def user_join_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户加入事件。"""
-    # 代码评审意见:
-    # - 这是一个非常优雅的处理方式。当多个用户（例如被管理员一次性添加）同时加入时，
-    #   `update.chat_member.new_chat_member.user` 会是一个列表。
-    # - 通过循环并为每个用户创建一个“合成的”或“模拟的”Update对象，
-    #   我们可以复用 `process_event` 逻辑，使得规则引擎能够像处理单个用户入群一样，
-    #   为每个新用户独立地触发规则（如人机验证）。这大大简化了逻辑。
-    # CHAT_MEMBER 更新可能包含多个成员
-    for member in update.chat_member.new_chat_member.user:
-        # 为每个加入的成员模拟一个独立的 Update 对象
-        member_update = Update(update.update_id, chat_member=update.chat_member)
-        # 关键：手动设置 effective_user 以便 process_event 能正确识别用户
-        member_update.effective_user = member
-        await process_event("user_join", member_update, context)
+    # [逻辑修正] 根据用户反馈和对PTB文档的再次确认：
+    # - `update.chat_member.new_chat_member.user` *始终* 是一个单一的 User 对象，而不是列表。
+    # - 因此，处理多用户加入的 for 循环和合成 Update 对象的逻辑是错误的。
+    # - 正确的做法是直接处理传入的 update，因为其中的 `effective_user` 已被 PTB 正确设置为加入的那个用户。
+    if not update.chat_member or not update.chat_member.new_chat_member:
+        return
+
+    # 直接将原始 update 传递给核心处理器
+    await process_event("user_join", update, context)
 
 async def user_leave_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户离开事件。"""

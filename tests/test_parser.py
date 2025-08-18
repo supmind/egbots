@@ -20,6 +20,47 @@ def parse_then_stmt(stmt_str: str) -> StatementBlock:
     script = f"WHEN command THEN {{ {stmt_str} }} END"
     return RuleParser(script).parse().then_block.statements[0]
 
+# =================== 分词器测试 (Tokenizer Tests) ===================
+
+def test_tokenizer_all_tokens():
+    """全面测试分词器对所有已定义 token 类型的识别能力。"""
+    # 这是一个包含了所有可能 token 类型的复杂脚本
+    code = """
+    WHEN command or user_join WHERE user.id == 12345 and (true or false)
+    THEN {
+        // 这是一个注释
+        my_var = "string value" + " more";
+        my_list = [1, 2.5, null];
+        my_dict = {"key": my_var, "calc": 10 / 2};
+        if (my_list contains 1) {
+            kick_user();
+        }
+    }
+    END
+    """
+    from src.core.parser import tokenize
+    tokens = tokenize(code)
+    token_types = {t.type for t in tokens}
+
+    # 验证关键的 token 类型是否都已正确识别
+    expected_types = {
+        'KEYWORD', 'IDENTIFIER', 'COMPARE_OP', 'LOGIC_OP', 'NUMBER', 'STRING',
+        'LBRACE', 'RBRACE', 'LPAREN', 'RPAREN', 'LBRACK', 'RBRACK',
+        'SEMICOLON', 'COMMA', 'COLON', 'DOT', 'EQUALS', 'ARITH_OP'
+    }
+    assert expected_types.issubset(token_types)
+    # 验证注释和空白是否被正确忽略（不应出现在 token 列表中）
+    assert 'COMMENT' not in token_types
+    assert 'SKIP' not in token_types
+    assert 'NEWLINE' not in token_types
+    assert 'MISMATCH' not in token_types
+
+def test_tokenizer_invalid_character():
+    """测试分词器在遇到无效字符时是否会抛出异常。"""
+    from src.core.parser import tokenize
+    with pytest.raises(RuleParserError, match="存在无效字符: @"):
+        tokenize("WHEN message THEN { @ } END")
+
 # =================== 预编译和基本结构测试 ===================
 
 def test_precompile_rule_valid():
@@ -29,6 +70,15 @@ def test_precompile_rule_valid():
     assert is_valid is True
     assert error is None
 
+def test_precompile_rule_invalid_input():
+    """测试 precompile_rule 在接收到非字符串或空输入时的行为。"""
+    is_valid, error = precompile_rule(None)
+    assert is_valid is False
+    assert "脚本不能为空" in error
+
+    is_valid, error = precompile_rule("   ")
+    assert is_valid is False
+    assert "脚本不能为空" in error
 
 def test_parse_empty_script_fails():
     """测试解析空脚本或只有空白的脚本会失败。"""
@@ -231,19 +281,22 @@ def test_parse_schedule_event_with_cron():
     assert rule.when_events == ['schedule("*/5 * * * *")']
 
 @pytest.mark.parametrize("invalid_script, expected_error_part", [
-    # General structure errors
+    # 通用结构错误
     ("WHEN message THEN { reply('ok') } END", "期望得到 token 类型 SEMICOLON"),
     ("WHEN message WHERE true { reply('ok'); } END", "期望得到关键字 'THEN'"),
     ("WHEN message THEN reply('ok'); } END", "期望得到 token 类型 LBRACE"),
     ("WHEN message or THEN { } END", "期望得到 token 类型 IDENTIFIER"),
-    # Expression errors
-    ("WHEN a.b THEN { } END", "期望得到关键字 'THEN'"), # Correct error is about keyword, not token
+    # 表达式错误
+    ("WHEN a.b THEN { } END", "期望得到关键字 'THEN'"),
     ("WHEN message WHERE 1 + THEN { } END", "非预期的 token 'THEN'"),
-    # Exclusive schedule event errors
-    ("WHEN schedule() or message THEN { } END", "schedule() 事件不能与其他事件一起使用 'or'"),
-    ("WHEN message or schedule() THEN { } END", "schedule() 事件不能与其他事件一起使用 'or'"),
-    # Statement errors
+    # `schedule` 事件的排他性错误
+    ("WHEN schedule('a') or message THEN {} END", "schedule() 事件不能与其他事件一起使用 'or'"),
+    ("WHEN message or schedule('b') THEN {} END", "schedule() 事件不能与其他事件一起使用 'or'"),
+    # 语句错误
     ("WHEN message THEN { a = 1 + ; } END", "非预期的 token ';'"),
+    ("WHEN message THEN { if(true) } END", "期望得到 token 类型 LBRACE"),
+    ("WHEN message THEN { foreach (item my_list) {} } END", "期望得到关键字 'in'"),
+    ("WHEN message THEN { foreach (item in my_list) } END", "期望得到 token 类型 LBRACE"),
 ])
 def test_detailed_error_messages(invalid_script, expected_error_part):
     """测试 precompile_rule 对各种无效脚本的错误报告的详细程度。"""
