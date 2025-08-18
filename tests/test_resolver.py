@@ -492,3 +492,66 @@ async def test_resolve_stats_time_boundary(mock_update, test_db_session_factory)
 #     # 即使 API 失败，解析也应返回 None 而不是崩溃
 #     assert await resolver.resolve("group.stats.members") is None
 #     mock_context.bot.get_chat_member_count.assert_called_once()
+
+
+# =====================================================================
+# 以下是为提高覆盖率新增的测试 (This is where the new tests begin)
+# =====================================================================
+
+async def test_resolve_command_on_non_message_update(mock_context):
+    """
+    测试: 当在一个非消息类型的 Update (如 user_join) 上尝试解析 command.* 时，应返回 None。
+    覆盖: src/core/resolver.py -> _resolve_command_variable() -> if not self.update.message
+    """
+    # 创建一个不含 message 属性的 Update
+    no_message_update = Update(update_id=1)
+    resolver = VariableResolver(no_message_update, mock_context, Mock(), {})
+    assert await resolver.resolve("command.name") is None
+
+async def test_resolve_user_var_with_no_user_in_update(mock_context):
+    """
+    测试: 在一个没有 effective_user 的 Update 中解析 vars.user.* 时，应返回 None。
+    覆盖: src/core/resolver.py -> _resolve_persistent_variable() -> if user_id_to_query is not None: else: return None
+    """
+    # 创建一个没有 effective_user 的 Update
+    update_no_user = Update(update_id=1, message=Message(message_id=1, date=datetime.now(timezone.utc), chat=Chat(id=-1, type='private')))
+    resolver = VariableResolver(update_no_user, mock_context, Mock(), {})
+    assert await resolver.resolve("vars.user.points") is None
+
+async def test_resolve_persistent_var_with_bad_json(mock_update, dbsession, mock_context, mocker):
+    """
+    测试: 当从数据库读取的持久化变量的值是损坏的JSON时，应记录错误并返回 None。
+    覆盖: src/core/resolver.py -> _resolve_persistent_variable() -> except json.JSONDecodeError
+    """
+    mock_logger = mocker.patch('src.core.resolver.logger')
+    bad_var = StateVariable(group_id=-1001, user_id=None, name="bad_config", value="not-a-valid-json")
+    dbsession.add(bad_var)
+    dbsession.commit()
+
+    resolver = VariableResolver(mock_update, mock_context, dbsession, {})
+    result = await resolver.resolve("vars.group.bad_config")
+
+    assert result is None
+    mock_logger.error.assert_called_once()
+    log_message = mock_logger.error.call_args.args[0]
+    assert "解析持久化变量" in log_message
+    assert "'bad_config'" in log_message
+    assert "的值时失败" in log_message
+
+async def test_resolve_media_group_var_on_non_media_group_update(mock_update, mock_context):
+    """
+    测试: 在一个非媒体组的 Update 上解析 media_group.* 时，应返回 None。
+    覆盖: src/core/resolver.py -> _resolve_media_group_variable() -> if not hasattr
+    """
+    # mock_update fixture 默认不包含 media_group_messages 属性
+    resolver = VariableResolver(mock_update, mock_context, Mock(), {})
+    assert await resolver.resolve("media_group.message_count") is None
+
+async def test_resolve_non_existent_property_on_real_object(mock_update, mock_context):
+    """
+    测试: 尝试解析一个在真实Telegram对象上不存在的属性时，应返回 None。
+    覆盖: src/core/resolver.py -> _resolve_from_update_object() -> except AttributeError
+    """
+    resolver = VariableResolver(mock_update, mock_context, Mock(), {})
+    # 'message.text_html' 是一个有效的属性，但 'message.non_existent' 不是
+    assert await resolver.resolve("message.non_existent") is None

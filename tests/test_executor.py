@@ -6,7 +6,7 @@ from telegram import ChatPermissions
 
 from src.core.parser import RuleParser
 from src.core.executor import RuleExecutor, _ACTION_REGISTRY
-from src.database import Log
+from src.database import Log, StateVariable
 
 # =================== 辅助工具 ===================
 
@@ -928,3 +928,141 @@ async def test_builtin_get_var(mock_update, mock_context, test_db_session_factor
         # 5. 获取一个不存在的组变量
         bad_config = get_var(executor, "group.bad_config", {"default": True})
         assert bad_config == {"default": True}
+
+
+# =====================================================================
+# 以下是为提高覆盖率新增的测试 (This is where the new tests begin)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_foreach_cleans_up_new_variable():
+    """
+    测试: 当 foreach 的循环变量是新创建的，循环结束后应从作用域中移除。
+    覆盖: src/core/executor.py -> _visit_foreach_stmt() -> else branch
+    """
+    scope = {"my_list": [1, 2]}
+    final_scope = await _execute_then_block("foreach(new_item in my_list) {}", Mock(), Mock())
+    # The initial scope should not be modified, a copy is used internally.
+    # We need a way to inspect the final scope of the executor.
+    # Let's modify the helper or the test.
+
+    rule_str = f"WHEN command THEN {{ foreach(new_item in my_list) {{}} }} END"
+    parsed_rule = RuleParser(rule_str).parse()
+    executor = RuleExecutor(Mock(), Mock(bot_data={}), Mock())
+    final_scope = {"my_list": [1, 2]}
+    await executor._execute_statement_block(parsed_rule.then_block, final_scope)
+
+    assert "new_item" not in final_scope
+
+@pytest.mark.asyncio
+async def test_calling_non_existent_function(caplog):
+    """
+    测试: 调用一个未注册的内置函数应记录警告并返回 None。
+    """
+    with caplog.at_level('WARNING'):
+        result = await _evaluate_expression_in_where_clause("non_existent_func()")
+
+    assert result is None
+    assert "表达式中调用了未知的函数: 'non_existent_func'" in caplog.text
+
+@pytest.mark.asyncio
+async def test_calling_failing_builtin_function(mocker, caplog):
+    """
+    测试: 当一个内置函数内部执行出错时，应记录错误并返回 None。
+    """
+    failing_func = Mock(side_effect=ValueError("internal error"))
+
+    with patch.dict('src.core.executor._BUILTIN_FUNCTIONS', {'failing': failing_func}):
+        with caplog.at_level('ERROR'):
+            result = await _evaluate_expression_in_where_clause("failing()")
+
+    assert result is None
+    assert "执行内置函数 'failing' 时出错: internal error" in caplog.text
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action_script, mock_api_path, expected_log_msg", [
+    ("ban_user(123);", "bot.ban_chat_member", "封禁用户 123 失败"),
+    ("kick_user(123);", "bot.ban_chat_member", "踢出用户 123 失败"),
+    ("mute_user('1h', 123);", "bot.restrict_chat_member", "禁言用户 123 失败"),
+    ("start_verification();", "bot.restrict_chat_member", "启动验证时出错"),
+])
+async def test_async_actions_failure_modes(action_script, mock_api_path, expected_log_msg, caplog):
+    """
+    参数化测试: 统一测试多个异步动作在底层API调用失败时的错误记录行为。
+    """
+    from telegram.error import TelegramError
+
+    rule_str = f"WHEN command THEN {{ {action_script} }} END"
+    parsed_rule = RuleParser(rule_str).parse()
+
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    mock_update.effective_user.id = 123
+    mock_update.effective_user.mention_html.return_value = "Test"
+
+    # 修复: 必须使用 AsyncMock
+    mock_context = AsyncMock()
+    mock_context.bot.username = "TestBot"
+
+    # 动态设置要模拟的异步方法
+    parts = mock_api_path.split('.')
+    mock_to_set = mock_context
+    for part in parts[:-1]:
+        mock_to_set = getattr(mock_to_set, part)
+    setattr(mock_to_set, parts[-1], AsyncMock(side_effect=TelegramError("API call failed")))
+
+    executor = RuleExecutor(mock_update, mock_context, Mock())
+
+    with caplog.at_level('ERROR'):
+        await executor.execute_rule(parsed_rule)
+
+    assert expected_log_msg in caplog.text
+    assert "API call failed" in caplog.text
+
+@pytest.mark.asyncio
+async def test_sync_log_action_failure_mode(caplog):
+    """
+    独立测试: 测试同步的 log 动作在数据库调用失败时的错误记录行为。
+    """
+    rule_str = f"WHEN command THEN {{ log('message'); }} END"
+    parsed_rule = RuleParser(rule_str).parse()
+
+    mock_update = Mock()
+    mock_update.effective_chat.id = -1001
+    mock_update.effective_user.id = 123
+
+    # 修复: 数据库操作是同步的，所以使用 Mock
+    mock_db_session = Mock()
+    mock_db_session.query.side_effect = Exception("Database connection failed")
+
+    executor = RuleExecutor(mock_update, Mock(bot_data={}), mock_db_session)
+
+    with caplog.at_level('ERROR'):
+        await executor.execute_rule(parsed_rule)
+
+    assert "记录日志时出错" in caplog.text
+    assert "Database connection failed" in caplog.text
+
+@pytest.mark.asyncio
+async def test_get_var_with_invalid_json(dbsession, mock_update, mock_context, mocker):
+    """
+    测试: 当 get_var 从数据库读到损坏的JSON数据时，应记录错误并返回默认值。
+    """
+    mock_logger = mocker.patch('src.core.executor.logger')
+    bad_variable = StateVariable(group_id=-1001, user_id=None, name="bad_json", value="this-is-not-json")
+    dbsession.add(bad_variable)
+    dbsession.commit()
+
+    executor = RuleExecutor(mock_update, mock_context, dbsession)
+
+    from src.core.executor import get_var
+    result = get_var(executor, "group.bad_json", default="fallback")
+
+    assert result == "fallback"
+    mock_logger.error.assert_called_once()
+    log_message = mock_logger.error.call_args.args[0]
+    # 分解断言，避免因动态ID导致的不稳定
+    assert "解析持久化变量" in log_message
+    assert "'bad_json'" in log_message
+    assert "的值时失败" in log_message

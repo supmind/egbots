@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, AsyncMock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database import Base
+from src.database import Base, User, Group
+from src.utils import session_scope
 
 @pytest.fixture(scope="function")
 def test_db_session_factory():
@@ -88,3 +89,25 @@ def mock_update():
     update.callback_query.answer = AsyncMock()
     update.callback_query.edit_message_text = AsyncMock()
     return update
+
+@pytest.fixture(scope="function")
+def dbsession(test_db_session_factory):
+    """提供一个数据库会话，并处理事务。"""
+    with session_scope(test_db_session_factory) as session:
+        yield session
+
+@pytest.fixture
+def test_user(dbsession):
+    """创建一个测试用户并存入数据库。"""
+    user = User(id=123, first_name="Test", is_bot=False, username="testuser")
+    dbsession.add(user)
+    dbsession.commit()
+    return user
+
+@pytest.fixture
+def test_group(dbsession):
+    """创建一个测试群组并存入数据库。"""
+    group = Group(id=-1001, name="Test Group")
+    dbsession.add(group)
+    dbsession.commit()
+    return group

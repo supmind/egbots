@@ -1,7 +1,7 @@
 # tests/test_tasks.py
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta, timezone
 import json
 import logging
@@ -169,3 +169,74 @@ async def test_sync_group_admins_handles_telegram_error(test_db_session_factory,
     # 验证日志记录
     assert "为群组 -1002 同步管理员时失败" in caplog.text
     assert "管理员同步任务完成。成功同步了 1/2 个群组。" in caplog.text
+
+
+# =====================================================================
+# 以下是为提高覆盖率新增的测试 (This is where the new tests begin)
+# =====================================================================
+
+async def test_cleanup_old_events_handles_db_error(caplog):
+    """
+    测试: 当数据库操作失败时，cleanup_old_events 能记录错误。
+    覆盖: src/bot/tasks.py -> cleanup_old_events -> except Exception
+    """
+    caplog.set_level(logging.ERROR)
+
+    # 1. 创建一个会失败的模拟 session
+    mock_session = MagicMock()
+    mock_session.query.return_value.filter.return_value.delete.side_effect = Exception("DB Error")
+
+    # 2. 创建一个返回失败 session 的模拟 session_factory
+    #    这里我们使用 with patch 来模拟 session_scope 的行为
+    mock_session_factory = MagicMock()
+
+    # 3. 创建使用我们模拟工厂的 context
+    mock_context = MagicMock()
+    mock_context.bot_data = {'session_factory': mock_session_factory}
+
+    # 使用 patch 来模拟 session_scope 的上下文管理器
+    with patch('src.bot.tasks.session_scope', return_value=MagicMock(__enter__=MagicMock(return_value=mock_session), __exit__=MagicMock(return_value=None))):
+        await cleanup_old_events(mock_context)
+
+    assert "执行旧事件日志清理任务时出错: DB Error" in caplog.text
+
+async def test_sync_group_admins_handles_unknown_error_in_loop(test_db_session_factory, caplog):
+    """
+    测试: 当同步循环中发生未知错误时，sync_group_admins 能记录错误并继续。
+    覆盖: src/bot/tasks.py -> sync_group_admins -> except Exception
+    """
+    caplog.set_level(logging.INFO)
+    with test_db_session_factory() as db:
+        db.add(Group(id=-1001, name="Fail Group"))
+        db.add(Group(id=-1002, name="Success Group"))
+        db.commit()
+
+    mock_admin = MagicMock()
+    mock_admin.user.id = 123
+    mock_context = MagicMock()
+    mock_context.bot_data = {'session_factory': test_db_session_factory}
+    # 让第一次API调用失败，但抛出的是一个非TelegramError的普通异常
+    mock_context.bot.get_chat_administrators = AsyncMock(side_effect=[
+        Exception("Unknown Error"),
+        [mock_admin]
+    ])
+
+    await sync_group_admins(mock_context)
+
+    assert "为群组 -1001 同步管理员时发生未知错误: Unknown Error" in caplog.text
+    assert "管理员同步任务完成。成功同步了 1/2 个群组。" in caplog.text
+
+async def test_sync_group_admins_handles_toplevel_error(mocker, caplog):
+    """
+    测试: 当任务开始时数据库就失败，sync_group_admins 能记录一个严重错误。
+    覆盖: src/bot/tasks.py -> sync_group_admins -> top-level except Exception
+    """
+    caplog.set_level(logging.ERROR)
+    # 模拟 session_scope 本身就失败
+    mocker.patch('src.bot.tasks.session_scope', side_effect=Exception("Cannot connect to DB"))
+    mock_context = MagicMock()
+    mock_context.bot_data = {'session_factory': MagicMock()}
+
+    await sync_group_admins(mock_context)
+
+    assert "执行同步群组管理员任务时发生严重错误: Cannot connect to DB" in caplog.text

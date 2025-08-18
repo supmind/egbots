@@ -6,18 +6,24 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from telegram import User
+from telegram.error import TelegramError
+from telegram.ext import ContextTypes
+
 from src.bot.handlers import (
     reload_rules_handler, process_event, rules_handler,
     rule_on_off_handler, verification_timeout_handler,
     media_message_handler, _process_aggregated_media_group, rule_help_handler,
-    start_handler, verification_callback_handler
+    start_handler, verification_callback_handler, _is_user_admin, _seed_rules_if_new_group, user_join_handler,
+    _get_rule_from_command
 )
 from src.database import Base, Rule, Group, Log, Verification
 from src.utils import session_scope
 
-pytestmark = pytest.mark.asyncio
+pytestmark = pytest.mark.asyncio # [Refactor] 移除模块级标记
 
 
+@pytest.mark.asyncio
 async def test_reload_rules_by_admin(mock_update, mock_context):
     """测试：管理员应能成功重载规则缓存。"""
     # 设置
@@ -34,6 +40,7 @@ async def test_reload_rules_by_admin(mock_update, mock_context):
     mock_update.message.reply_text.assert_called_once_with("✅ 规则缓存已成功清除！")
 
 
+@pytest.mark.asyncio
 async def test_reload_rules_by_non_admin(mock_update, mock_context):
     """测试：非管理员用户无法重载规则缓存。"""
     # 设置
@@ -50,6 +57,7 @@ async def test_reload_rules_by_non_admin(mock_update, mock_context):
     mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
 
 
+@pytest.mark.asyncio
 async def test_rules_command_by_admin(mock_update, mock_context, test_db_session_factory):
     """测试：管理员使用 /rules 命令应能看到规则列表。"""
     # --- 准备 ---
@@ -70,6 +78,7 @@ async def test_rules_command_by_admin(mock_update, mock_context, test_db_session
     assert "✅ [激活] Rule 1" in reply_text
     assert "❌ [禁用] Rule 2" in reply_text
 
+@pytest.mark.asyncio
 async def test_rule_on_off_command_by_admin(mock_update, mock_context, test_db_session_factory):
     """测试：管理员使用 /ruleon 命令应能改变规则状态并清除缓存。"""
     # --- 准备 ---
@@ -97,6 +106,7 @@ async def test_rule_on_off_command_by_admin(mock_update, mock_context, test_db_s
         rule = db.query(Rule).filter_by(id=rule_id).one()
         assert rule.is_active is False
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.RuleExecutor')
 async def test_process_event_with_broken_rule(MockRuleExecutor, mock_update, mock_context, test_db_session_factory, caplog):
     """测试：当数据库中存在语法错误的规则时，process_event应能记录错误并继续执行好规则。"""
@@ -130,6 +140,7 @@ async def test_process_event_with_broken_rule(MockRuleExecutor, mock_update, moc
     assert action_call.action_name == "reply"
     assert action_call.args[0].value == "good"
 
+@pytest.mark.asyncio
 async def test_verification_timeout_handler(mock_context, test_db_session_factory):
     """测试验证超时处理器是否能正确地踢出用户并清理数据库。"""
     # --- 准备 ---
@@ -157,6 +168,7 @@ async def test_verification_timeout_handler(mock_context, test_db_session_factor
         verification_record = db.query(Verification).filter_by(user_id=user_id).first()
         assert verification_record is None
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.RuleExecutor')
 async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_context, test_db_session_factory, caplog):
     """
@@ -202,6 +214,7 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
     assert MockRuleExecutor.called
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.RuleExecutor')
 async def test_seed_rules_for_new_group(MockRuleExecutor, mock_update, mock_context, test_db_session_factory):
     """
@@ -232,6 +245,7 @@ async def test_seed_rules_for_new_group(MockRuleExecutor, mock_update, mock_cont
         assert rule_count == len(DEFAULT_RULES)
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.RuleExecutor')
 async def test_seed_rules_is_robust_to_empty_rules(MockRuleExecutor, mock_update, mock_context, test_db_session_factory):
     """
@@ -264,6 +278,7 @@ async def test_seed_rules_is_robust_to_empty_rules(MockRuleExecutor, mock_update
         assert rule_count == len(DEFAULT_RULES)
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.process_event', new_callable=AsyncMock)
 async def test_media_group_aggregation(mock_process_event, mock_update, mock_context):
     """
@@ -332,6 +347,7 @@ async def test_media_group_aggregation(mock_process_event, mock_update, mock_con
     assert message_ids == {1, 2, 3}
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.RuleExecutor')
 async def test_stop_action_halts_processing(MockRuleExecutor, mock_update, mock_context, test_db_session_factory):
     """
@@ -366,6 +382,7 @@ async def test_stop_action_halts_processing(MockRuleExecutor, mock_update, mock_
     mock_reply_action.assert_not_called()
 
 
+@pytest.mark.asyncio
 async def test_rules_command_by_non_admin(mock_update, mock_context):
     """测试：非管理员用户无法使用 /rules 命令。"""
     mock_member = MagicMock(status='member')
@@ -375,6 +392,7 @@ async def test_rules_command_by_non_admin(mock_update, mock_context):
 
     mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
 
+@pytest.mark.asyncio
 async def test_rule_on_off_command_by_non_admin(mock_update, mock_context):
     """测试：非管理员用户无法使用 /ruleon 命令。"""
     mock_member = MagicMock(status='member')
@@ -385,6 +403,7 @@ async def test_rule_on_off_command_by_non_admin(mock_update, mock_context):
     mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
 
 
+@pytest.mark.asyncio
 async def test_rules_command_no_rules(mock_update, mock_context, test_db_session_factory):
     """测试：当群组中没有规则时，/rules 命令应返回相应的消息。"""
     # --- 准备 ---
@@ -402,6 +421,7 @@ async def test_rules_command_no_rules(mock_update, mock_context, test_db_session
     mock_update.message.reply_text.assert_called_once_with("该群组没有定义任何规则。")
 
 
+@pytest.mark.asyncio
 async def test_rule_command_no_args(mock_update, mock_context, test_db_session_factory):
     """测试：当 /ruleon, /ruleoff, /rulehelp 命令没有提供参数时，应返回用法信息。"""
     # --- 准备 ---
@@ -417,6 +437,7 @@ async def test_rule_command_no_args(mock_update, mock_context, test_db_session_f
     mock_update.message.reply_text.assert_called_once_with("用法: /ruleon <规则ID>")
 
 
+@pytest.mark.asyncio
 async def test_rule_command_non_existent_id(mock_update, mock_context, test_db_session_factory):
     """测试：当 /ruleon, /ruleoff, /rulehelp 命令提供了不存在的规则ID时，应返回错误。"""
     # --- 准备 ---
@@ -431,6 +452,7 @@ async def test_rule_command_non_existent_id(mock_update, mock_context, test_db_s
     mock_update.message.reply_text.assert_called_once_with("错误：未找到ID为 999 的规则。")
 
 
+@pytest.mark.asyncio
 async def test_rule_command_invalid_arg_type(mock_update, mock_context, test_db_session_factory):
     """测试：当 /ruleon, /ruleoff, /rulehelp 命令提供了非数字参数时，应返回用法信息。"""
     # --- 准备 ---
@@ -446,6 +468,7 @@ async def test_rule_command_invalid_arg_type(mock_update, mock_context, test_db_
     mock_update.message.reply_text.assert_called_once_with("用法: /rulehelp <规则ID>")
 
 
+@pytest.mark.asyncio
 async def test_reload_rules_no_cache(mock_update, mock_context):
     """测试：当一个群组没有缓存时，/reload_rules 命令应返回相应的消息。"""
     # --- 准备 ---
@@ -461,6 +484,7 @@ async def test_reload_rules_no_cache(mock_update, mock_context):
     mock_update.message.reply_text.assert_called_once_with("该群组没有活动的规则缓存。")
 
 
+@pytest.mark.asyncio
 async def test_start_handler_invalid_args(mock_update, mock_context):
     """测试：当 /start 命令带有无效的 'verify_' 参数时，应返回错误消息。"""
     # --- 准备 ---
@@ -473,6 +497,7 @@ async def test_start_handler_invalid_args(mock_update, mock_context):
     mock_update.message.reply_text.assert_called_once_with("验证链接无效或格式错误。")
 
 
+@pytest.mark.asyncio
 async def test_verification_callback_no_record(mock_update, mock_context, test_db_session_factory):
     """测试：当验证回调发生，但数据库中没有相应的验证记录时，应返回过期消息。"""
     # --- 准备 ---
@@ -493,6 +518,7 @@ async def test_verification_callback_no_record(mock_update, mock_context, test_d
     mock_update.callback_query.edit_message_text.assert_awaited_once_with(text="验证已过期或不存在。")
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.generate_math_image', return_value=b'new_image_bytes')
 async def test_verification_callback_wrong_answer_retries(mock_generate_math_image, mock_update, mock_context, test_db_session_factory):
     """测试：当用户提供了错误的验证答案但仍有剩余次数时，应生成新的验证码。"""
@@ -523,6 +549,7 @@ async def test_verification_callback_wrong_answer_retries(mock_generate_math_ima
         assert v.correct_answer != "42" # 答案已更新
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.unmute_user_util', new_callable=AsyncMock)
 async def test_verification_callback_correct_answer(mock_unmute_util, mock_update, mock_context, test_db_session_factory):
     """测试：当用户提供了正确的验证答案时，应被解除禁言并删除验证记录。"""
@@ -556,6 +583,7 @@ async def test_verification_callback_correct_answer(mock_unmute_util, mock_updat
         assert v is None
 
 
+@pytest.mark.asyncio
 async def test_rule_help_command_by_admin(mock_update, mock_context, test_db_session_factory):
     """测试：管理员使用 /rulehelp 命令应能看到规则的详细信息。"""
     # --- 准备 ---
@@ -590,6 +618,7 @@ async def test_rule_help_command_by_admin(mock_update, mock_context, test_db_ses
     assert "<b>描述:</b>\nThis is a test description." in reply_text
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.RuleExecutor')
 async def test_process_event_cache_invalidation(MockRuleExecutor, mock_update, mock_context, test_db_session_factory, caplog):
     """
@@ -634,6 +663,7 @@ async def test_process_event_cache_invalidation(MockRuleExecutor, mock_update, m
     MockRuleExecutor.assert_called()
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers.process_event', new_callable=AsyncMock)
 async def test_user_join_handler(mock_process_event, mock_update):
     """测试：user_join_handler 应为单个入群用户正确调用 process_event。"""
@@ -658,6 +688,7 @@ async def test_user_join_handler(mock_process_event, mock_update):
     assert update_arg is mock_update
 
 
+@pytest.mark.asyncio
 @patch('src.bot.handlers._send_verification_challenge', new_callable=AsyncMock)
 async def test_start_handler_with_valid_token(mock_send_challenge, mock_update, mock_context):
     """测试：当 /start 命令带有合法的 'verify_' token 时，应调用验证挑战函数。"""
@@ -679,3 +710,218 @@ async def test_start_handler_with_valid_token(mock_send_challenge, mock_update, 
         user_id,
         mock_update.message
     )
+
+
+# =====================================================================
+# 以下是为提高覆盖率新增的测试 (This is where the new tests begin)
+# =====================================================================
+
+@pytest.mark.asyncio
+async def test_is_user_admin_exception(mocker):
+    """
+    测试: 当 `get_chat_member` API调用失败时，`_is_user_admin` 应该捕获异常并返回 False。
+    覆盖: src/bot/handlers.py 第55行
+    """
+    mock_update = MagicMock()
+    mock_update.effective_chat.id = -1001
+    mock_update.effective_user.id = 123
+
+    mock_context = AsyncMock(spec=ContextTypes.DEFAULT_TYPE)
+    mock_context.bot.get_chat_member.side_effect = TelegramError("Test error")
+
+    # 模拟日志记录器以检查其是否被调用
+    mock_logger = mocker.patch('src.bot.handlers.logger')
+
+    result = await _is_user_admin(mock_update, mock_context)
+
+    assert result is False
+    mock_logger.error.assert_called_once()
+
+
+def test_seed_rules_if_new_group(dbsession):
+    """
+    测试: 当一个群组在数据库中不存在时，`_seed_rules_if_new_group` 应该创建该群组并植入默认规则。
+    覆盖: src/bot/handlers.py 第59-61行
+    """
+    chat_id = -100999  # 一个全新的、不存在的群组ID
+
+    # 确认群组和规则在测试前不存在
+    assert dbsession.query(Group).filter_by(id=chat_id).count() == 0
+    assert dbsession.query(Rule).filter_by(group_id=chat_id).count() == 0
+
+    # 执行函数
+    was_seeded = _seed_rules_if_new_group(chat_id, dbsession)
+
+    # 验证结果
+    assert was_seeded is True
+    # 确认群组已被创建
+    assert dbsession.query(Group).filter_by(id=chat_id).count() == 1
+    # 确认默认规则已被植入
+    assert dbsession.query(Rule).filter_by(group_id=chat_id).count() > 0
+
+
+@pytest.mark.asyncio
+async def test_process_event_no_effective_chat():
+    """
+    测试: 当 Update 对象没有 `effective_chat` 时，`process_event` 应该直接返回。
+    覆盖: src/bot/handlers.py 第113行
+    """
+    mock_update = MagicMock(spec=User)
+    mock_update.effective_chat = None
+    mock_context = AsyncMock()
+
+    # 为了确保函数没有继续执行，我们可以监视一个在函数早期就会被调用的对象
+    # 在这里，我们监视 `session_factory` 的获取，它不应该发生
+    mock_context.bot_data = {} # 确保 `get` 不会因为 key 不存在而失败
+
+    await process_event("message", mock_update, mock_context)
+
+    # 断言 `session_factory` 从未被访问过
+    assert 'session_factory' not in mock_context.bot_data
+
+
+@pytest.mark.asyncio
+async def test_process_event_critical_error(mocker, test_user):
+    """
+    测试: 当 `process_event` 内部发生未预料的严重错误时，该错误应被捕获并记录为 CRITICAL 级别的日志。
+    覆盖: src/bot/handlers.py 第170行
+    """
+    mock_update = MagicMock()
+    mock_update.effective_chat.id = -1001
+    mock_update.effective_user = test_user
+
+    # 模拟 session_factory 获取失败
+    mock_context = AsyncMock()
+    # 直接设置 bot_data 以避免 mocker.patch.dict 带来的 RuntimeWarning
+    mock_context.bot_data = {'session_factory': "not a factory"}
+
+    mock_logger = mocker.patch('src.bot.handlers.logger')
+
+    await process_event("message", mock_update, mock_context)
+
+    # 验证 CRITICAL 级别的日志被调用
+    mock_logger.critical.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_user_join_handler_no_chat_member(mocker):
+    """
+    测试: 当 `user_join_handler` 收到一个没有 `chat_member` 属性的 update 时，它应该直接返回。
+    覆盖: src/bot/handlers.py 第220行
+    """
+    mock_update = MagicMock()
+    mock_update.chat_member = None
+    mock_context = AsyncMock()
+
+    mock_process_event = mocker.patch('src.bot.handlers.process_event', new_callable=AsyncMock)
+
+    await user_join_handler(mock_update, mock_context)
+    mock_process_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args, command_text, expected_message", [
+    ([], "/ruleon", "用法: /ruleon <规则ID>"),  # 无参数
+    (["abc"], "/ruleon", "用法: /ruleon <规则ID>"), # 无效参数
+    (["999"], "/ruleon", "错误：未找到ID为 999 的规则。") # 不存在的规则ID
+])
+async def test_get_rule_from_command_error_paths(dbsession, test_group, args, command_text, expected_message, mocker):
+    """
+    测试: `_get_rule_from_command` 的各种错误路径。
+    覆盖: src/bot/handlers.py 第231, 235, 240行
+    """
+    mock_update = MagicMock()
+    mock_update.effective_chat.id = test_group.id
+    mock_update.message.text = command_text + " " + " ".join(args)
+    mock_update.message.reply_text = AsyncMock()
+
+    mock_context = MagicMock()
+    mock_context.args = args
+
+    mocker.patch('src.bot.handlers._is_user_admin', return_value=True)
+
+    result = await _get_rule_from_command(mock_update, mock_context, dbsession)
+
+    # 在这些错误路径下，函数应返回 None
+    assert result is None
+    # 并且应该调用 reply_text 来通知用户错误
+    mock_update.message.reply_text.assert_called_once_with(expected_message)
+
+
+@pytest.mark.asyncio
+async def test_get_rule_from_command_not_admin(dbsession, test_group, mocker):
+    """
+    测试: 当非管理员用户尝试使用需要管理员权限的命令时，`_get_rule_from_command` 应该拒绝。
+    覆盖: src/bot/handlers.py 第228行
+    """
+    mock_update = MagicMock()
+    mock_update.effective_chat.id = test_group.id
+    mock_update.message.reply_text = AsyncMock()
+
+    mock_context = MagicMock()
+    mock_context.args = ["1"]
+
+    # 模拟用户为非管理员
+    mocker.patch('src.bot.handlers._is_user_admin', return_value=False)
+
+    result = await _get_rule_from_command(mock_update, mock_context, dbsession)
+
+    assert result is None
+    mock_update.message.reply_text.assert_called_once_with("抱歉，只有群组管理员才能使用此命令。")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args, expected_message", [
+    (["verify_123_abc_bad"], "验证链接无效或格式错误。"), # 无效的 /start 参数
+    ([], "欢迎使用机器人！") # 没有 /start 参数
+])
+async def test_start_handler_paths(args, expected_message):
+    """
+    测试: `start_handler` 的不同路径，包括无效参数和无参数的情况。
+    覆盖: src/bot/handlers.py 第254, 256行
+    """
+    mock_update = MagicMock()
+    mock_update.effective_user.id = 123
+    mock_update.message.reply_text = AsyncMock()
+
+    mock_context = MagicMock()
+    mock_context.args = args
+
+    await start_handler(mock_update, mock_context)
+
+    mock_update.message.reply_text.assert_called_once_with(expected_message)
+
+
+@pytest.mark.asyncio
+async def test_verification_timeout_handler_api_error(mocker, dbsession, test_user, test_group):
+    """
+    测试: 当验证超时处理函数中踢出用户时发生API错误。
+    覆盖: src/bot/handlers.py 第391行
+    """
+    # 准备
+    # 在提交和潜在的对象分离之前，先获取ID
+    user_id = test_user.id
+    group_id = test_group.id
+
+    v = Verification(group_id=group_id, user_id=user_id, correct_answer="123")
+    dbsession.add(v)
+    dbsession.commit()
+
+    mock_context = AsyncMock()
+    mock_context.bot_data = {'session_factory': lambda: dbsession}
+    mock_job = MagicMock()
+    mock_job.data = {"group_id": group_id, "user_id": user_id}
+    mock_context.job = mock_job
+    mock_context.bot.ban_chat_member.side_effect = TelegramError("Cannot ban")
+
+    mock_logger = mocker.patch('src.bot.handlers.logger')
+
+    # 执行
+    await verification_timeout_handler(mock_context)
+
+    # 验证
+    mock_logger.error.assert_called_once()
+    # 使用之前存储的ID进行断言
+    assert f"验证超时后踢出用户 {user_id} 时失败" in mock_logger.error.call_args[0][0]
+    # 验证即使踢出失败，数据库记录仍然被删除
+    assert dbsession.query(Verification).count() == 0
