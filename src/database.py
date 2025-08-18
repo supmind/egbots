@@ -27,7 +27,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, URL
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,9 @@ class Group(Base):
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式。"""
-        return f"<Group(id={self.id}, name='{self.name}')>"
+        # [优化] 显式处理 name 可能为 None 的情况，使 __repr__ 更加健壮。
+        display_name = self.name if self.name is not None else 'N/A'
+        return f"<Group(id={self.id}, name='{display_name}')>"
 
 
 class EventLog(Base):
@@ -195,7 +197,8 @@ class StateVariable(Base):
 
     def __repr__(self):
         """提供一个清晰的、可调试的对象表示形式，并明确指出变量的作用域。"""
-        scope = f"user={self.user_id}" if self.user_id else "group"
+        # [优化] 显式检查 user_id 是否为 None，避免 user_id=0 时被错误地判断为 "group" 作用域。
+        scope = f"user={self.user_id}" if self.user_id is not None else "group"
         return f"<StateVariable(name='{self.name}', scope={scope}, group_id={self.group_id})>"
 
 
@@ -257,7 +260,14 @@ def init_database(db_url: str) -> Engine:
     Returns:
         Engine: SQLAlchemy 的数据库引擎实例。
     """
-    logger.info("正在初始化数据库连接...")
+    # [优化] 增加日志，提供关于正在连接的数据库类型的更多上下文信息。
+    try:
+        url_info = URL(db_url)
+        logger.info(f"正在初始化数据库连接 (类型: {url_info.drivername})...")
+    except Exception:
+        # 如果 URL 解析失败，记录一个通用消息，以防 db_url 格式不标准
+        logger.info("正在初始化数据库连接...")
+
     # `echo=False` 避免在日志中打印所有 SQL 语句
     engine = create_engine(db_url, echo=False)
     # `Base.metadata.create_all` 会检查表是否存在，只创建不存在的表。
@@ -278,3 +288,39 @@ def get_session_factory(engine: Engine) -> sessionmaker:
     # autoflush=False 和 autocommit=False 是推荐的配置，
     # 给了开发者更多对事务生命周期控制的权力。
     return sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+# ==================== 数据库操作工具函数 ====================
+
+def set_state_variable_in_db(
+    db_session: 'Session',
+    group_id: int,
+    variable_name: str,
+    value: str,
+    user_id: int | None = None
+) -> None:
+    """
+    一个用于在数据库中设置（或更新）持久化变量的工具函数。
+    这段逻辑从 RuleExecutor 和 tasks 模块中提取出来，以避免代码重复。
+
+    Args:
+        db_session: 当前的 SQLAlchemy 会话。
+        group_id: 变量所属的群组 ID。
+        variable_name: 变量的名称。
+        value: 序列化后的变量值。如果为 None，则删除该变量。
+        user_id: 变量所属的用户 ID。如果为 None，则为群组变量。
+    """
+    variable = db_session.query(StateVariable).filter_by(
+        group_id=group_id, user_id=user_id, name=variable_name
+    ).first()
+
+    if value is None:
+        if variable:
+            db_session.delete(variable)
+            logger.info(f"持久化变量 '{variable_name}' (user: {user_id}, group: {group_id}) 已被删除。")
+    else:
+        if not variable:
+            variable = StateVariable(group_id=group_id, user_id=user_id, name=variable_name)
+        variable.value = value
+        db_session.add(variable)
+        logger.info(f"持久化变量 '{variable_name}' (user: {user_id}, group: {group_id}) 已被设为: {value}")

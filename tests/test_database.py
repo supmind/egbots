@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
 
 # 从重构后的 database 模块导入所有需要的组件
-from src.database import Base, Group, Rule, StateVariable, Log
+from src.database import Base, Group, Rule, StateVariable, Log, User, Verification, EventLog
 
 # 使用内存中的 SQLite 数据库进行测试，这样可以保证每次测试都在一个干净、隔离的环境中运行。
 TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -138,3 +138,59 @@ async def test_state_variable_uniqueness(session):
 
     # 5. 断言最终状态
     assert session.query(StateVariable).count() == 3 # group_var, user1's user_var, user2's user_var
+
+
+# =================== 模型表示 (__repr__) 测试 ===================
+# 这些测试专门验证模型的 __repr__ 方法，确保它们为日志记录和调试提供清晰、无误的输出。
+
+def test_user_repr():
+    """测试 User 模型的 __repr__ 方法。"""
+    user = User(id=123, username="testuser", first_name="Test")
+    assert repr(user) == "<User(id=123, username='testuser', name='Test')>"
+
+def test_group_repr():
+    """测试 Group 模型的 __repr__ 方法。"""
+    group = Group(id=-1001, name="Test Group")
+    assert repr(group) == "<Group(id=-1001, name='Test Group')>"
+
+    # 测试 name 为 None 的情况
+    group_no_name = Group(id=-1002)
+    assert repr(group_no_name) == "<Group(id=-1002, name='N/A')>"
+
+def test_rule_repr():
+    """测试 Rule 模型的 __repr__ 方法。"""
+    rule = Rule(id=1, name="Test Rule", group_id=-1001, script="WHEN message THEN { reply('ok'); } END")
+    assert repr(rule) == "<Rule(id=1, name='Test Rule', group_id=-1001)>"
+
+def test_state_variable_repr():
+    """测试 StateVariable 模型的 __repr__ 方法。"""
+    # 测试用户作用域
+    user_var = StateVariable(name="warnings", user_id=123, group_id=-1001, value="1")
+    assert repr(user_var) == "<StateVariable(name='warnings', scope=user=123, group_id=-1001)>"
+
+    # 测试用户ID为0的情况
+    user_zero_var = StateVariable(name="points", user_id=0, group_id=-1001, value="100")
+    assert repr(user_zero_var) == "<StateVariable(name='points', scope=user=0, group_id=-1001)>"
+
+    # 测试群组作用域
+    group_var = StateVariable(name="config", user_id=None, group_id=-1001, value="{}")
+    assert repr(group_var) == "<StateVariable(name='config', scope=group, group_id=-1001)>"
+
+def test_verification_repr():
+    """测试 Verification 模型的 __repr__ 方法。"""
+    verification = Verification(user_id=123, group_id=-1001, correct_answer="42", attempts_made=2)
+    assert repr(verification) == "<Verification(user_id=123, group_id=-1001, attempts=2)>"
+
+def test_log_repr():
+    """测试 Log 模型的 __repr__ 方法。"""
+    log = Log(id=1, group_id=-1001, actor_user_id=123, tag="test", message="User was warned")
+    assert repr(log) == "<Log(id=1, group_id=-1001, actor=123, tag='test')>"
+
+    # 测试 tag 为 None 的情况
+    log_no_tag = Log(id=2, group_id=-1001, actor_user_id=456, message="User was kicked")
+    assert repr(log_no_tag) == "<Log(id=2, group_id=-1001, actor=456, tag='None')>"
+
+def test_event_log_repr():
+    """测试 EventLog 模型的 __repr__ 方法。"""
+    event_log = EventLog(id=1, event_type="message", user_id=123, group_id=-1001)
+    assert repr(event_log) == "<EventLog(id=1, type='message', user_id=123, group_id=-1001)>"

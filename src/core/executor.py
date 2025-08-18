@@ -25,7 +25,7 @@ from src.core.parser import (
     ActionCallExpr, Literal, Variable, PropertyAccess, IndexAccess, BinaryOp,
     ListConstructor, DictConstructor, IfStmt, ForEachStmt, BreakStmt, ContinueStmt
 )
-from src.database import StateVariable, Log
+from src.database import StateVariable, Log, set_state_variable_in_db
 from .resolver import VariableResolver
 from src.utils import unmute_user_util
 
@@ -671,35 +671,42 @@ class RuleExecutor:
             user_id (optional): 目标用户的ID。此参数仅在作用域为 'user' 时有效。
         """
         if not isinstance(variable_path, str) or '.' not in variable_path:
-            return logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效。")
+            logger.warning(f"set_var 的变量路径 '{variable_path}' 格式无效。")
+            return
         scope, var_name = variable_path.split('.', 1)
-        if not self.update.effective_chat: return
+        if not self.update.effective_chat:
+            return
+
         group_id = self.update.effective_chat.id
         db_user_id = None
 
         if scope.lower() == 'user':
             target_user_id = self._get_target_user_id(user_id)
-            if not target_user_id: return logger.warning("set_var 在 'user' 作用域下无法确定目标用户。")
+            if target_user_id is None: # 注意：用户ID可以是0，所以要显式与None比较
+                logger.warning("set_var 在 'user' 作用域下无法确定目标用户。")
+                return
             db_user_id = target_user_id
         elif scope.lower() != 'group':
-            return logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
+            logger.warning(f"set_var 的作用域 '{scope}' 无效，必须是 'user' 或 'group'。")
+            return
 
-        variable = self.db_session.query(StateVariable).filter_by(
-            group_id=group_id, user_id=db_user_id, name=var_name
-        ).first()
+        serialized_value = None
+        if value is not None:
+            try:
+                serialized_value = json.dumps(value)
+            except TypeError as e:
+                logger.error(f"为变量 '{variable_path}' 序列化值时失败: {e}。值: {value}")
+                return
 
-        if value is None:
-            if variable:
-                self.db_session.delete(variable)
-                logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被删除。")
-        else:
-            try: serialized_value = json.dumps(value)
-            except TypeError as e: return logger.error(f"为变量 '{variable_path}' 序列化值时失败: {e}。值: {value}")
-            if not variable:
-                variable = StateVariable(group_id=group_id, user_id=db_user_id, name=var_name)
-            variable.value = serialized_value
-            self.db_session.add(variable)
-            logger.info(f"持久化变量 '{variable_path}' (user: {db_user_id}) 已被设为: {serialized_value}")
+        # [重构] 使用从 src.database 导入的新的工具函数来设置变量，
+        # 这消除了代码重复，并确保了逻辑的一致性。
+        set_state_variable_in_db(
+            db_session=self.db_session,
+            group_id=group_id,
+            variable_name=var_name,
+            value=serialized_value,
+            user_id=db_user_id
+        )
 
     @action("start_verification")
     async def start_verification(self):

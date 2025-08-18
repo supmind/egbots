@@ -146,7 +146,6 @@ async def test_main_full_run(mock_job_queue_class, mock_getenv, mock_load_rules,
     mock_app_builder.return_value.token.return_value.job_queue.assert_called_once_with(mock_job_queue_instance)
 
     assert 'session_factory' in mock_app.bot_data
-    assert 'scheduler' in mock_app.bot_data
     assert 'rule_cache' in mock_app.bot_data
 
     # 验证启动逻辑是否被正确调用

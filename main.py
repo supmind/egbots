@@ -162,9 +162,9 @@ async def main():
     application = Application.builder().token(token).job_queue(job_queue).build()
 
     # --- 5. 设置全局应用上下文 (Bot Data) ---
+    # 这是机器人的“全局内存”，用于在不同的回调和模块之间共享状态和对象，
+    # 例如数据库会话工厂和规则缓存。
     application.bot_data['session_factory'] = session_factory
-    # 为了兼容旧代码（如 load_scheduled_rules），仍然保留对 scheduler 的引用
-    application.bot_data['scheduler'] = scheduler
     application.bot_data['rule_cache'] = {}
     application.bot_data['media_group_aggregator'] = {}
     application.bot_data['media_group_jobs'] = {}
@@ -239,19 +239,24 @@ async def main():
             # 必须手动启动轮询，`async with application` 不会自动启动
             await application.start()
             await application.updater.start_polling()
-            # 保持事件循环运行以接收更新
+            # 创建一个永远不会完成的 Future，以使主协程永久运行，
+            # 从而让底层的 aiohttp 服务器和轮询器可以持续工作。
+            # 这是在 `python-telegram-bot` 中保持机器人长时间运行的标准模式。
             await asyncio.Future()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("接收到关闭信号 (如 Ctrl+C)，程序正在优雅地关闭...")
     finally:
-        logger.info("正在关闭调度器...")
-        # application 上下文管理器会自动处理调度器和更新器的关闭
-        # 手动关闭以确保万无一失
+        logger.info("正在执行最终的清理工作...")
+        # `async with application:` 上下文管理器会负责优雅地关闭 Updater 和 JobQueue。
+        # 此处的额外日志是为了在程序退出时提供更清晰的确认信息。
+        if application.updater and application.updater.running:
+            logger.info("Updater 正在运行，将由上下文管理器处理关闭。")
         if application.job_queue and application.job_queue.scheduler.running:
-            application.job_queue.scheduler.shutdown()
-            logger.info("调度器已关闭。")
+            logger.info("调度器正在运行，将由上下文管理器处理关闭。")
+        logger.info("清理完成，程序即将退出。")
 
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("接收到关闭信号，程序正在关闭...")
+    # [优化] 将 main 函数的 try-except 块移到这里，
+    # 使其只捕获启动和运行期间的顶级异常，而不是函数定义本身。
+    asyncio.run(main())
