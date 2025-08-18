@@ -186,27 +186,18 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     """处理消息编辑事件。"""
     await process_event("edited_message", update, context)
 
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理图片消息，并为媒体组进行聚合。"""
-    # 代码评审意见:
-    # - 媒体组（media group）的聚合处理是一个非常巧妙的解决方案。
-    #   由于 Telegram 会将一个相册作为多个独立消息在短时间内发送，
-    #   通过延迟任务（job_queue.run_once）来聚合这些消息，最终作为一个 'media_group' 事件来处理，
-    #   这使得规则编写者可以非常方便地处理相册，而无需关心底层的复杂性。
+async def media_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理所有可成组的媒体消息（图片、视频、文件），并为媒体组进行聚合。
+    这是 photo_handler, video_handler, document_handler 的统一替代品。
+    """
     if update.message and update.message.media_group_id:
         aggregator: Dict[str, List[Message]] = context.bot_data['media_group_aggregator']
         jobs: Dict[str, asyncio.Task] = context.bot_data['media_group_jobs']
-
         media_group_id = str(update.message.media_group_id)
 
         if media_group_id not in aggregator:
             aggregator[media_group_id] = []
-            # 为这个新的媒体组安排一个延迟处理任务
-            # [潜在风险] 这里将 job 对象存储在 `media_group_jobs` 字典中。
-            # 在 `_process_aggregated_media_group` 的成功路径中，这个 job 被清除了。
-            # 但如果 `run_once` 失败或 `_process_aggregated_media_group` 在执行前发生意外（虽然概率极低），
-            # `jobs` 字典中可能会留下一个悬空的条目。不过，考虑到 key 是 media_group_id，
-            # 且 aggregator 字典也被清理了，这在实践中造成内存泄漏的风险非常小，属于可接受范围。
             jobs[media_group_id] = context.job_queue.run_once(
                 _process_aggregated_media_group,
                 when=timedelta(seconds=2),
@@ -218,15 +209,15 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         aggregator[media_group_id].append(update.message)
         logger.debug(f"已将消息 {update.message.message_id} 添加到媒体组 {media_group_id}。")
     else:
-        await process_event("photo", update, context)
-
-async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理视频消息。"""
-    await process_event("video", update, context)
-
-async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理文件消息。"""
-    await process_event("document", update, context)
+        # 确定单条媒体的事件类型
+        event_type = "media" # 默认值
+        if update.message.photo:
+            event_type = "photo"
+        elif update.message.video:
+            event_type = "video"
+        elif update.message.document:
+            event_type = "document"
+        await process_event(event_type, update, context)
 
 async def user_join_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户加入事件。"""

@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from src.bot.handlers import (
     reload_rules_handler, process_event, rules_handler,
     rule_on_off_handler, verification_timeout_handler,
-    photo_handler, _process_aggregated_media_group, rule_help_handler
+    media_message_handler, _process_aggregated_media_group, rule_help_handler
 )
 from src.database import Base, Rule, Group, Log, Verification
 from src.utils import session_scope
@@ -262,9 +262,9 @@ async def test_media_group_aggregation(mock_process_event, mock_update, mock_con
 
     # --- 2. 执行 ---
     # 模拟依次收到这三个消息
-    await photo_handler(update1, mock_context)
-    await photo_handler(update2, mock_context)
-    await photo_handler(update3, mock_context)
+    await media_message_handler(update1, mock_context)
+    await media_message_handler(update2, mock_context)
+    await media_message_handler(update3, mock_context)
 
     # --- 3. 验证计时器 ---
     # 验证 run_once 只被调用了一次（即只为第一个消息设置了计时器）

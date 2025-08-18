@@ -28,9 +28,7 @@ from src.bot.handlers import (
     edited_message_handler,
     scheduled_job_handler,
     reload_rules_handler,
-    photo_handler,
-    video_handler,
-    document_handler,
+    media_message_handler,
     start_handler,
     verification_callback_handler,
     rules_handler,
@@ -166,9 +164,8 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, user_leave_handler))
     application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, edited_message_handler))
-    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    application.add_handler(MessageHandler(filters.VIDEO, video_handler))
-    application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
+    # 将 photo, video, document 处理器合并为一个
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, media_message_handler))
     application.add_handler(ChatMemberHandler(user_join_handler, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(verification_callback_handler))

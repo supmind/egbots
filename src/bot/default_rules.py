@@ -29,35 +29,10 @@ END
     },
     # ... (other rules) ...
     {
-        "name": "[清理] 删除服务消息 (合并)",
+        "name": "[清理] 删除命令与服务消息",
         "priority": 0,
-        "description": "自动删除 Telegram 系统生成的“用户加入/离开群组”的提示消息，保持聊天记录的整洁。",
-        "script": """
-WHEN user_join or user_leave
-THEN {
-    delete_message();
-}
-END
-"""
-    },
-    {
-        "name": "[清理] 删除管理命令",
-        "priority": 0,
-        "description": "自动删除管理员使用的 /ban, /kick, /mute, /unmute, /warn 等管理命令本身，避免命令刷屏。",
-        "script": """
-WHEN command
-WHERE
-    user.is_admin == true AND
-    (
-        command.name == "ban" OR command.name == "kick" OR
-        command.name == "mute" OR command.name == "unmute" OR
-        command.name == "warn"
-    )
-THEN {
-    delete_message();
-}
-END
-"""
+        "description": "自动删除所有用户发出的所有命令，以及用户加入/离开群组的系统提示消息，以保持聊天记录的最大整洁度。",
+        "script": """WHEN user_join or user_leave or command THEN { delete_message(); } END"""
     },
     {
         "name": "[工具] 获取ID",
@@ -81,7 +56,7 @@ END
         "name": "[防刷屏] 消息防刷屏",
         "priority": 700,
         "description": "当非管理员用户在5秒内发送超过5条消息时，自动将其禁言10分钟。",
-        "script": """WHEN message WHERE user.is_admin == false AND user.stats.messages_5s > 5 THEN { mute_user("10m"); delete_message(); log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "antiflood"); } END"""
+        "script": """WHEN message or photo or video or document or media_group WHERE user.is_admin == false AND user.stats.messages_5s > 5 THEN { mute_user("10m"); delete_message(); log("用户 " + user.id + " 因刷屏被自动禁言10分钟。", "antiflood"); stop(); } END"""
     },
     {
         "name": "[管理] 警告系统",

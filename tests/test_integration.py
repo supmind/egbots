@@ -3,11 +3,14 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta, timezone
+import asyncio
+
+from telegram import Message
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.database import Base, Rule, Group, Verification, Log, EventLog, StateVariable
+from src.database import Base, Rule, Group, Verification, Log, EventLog, StateVariable, User
 from src.bot.handlers import process_event, verification_callback_handler
 from src.utils import generate_math_image
 
@@ -422,6 +425,95 @@ async def test_integration_foreach_with_actions(mock_update, mock_context, test_
         logs = db.query(Log).order_by(Log.timestamp.asc()).all()
         assert logs[0].message == "Kicked 456"
         assert logs[1].message == "Kicked 789"
+
+
+async def test_media_group_is_processed_as_single_event(mock_update, mock_context, test_db_session_factory):
+    """
+    集成测试: 验证一个媒体组被正确地聚合，并作为一个单独的 'media_group' 事件来处理。
+    """
+    # --- 1. 准备阶段 (Setup) ---
+    group_id = -1001
+    user_id = 123
+    media_group_id = "123456789"
+
+    # 为 conftest 中的 mock_update 设置基础属性
+    mock_update.effective_chat.id = group_id
+    mock_update.effective_user.id = user_id
+
+    with test_db_session_factory() as db:
+        db.add(Group(id=group_id, name="Test Group"))
+        db.add(User(id=user_id, first_name="Test", is_bot=False))
+        # 修复: 必须添加一个监听 'media_group' 事件的规则，否则 RuleExecutor 不会被调用
+        from src.bot.default_rules import DEFAULT_RULES
+        anti_flood_rule_data = next(r for r in DEFAULT_RULES if r["name"] == "[防刷屏] 消息防刷屏")
+        db.add(Rule(
+            group_id=group_id,
+            name=anti_flood_rule_data["name"],
+            script=anti_flood_rule_data["script"],
+            is_active=True
+        ))
+        db.commit()
+
+    # 创建媒体组中的三条独立消息
+    from telegram import PhotoSize
+    photo_size = PhotoSize(width=100, height=100, file_id="file1", file_unique_id="unique1")
+    msg1 = MagicMock(spec=Message)
+    msg1.message_id = 101
+    msg1.media_group_id = media_group_id
+    msg1.photo = [photo_size]
+    msg1.video = None
+    msg1.document = None
+    msg1.chat = mock_update.effective_chat
+    msg1.from_user = mock_update.effective_user
+
+    msg2 = MagicMock(spec=Message)
+    msg2.message_id = 102
+    msg2.media_group_id = media_group_id
+    msg2.photo = [photo_size]
+    msg2.video = None
+    msg2.document = None
+    msg2.chat = mock_update.effective_chat
+    msg2.from_user = mock_update.effective_user
+
+    # 修复：不再模拟 process_event，而是模拟更深层的 RuleExecutor，以允许 EventLog 被真实地创建
+    with patch('src.bot.handlers.RuleExecutor', new_callable=AsyncMock) as mock_executor:
+        # --- 2. 执行阶段 (Act) ---
+        from src.bot.handlers import media_message_handler
+        # 为测试初始化聚合器字典和模拟的 job_queue
+        mock_context.bot_data['media_group_aggregator'] = {}
+        mock_context.bot_data['media_group_jobs'] = {}
+        mock_context.job_queue = MagicMock()
+        mock_context.job_queue.run_once = MagicMock()
+        # 关键：需要将真实的 session_factory 传递给 mock_context
+        mock_context.bot_data['session_factory'] = test_db_session_factory
+
+
+        # 模拟媒体组消息的到达
+        mock_update.message = msg1
+        await media_message_handler(mock_update, mock_context)
+        mock_update.message = msg2
+        await media_message_handler(mock_update, mock_context)
+
+        # 修复: 手动触发 APScheduler 的回调，而不是依赖 asyncio.sleep
+        mock_context.job_queue.run_once.assert_called_once()
+        callback_args = mock_context.job_queue.run_once.call_args
+        callback_func = callback_args[0][0]
+        mock_job = MagicMock()
+        mock_job.data = callback_args[1]['data']
+        mock_context.job = mock_job
+        await callback_func(mock_context)
+
+        # --- 3. 验证阶段 (Assert) ---
+        # 验证 RuleExecutor 至少被调用过一次（因为它会尝试为 media_group 事件寻找匹配规则）
+        mock_executor.assert_called()
+
+        # 验证数据库中只记录了一个 media_group 事件
+        with test_db_session_factory() as db:
+            event_logs = db.query(EventLog).filter(EventLog.group_id == group_id).all()
+            assert len(event_logs) == 1, "数据库中应只记录一个聚合后的 media_group 事件"
+            assert event_logs[0].event_type == 'media_group'
+            # 验证 message_id 是否被正确记录为媒体组中第一条消息的 ID
+            assert event_logs[0].message_id == msg1.message_id
 
 async def test_full_warning_system_scenario(mock_update, mock_context, test_db_session_factory):
     """
