@@ -125,6 +125,25 @@ def test_function_call_parsing():
     assert len(expr.args) == 1
     assert isinstance(expr.args[0], Variable)
 
+@pytest.mark.parametrize("script_literal, expected_string", [
+    (r'"line1\n\tline2 \"quoted\" and a \\ backslash"', "line1\n\tline2 \"quoted\" and a \\ backslash"),
+    (r"'line1\n\tline2 \'quoted\' and a \\ backslash'", "line1\n\tline2 'quoted' and a \\ backslash"),
+    (r'"\u4f60\u597d"', "你好"), # Test unicode escapes
+])
+def test_string_with_escape_characters_parsing(script_literal, expected_string):
+    """测试解析器是否能正确处理字符串中的各种转义序列。"""
+    expr = parse_where_expr(f"{script_literal} == 1").left
+    assert isinstance(expr, Literal)
+    assert expr.value == expected_string
+
+def test_invalid_escape_sequence_in_string():
+    """测试包含无效转义序列的字符串是否会引发错误。"""
+    # \z is not a valid escape sequence in Python's 'unicode_escape'
+    script = r'WHEN command WHERE "hello \z world" == 1 THEN {} END'
+    is_valid, error = precompile_rule(script)
+    assert not is_valid
+    assert "字符串字面量无效" in error
+
 # =================== 语句解析测试 ===================
 
 def test_assignment_statement_parsing():

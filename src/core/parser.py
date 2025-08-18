@@ -1,6 +1,8 @@
 # src/core/parser.py (规则解析器)
 
 import re
+import ast
+import warnings
 from dataclasses import dataclass, field
 from typing import List, Any, Optional, Dict
 
@@ -190,7 +192,7 @@ TOKEN_SPECIFICATION = [
     ('NUMBER',       r'-?\d+(\.\d*)?'),
     ('ARITH_OP',     r'\+|-|\*|/'),
     ('KEYWORD',      r'\b(WHEN|WHERE|THEN|END|IF|ELSE|FOREACH|IN|BREAK|CONTINUE|TRUE|FALSE|NULL)\b'),
-    ('STRING',       r'"[^"]*"|\'[^\']*\''),
+    ('STRING',       r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\''),
     ('IDENTIFIER',   r'[a-zA-Z_][a-zA-Z0-9_]*'),
     ('MISMATCH',     r'.'),
 ]
@@ -398,7 +400,14 @@ class RuleParser:
         token = self._current_token()
         if token.type == 'STRING':
             self._consume('STRING')
-            return Literal(value=token.value[1:-1])
+            # 使用 ast.literal_eval 并将 SyntaxWarning 提升为错误，以严格处理无效转义序列。
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", SyntaxWarning)
+                try:
+                    unescaped_string = ast.literal_eval(token.value)
+                    return Literal(value=unescaped_string)
+                except (ValueError, SyntaxError) as e:
+                    raise RuleParserError(f"字符串字面量无效: {e}", token.line, token.column)
         elif token.type == 'NUMBER':
             self._consume('NUMBER')
             return Literal(value=float(token.value) if '.' in token.value else int(token.value))
@@ -444,7 +453,13 @@ class RuleParser:
         if not self._peek_type('RBRACE'):
             while True:
                 key_token = self._consume('STRING')
-                key = key_token.value[1:-1]
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", SyntaxWarning)
+                    try:
+                        key = ast.literal_eval(key_token.value)
+                    except (ValueError, SyntaxError) as e:
+                        raise RuleParserError(f"字典键字符串字面量无效: {e}", key_token.line, key_token.column)
+
                 self._consume('COLON')
                 value = self._parse_expression()
                 pairs[key] = value
