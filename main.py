@@ -236,8 +236,10 @@ async def main():
             scheduler.resume()
             logger.info("调度器已恢复运行。")
             logger.info("机器人已完成启动，开始轮询接收更新...")
-            # application.start() 和 updater.start_polling() 在 async with application 中会自动调用
-            # 我们只需要保持事件循环运行即可
+            # 必须手动启动轮询，`async with application` 不会自动启动
+            await application.start()
+            await application.updater.start_polling()
+            # 保持事件循环运行以接收更新
             await asyncio.Future()
     finally:
         logger.info("正在关闭调度器...")
