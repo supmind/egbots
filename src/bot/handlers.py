@@ -61,16 +61,25 @@ async def _is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return False
 
 def _seed_rules_if_new_group(chat_id: int, db_session: Session) -> bool:
-    """检查群组是否存在，如果不存在，则创建群组并为其植入默认规则集。"""
-    # 代码评审意见:
-    # - “种子规则”功能（seeding rules）是一个非常贴心的设计。
-    #   它确保了机器人被添加到新群组时，能够立即提供一套有用的默认功能（如入群验证），
-    #   极大地改善了初次使用的用户体验。
+    """
+    检查群组是否存在，如果不存在则创建。然后检查群组是否有规则，如果没有，则为其植入默认规则集。
+    这个函数现在更加健壮，可以处理数据库被清空但机器人仍在群组内的情况。
+    """
+    # 首先，确保群组记录存在于数据库中
     group = db_session.query(Group).filter_by(id=chat_id).first()
     if not group:
-        logger.info(f"数据库中未找到群组 {chat_id}，正在创建并植入默认规则...")
+        logger.info(f"数据库中未找到群组 {chat_id}，正在创建...")
         new_group = Group(id=chat_id, name=f"Group {chat_id}")
         db_session.add(new_group)
+        # 我们需要立即 flush 以便后续的规则查询可以关联到这个新群组
+        db_session.flush()
+
+    # 核心修复：现在我们不只检查群组是否存在，而是检查该群组是否有关联的规则。
+    # 这修复了一个场景：数据库被清空后，群组记录没了，但规则也没了。
+    # 或者用户手动删除了所有规则。在这种情况下，我们都应该重新植入默认规则。
+    rule_count = db_session.query(Rule).filter_by(group_id=chat_id).count()
+    if rule_count == 0:
+        logger.info(f"群组 {chat_id} 没有任何规则，正在植入默认规则...")
         for rule_data in DEFAULT_RULES:
             new_rule = Rule(
                 group_id=chat_id,
@@ -82,12 +91,11 @@ def _seed_rules_if_new_group(chat_id: int, db_session: Session) -> bool:
             )
             db_session.add(new_rule)
 
-        # 将新创建的对象刷入当前事务，但不提交
-        # 这使得后续在同一个事务中的查询可以立即看到这些新规则
+        # 再次 flush，确保新规则在当前事务中可见
         db_session.flush()
-
         logger.info(f"群组 {chat_id} 的默认规则已成功植入。")
-        return True
+        return True # 返回 True 表示规则被植入，可能需要刷新缓存
+
     return False
 
 # =================== 核心事件处理 ===================

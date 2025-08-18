@@ -174,7 +174,8 @@ async def test_process_event_caching_logic(MockRuleExecutor, mock_update, mock_c
         await process_event("command", mock_update, mock_context)
 
     # Verification (First Call)
-    assert "正在创建并植入默认规则" in caplog.text
+    # 核心修复：更新断言以匹配新的、更精确的日志消息
+    assert "正在植入默认规则" in caplog.text
     assert "缓存未命中" in caplog.text
     assert -1001 in mock_context.bot_data['rule_cache']
     # The number of loaded rules should match the number of default rules.
@@ -226,6 +227,38 @@ async def test_seed_rules_for_new_group(MockRuleExecutor, mock_update, mock_cont
         group = db.query(Group).filter_by(id=-1001).first()
         assert group is not None
 
+        rule_count = db.query(Rule).filter_by(group_id=-1001).count()
+        assert rule_count == len(DEFAULT_RULES)
+
+
+@patch('src.bot.handlers.RuleExecutor')
+async def test_seed_rules_is_robust_to_empty_rules(MockRuleExecutor, mock_update, mock_context, test_db_session_factory):
+    """
+    测试规则植入的健壮性：当一个群组已存在于数据库但没有任何规则时，
+    是否会自动为其植入默认规则。这覆盖了数据库被部分清理的场景。
+    """
+    # --- 准备 ---
+    # 在数据库中创建一个群组，但不创建任何规则
+    with session_scope(test_db_session_factory) as db:
+        db.add(Group(id=-1001, name="Existing Group With No Rules"))
+        db.commit()
+        assert db.query(Group).count() == 1
+        assert db.query(Rule).count() == 0
+
+    from src.bot.default_rules import DEFAULT_RULES
+    mock_executor_instance = MockRuleExecutor.return_value
+    mock_executor_instance.execute_rule = AsyncMock()
+
+    # --- 执行 ---
+    # 对这个已存在但无规则的群组触发一个事件
+    await process_event("message", mock_update, mock_context)
+
+    # --- 验证 ---
+    # 验证默认规则是否已被成功植入
+    with session_scope(test_db_session_factory) as db:
+        # 群组数量应该仍然是 1
+        assert db.query(Group).count() == 1
+        # 规则数量应该等于默认规则的数量
         rule_count = db.query(Rule).filter_by(group_id=-1001).count()
         assert rule_count == len(DEFAULT_RULES)
 
