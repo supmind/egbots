@@ -1,5 +1,16 @@
 # src/database.py
 
+# 代码评审意见:
+# 总体设计:
+# - 数据库模型设计得非常专业和健壮。
+# - 关系定义清晰：通过 `relationship` 和 `back_populates` 正确地建立了模型之间的双向关系。
+# - 数据完整性强：
+#   - `ForeignKey` 约束保证了引用完整性。
+#   - 在 `StateVariable` 上使用 `UniqueConstraint` 是一个关键设计，确保了变量在其作用域内的唯一性。
+#   - `ondelete="CASCADE"` 和 `cascade="all, delete-orphan"` 的使用非常出色，
+#     确保了当一个群组被删除时，所有相关的子记录（规则、变量、日志等）都会被自动清理，有效防止了数据孤立。
+# - 性能考虑周全：在经常用于查询过滤的字段（如 `group_id`, `user_id`, `event_type`）上都正确地设置了 `index=True`。
+
 import logging
 from sqlalchemy import (
     create_engine,

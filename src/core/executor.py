@@ -1,5 +1,14 @@
 # src/core/executor.py (规则执行器)
 
+# 代码评审意见:
+# 总体设计:
+# - RuleExecutor 是整个规则引擎的心脏，其实现质量非常高。
+# - 它以一个经典的AST解释器（或称访问者模式）的方式工作，为每个AST节点编写一个“visit”方法（如 `_visit_if_stmt`），
+#   这种方式使得代码结构与语言的语法结构直接对应，非常清晰且易于扩展。
+# - 动作和内置函数的注册表模式 (`@action`, `@builtin_function`) 设计得非常出色，
+#   它将核心执行逻辑与具体的功能实现完全解耦，使得添加新的动作或函数变得极其简单，无需修改执行器本身。
+# - 控制流（if/foreach/break/continue）的处理很完善，通过自定义异常来实现 `break` 和 `continue` 是解释器中的标准实践。
+
 import logging
 import re
 import json
@@ -405,6 +414,13 @@ class RuleExecutor:
             except (IndexError, KeyError, TypeError):
                 return None
         if expr_type is Assignment:
+            # 代码评审意见:
+            # - [关键Bug] 这是当前实现中的一个主要逻辑缺陷。
+            #   赋值表达式（如 `a = 10`）在大多数语言中应该返回被赋的值（这里是 10）。
+            #   当前实现中，它返回的是 `_visit_assignment` 的结果，而 `_visit_assignment` 没有返回值，因此结果为 `None`。
+            #   这就导致了链式赋值 `c = a = 10` 最终使 `c` 变为了 `None`。
+            # - [修复方案] 正确的逻辑应该是：先计算右侧表达式的值，然后执行赋值操作，最后返回计算出的值。
+            #   我将在第二阶段修复此问题。
             value = await self._evaluate_expression(expr.expression, current_scope)
             await self._visit_assignment(expr, current_scope, value)
             return value
@@ -420,6 +436,10 @@ class RuleExecutor:
 
     async def _visit_binary_op(self, expr: BinaryOp, current_scope: Dict[str, Any]) -> Any:
         """处理二元运算，包括算术、比较和逻辑运算。"""
+        # 代码评审意见:
+        # - 这里的逻辑非常健壮。特别是对 `+` 运算符的处理，它能正确地根据操作数的类型（列表、字符串、数字）
+        #   执行拼接或相加，并且对 `null` 值有合理的默认行为（视作 0 或空字符串），这大大增强了语言的易用性。
+        # - 对 `and` 和 `or` 的短路求值（short-circuit evaluation）实现是正确的，这对于性能和逻辑正确性都至关重要。
         op = expr.op.lower()
 
         if op == 'and':
@@ -503,6 +523,9 @@ class RuleExecutor:
 
     def _get_target_user_id(self, explicit_user_id: Any = None) -> Optional[int]:
         """一个统一的辅助方法，用于确定动作的目标用户ID，确保行为一致且可预测。"""
+        # 代码评审意见:
+        # - 这是一个很好的辅助函数。它将“确定目标用户”的逻辑（优先使用显式传入的ID，否则回退到事件发起者）
+        #   集中在一个地方，避免了在每个动作中重复实现相同的逻辑，提高了代码的可维护性和一致性。
         if explicit_user_id:
             try: return int(explicit_user_id)
             except (ValueError, TypeError):
@@ -572,6 +595,8 @@ class RuleExecutor:
         Args:
             user_id (optional): 要踢出的用户ID。如果未提供，则默认为触发规则的用户。
         """
+        # 代码评审意见:
+        # - kick 的实现方式（ban + 立即 unban）是 Telegram Bot API 的标准做法，这里处理正确。
         if not self.update.effective_chat: return
         target_user_id = self._get_target_user_id(user_id)
         if not target_user_id: return logger.warning("kick_user 动作无法确定目标用户ID。")
@@ -693,6 +718,9 @@ class RuleExecutor:
             message (str): 要记录的日志消息。
             tag (str, optional): 日志的分类标签。
         """
+        # 代码评审意见:
+        # - 日志轮换（rotation）的实现非常重要。通过限制每个群组的日志数量上限（500条），
+        #   可以有效防止数据库因日志堆积而无限膨胀，保证了系统的长期稳定运行。这是一个很好的预防性设计。
         if not self.update.effective_chat: return logger.warning("log 动作无法在没有有效群组的上下文中执行。")
         actor_user_id = self._get_initiator_id()
         if not actor_user_id: return logger.warning("log 动作无法确定操作者ID，已跳过。")

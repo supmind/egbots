@@ -197,6 +197,8 @@ async def test_action_start_verification(mock_update, mock_context):
     # 混合类型运算
     ("'val: ' + 10", None, "val: 10"),
     ("10 + ' is val'", None, "10 is val"),
+    ("[1, 2] + 3", None, [1, 2, 3]),
+    ("3 + [1, 2]", None, [3, 1, 2]),
     # 复杂逻辑
     ("(true and false) or (true and true)", None, True),
     ("not (false or false)", None, True),

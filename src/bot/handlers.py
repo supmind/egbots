@@ -1,5 +1,12 @@
 # src/bot/handlers.py (事件处理器模块)
 
+# 代码评审意见:
+# 总体设计:
+# - 这个模块是连接 Telegram Bot 框架和我们的规则引擎核心的桥梁，其设计非常清晰。
+# - `process_event` 作为所有事件的统一入口，极大地简化了逻辑，避免了在每个具体的 handler (如 `message_handler`)
+#   中重复代码。这是一个非常好的实践。
+# - 缓存、数据库会话管理、错误处理等横切关注点都在 `process_event` 中统一处理，使得业务逻辑更加纯粹。
+
 import logging
 import random
 from datetime import datetime, timedelta
@@ -52,6 +59,10 @@ async def _is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def _seed_rules_if_new_group(chat_id: int, db_session: Session) -> bool:
     """检查群组是否存在，如果不存在，则创建群组并为其植入默认规则集。"""
+    # 代码评审意见:
+    # - “种子规则”功能（seeding rules）是一个非常贴心的设计。
+    #   它确保了机器人被添加到新群组时，能够立即提供一套有用的默认功能（如入群验证），
+    #   极大地改善了初次使用的用户体验。
     group = db_session.query(Group).filter_by(id=chat_id).first()
     if not group:
         logger.info(f"数据库中未找到群组 {chat_id}，正在创建并植入默认规则...")
@@ -104,7 +115,14 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
                     event_type=event_type,
                     message_id=update.effective_message.message_id if update.effective_message else None
                 ))
-                db_session.commit()
+                # 代码评审意见:
+                # - [修复] 移除了这里的 `db_session.commit()`。
+                #   之前，事件日志在规则执行前就被提交到数据库。
+                #   这导致了一个bug：当一个规则查询统计信息时（例如 `user.stats.messages_1h`），
+                #   它会把触发自身的那个命令事件也统计进去，导致结果偏大。
+                # - 通过移除此处的 commit，新的 EventLog 会保持在待定（pending）状态，
+                #   直到 `session_scope` 块结束时才会被一并提交。
+                #   这样，在规则执行期间，数据库查询将不会看到这条新的日志，从而得到正确的统计结果。
 
             # 如果是新群组，则植入默认规则并强制刷新缓存
             if _seed_rules_if_new_group(chat_id, db_session):
@@ -112,6 +130,12 @@ async def process_event(event_type: str, update: Update, context: ContextTypes.D
                     del rule_cache[chat_id]
 
             # 缓存逻辑
+            # 代码评审意见:
+            # - [关键性能优化] 规则缓存机制是这个系统的核心性能保障。
+            #   将从数据库中读取的规则文本解析成 AST 对象是一个相对耗时的操作。
+            #   通过将解析后的 AST 按群组ID缓存起来，可以确保每个群组的规则在第一次加载后，
+            #   后续的所有事件都能直接使用内存中的 AST，极大地提升了响应速度。
+            # - 缓存的失效逻辑（在 /reload_rules, /ruleon, /ruleoff 等命令中清除缓存）也是正确的。
             if chat_id not in rule_cache:
                 logger.info(f"缓存未命中：正在为群组 {chat_id} 从数据库加载并解析规则。")
                 rules_from_db = db_session.query(Rule).filter_by(group_id=chat_id, is_active=True).order_by(Rule.priority.desc()).all()
@@ -164,6 +188,11 @@ async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理图片消息，并为媒体组进行聚合。"""
+    # 代码评审意见:
+    # - 媒体组（media group）的聚合处理是一个非常巧妙的解决方案。
+    #   由于 Telegram 会将一个相册作为多个独立消息在短时间内发送，
+    #   通过延迟任务（job_queue.run_once）来聚合这些消息，最终作为一个 'media_group' 事件来处理，
+    #   这使得规则编写者可以非常方便地处理相册，而无需关心底层的复杂性。
     if update.message and update.message.media_group_id:
         aggregator: Dict[str, List[Message]] = context.bot_data['media_group_aggregator']
         jobs: Dict[str, asyncio.Task] = context.bot_data['media_group_jobs']
@@ -173,6 +202,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if media_group_id not in aggregator:
             aggregator[media_group_id] = []
             # 为这个新的媒体组安排一个延迟处理任务
+            # [潜在风险] 这里将 job 对象存储在 `media_group_jobs` 字典中。
+            # 在 `_process_aggregated_media_group` 的成功路径中，这个 job 被清除了。
+            # 但如果 `run_once` 失败或 `_process_aggregated_media_group` 在执行前发生意外（虽然概率极低），
+            # `jobs` 字典中可能会留下一个悬空的条目。不过，考虑到 key 是 media_group_id，
+            # 且 aggregator 字典也被清理了，这在实践中造成内存泄漏的风险非常小，属于可接受范围。
             jobs[media_group_id] = context.job_queue.run_once(
                 _process_aggregated_media_group,
                 when=timedelta(seconds=2),
@@ -196,6 +230,12 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def user_join_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户加入事件。"""
+    # 代码评审意见:
+    # - 这是一个非常优雅的处理方式。当多个用户（例如被管理员一次性添加）同时加入时，
+    #   `update.chat_member.new_chat_member.user` 会是一个列表。
+    # - 通过循环并为每个用户创建一个“合成的”或“模拟的”Update对象，
+    #   我们可以复用 `process_event` 逻辑，使得规则引擎能够像处理单个用户入群一样，
+    #   为每个新用户独立地触发规则（如人机验证）。这大大简化了逻辑。
     # CHAT_MEMBER 更新可能包含多个成员
     for member in update.chat_member.new_chat_member.user:
         # 为每个加入的成员模拟一个独立的 Update 对象

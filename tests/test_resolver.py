@@ -188,6 +188,28 @@ async def test_resolve_persistent_variable_user_id_parsing_bug(mock_update, test
         # 测试无效的用户ID格式
         assert await resolver.resolve("vars.user_abc.points") is None
 
+
+async def test_resolve_persistent_variable_with_regex_fix(mock_update, test_db_session_factory):
+    """
+    一个专门的测试，用于验证使用正则表达式修复后，解析器可以正确处理各种用户ID格式。
+    """
+    complex_user_id = 123456789012345
+    with test_db_session_factory() as session:
+        session.add(StateVariable(group_id=-1001, user_id=complex_user_id, name="points", value="9999"))
+        session.commit()
+
+        mock_context = Mock()
+        mock_context.bot_data = {}
+        resolver = VariableResolver(mock_update, mock_context, session, {})
+
+        # 1. 测试新的正则表达式逻辑是否能正确处理复杂ID
+        resolved_value = await resolver.resolve(f"vars.user_{complex_user_id}.points")
+        assert resolved_value == 9999
+
+        # 2. 测试当scope不是 'user' 或 'group' 时，即使有下划线也不应被错误解析
+        assert await resolver.resolve("vars.unknown_scope.points") is None
+
+
 @pytest.mark.parametrize("path, expected_value", [
     ("vars.group.settings", {"enabled": True, "mode": "strict"}),
     ("vars.user_invalid", None),

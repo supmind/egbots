@@ -1,4 +1,12 @@
 # src/utils.py
+# 代码评审意见:
+# 总体设计:
+# - 工具模块的职责清晰，包含了一些在应用中多处复用的、独立的辅助函数。
+# - `session_scope` 的实现非常出色，是使用 SQLAlchemy 时管理数据库会话和事务的标准最佳实践。
+#   它确保了每个操作单元都有自己的生命周期，并在结束时正确地提交或回滚，有效防止了资源泄漏。
+# - `unmute_user_util` 将解除禁言的逻辑（包括获取群组默认权限）集中在一个地方，
+#   避免了在 `executor` 和 `handlers` 中重复代码，是很好的代码复用实践。
+
 import logging
 import io
 from contextlib import contextmanager

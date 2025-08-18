@@ -7,6 +7,12 @@ from typing import List, Any, Optional, Dict
 # ======================================================================================
 # 脚本语言 v3.0 - 解析器实现
 # ======================================================================================
+# 代码评审意见:
+# 总体设计:
+# - 本解析器实现非常出色。它采用了经典的分词器（Tokenizer）+ 递归下降解析器（Recursive Descent Parser）的架构，
+#   这是构建语言解析器的标准且高效的方法。
+# - 整体代码结构清晰，职责分明（分词、解析、AST定义），易于理解和维护。
+# - 对 Pratt 解析（一种改进的递归下降，用于处理运算符优先级）的运用非常娴熟，使得表达式解析逻辑既简洁又正确。
 
 # =================== 自定义异常 ===================
 
@@ -17,6 +23,9 @@ class RuleParserError(Exception):
     当解析过程中发生语法错误时抛出。它包含了错误发生的具体行号和列号，
     以便于用户调试其编写的规则脚本。
     """
+    # 代码评审意见:
+    # - 这是一个非常好的实践。自定义异常不仅能与普通异常区分开，
+    #   还附加了行号和列号等关键调试信息，极大地提升了规则编写者的开发体验。
     def __init__(self, message: str, line: int = -1, column: int = -1):
         self.message = message
         self.line = line
@@ -32,6 +41,11 @@ class RuleParserError(Exception):
 # AST (Abstract Syntax Tree) 是将纯文本脚本转换为程序可理解的、结构化的对象表示。
 # 它是解析器（Parser）的输出，也是执行器（Executor）的输入，是连接这两个核心模块的桥梁。
 # 每个节点都代表了语言中的一个语法结构（如赋值、函数调用、二元运算等）。
+#
+# 代码评审意见:
+# - 使用 `dataclass` 来定义 AST 节点是一个极佳的选择。它减少了大量样板代码（如 __init__），
+#   使得节点的结构一目了然，非常清晰。
+# - AST 节点的命名和结构划分（表达式、语句、顶层规则）都非常合理，覆盖了语言的所有语法特性。
 
 # --- 表达式节点 (Expression Nodes) ---
 @dataclass
@@ -183,6 +197,10 @@ TOKEN_SPECIFICATION = [
 TOKEN_REGEX = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPECIFICATION), flags=re.IGNORECASE)
 
 def tokenize(code: str) -> List[Token]:
+    # 代码评审意见:
+    # - 分词器健壮且高效。使用一个大的正则表达式配合命名捕获组来一次性处理所有 token 类型是经过验证的最佳实践之一。
+    # - 对换行、空白和注释的处理逻辑正确。
+    # - `MISMATCH` 规则作为回退，可以捕获任何无效字符，确保了分词的完备性。
     tokens = []
     line_num = 1
     line_start = 0
@@ -344,6 +362,11 @@ class RuleParser:
         if self._peek_type('LOGIC_OP') and self._current_token().value.lower() == 'not':
             op_token = self._consume_keyword('not')
             operand = self._parse_unary_expression()
+            # 代码评审意见:
+            # - 将 `not a` 解析为 `BinaryOp(left=Literal(None), op='not', right=a)` 是一种有趣且可行的实现方式。
+            #   它复用了 `BinaryOp` 节点，简化了 AST 的类型。
+            # - 这种方式虽然不常见（更典型的做法是定义一个专门的 `UnaryOp` 节点），但只要执行器 (`executor.py`)
+            #   能够正确地解释这种结构，它就是完全有效的。这体现了设计上的一种权衡。
             return BinaryOp(left=Literal(value=None), op=op_token.value, right=operand)
         return self._parse_accessor_expression()
 
@@ -464,6 +487,11 @@ class RuleParser:
         return self.pos >= len(self.tokens)
 
 def precompile_rule(script: str) -> (bool, Optional[str]):
+    # 代码评审意见:
+    # - 这是一个非常有价值的工具函数。它将解析器的核心功能暴露出来，
+    #   为外部工具（如 Web 管理界面、CI/CD 流程）提供了验证规则语法的能力，
+    #   极大地增强了整个系统的可用性和可集成性。
+    # - 错误处理流程清晰，返回一个元组 (is_valid, error_message) 是非常友好的接口设计。
     if not isinstance(script, str) or not script.strip():
         return False, "脚本不能为空。"
     try:

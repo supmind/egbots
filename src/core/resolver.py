@@ -1,5 +1,13 @@
 # src/core/resolver.py
 
+# 代码评审意见:
+# 总体设计:
+# - VariableResolver 的设计非常优秀，它完美地扮演了“适配器”或“桥梁”的角色，
+#   将脚本引擎的抽象世界（如变量路径 'user.id'）与 Python 后端的具体实现（如访问 Update 对象、数据库、缓存）连接起来。
+# - `resolve` 方法作为调度中心（Dispatcher）的设计模式运用得很好，使得每种变量的解析逻辑清晰地分离到各自的方法中，易于维护。
+# - 缓存策略考虑周全：同时使用了请求级缓存（per_request_cache）处理高频、低成本的重复计算（如命令解析），
+#   以及基于 TTL 的共享缓存（stats_cache）处理高成本的数据库查询，这是非常成熟的性能优化方案。
+
 import logging
 import re
 import shlex
@@ -99,6 +107,9 @@ class VariableResolver:
         2.  **请求内缓存 (Per-Request Caching)**: 命令的解析是一个纯计算操作。为了避免在同一次事件处理中重复执行
             `shlex.split`，我们将首次解析的结果缓存在 `self.per_request_cache` 字典中。
         """
+        # 代码评审意见:
+        # - 使用 `shlex.split` 而不是 `text.split()` 是一个非常明智的选择，它极大地增强了命令参数解析的健壮性，
+        #   能够原生支持带引号的参数，这是很多简单实现中容易忽略的细节。
         # 如果消息不是一个有效的命令（例如，不是文本消息，或文本不以 '/' 开头），则直接返回 None。
         if not self.update.message or not self.update.message.text or not self.update.message.text.startswith('/'):
             return None
@@ -155,17 +166,16 @@ class VariableResolver:
         if len(parts) != 3: return None # 路径必须是 'vars.scope.name' 的形式
 
         _, scope_str, var_name = parts
-        scope_parts = scope_str.split('_')
-        scope_name = scope_parts[0].lower()
-
+        scope_name = scope_str.lower()
         target_user_id = None
-        # 如果作用域部分包含下划线（如 'user_12345'），则尝试从中解析出用户ID。
-        if len(scope_parts) > 1:
+
+        # 使用正则表达式来更健壮地解析 'user_12345' 这种格式
+        user_id_match = re.match(r'user_(\d+)', scope_name)
+        if user_id_match:
             try:
-                # BUG 修复：之前使用 ''.join(scope_parts[1:]) 会错误地处理 'user_123_456' 这种情况。
-                # 正确的逻辑应该是只取下划线后的第一个部分作为ID。
-                target_user_id = int(scope_parts[1])
-            except (ValueError, TypeError, IndexError):
+                target_user_id = int(user_id_match.group(1))
+                scope_name = 'user' # 确保基础作用域是 'user'
+            except (ValueError, TypeError):
                 logger.warning(f"在变量路径中发现无效的用户ID格式: {scope_str}")
                 return None
 
@@ -304,6 +314,10 @@ class VariableResolver:
         我们使用 `self.per_request_cache` 来确保在同一次事件处理中，无论规则脚本
         多少次访问 `user.is_admin`，高成本的 `get_chat_member` API 都只会被实际调用一次。
         """
+        # 代码评审意见:
+        # - 对 API 调用的结果进行请求内缓存是绝对正确的做法。
+        #   这可以防止在同一个规则或多个规则中反复请求同一个用户的管理员状态，显著提升性能并避免 API 超时。
+        # - 缓存键的设计 `f"is_admin_{user_id}_in_{chat_id}"` 是正确的，它包含了所有必要的维度（用户、群组），确保了缓存的准确性。
         if not (self.update.effective_chat and self.update.effective_user): return False
 
         # 缓存键必须包含用户ID和群组ID，因为管理员状态是针对特定用户在特定群组中的状态。
@@ -340,6 +354,10 @@ class VariableResolver:
           它会立即停止并安全地返回 `None`，而不是引发 `AttributeError`。
         - **属性错误捕获**: 如果在访问真实对象的属性时发生 `AttributeError`，它会捕获这个异常并安全地返回 `None`。
         """
+        # 代码评审意见:
+        # - 这种逐级深入访问并优雅处理 `None` 和 `AttributeError` 的方式非常健壮。
+        #   它是脚本语言能够安全地访问深层嵌套对象（如 `message.reply_to_message.from_user.id`）的关键，
+        #   极大地避免了因中间某个环节为 `None` 而导致整个规则执行失败的问题。
         current_obj = self.update
         for part in path.split('.'):
             if current_obj is None: return None
