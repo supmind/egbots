@@ -10,20 +10,20 @@
 
 ---
 
-## 2. 规则脚本语言指南 (v3.0)
+## 2. 规则脚本语言指南 (v3.1)
 
 本机器人由一个强大、灵活、经过全面重构的嵌入式脚本语言驱动。它允许您编写复杂的规则来自动化管理您的群组。
 
 ### 2.1. 核心概念
 
 *   **语法风格**: 语言采用类似 C/Java/JavaScript 的语法风格。代码块由 `{}` 包裹，每条语句以 `;` 结尾。
-*   **声明式与命令式结合**: 规则的总体结构是声明式的 (`WHEN...WHERE...THEN`)，但在 `THEN` 块内部，您可以编写命令式的脚本代码。
+*   **声明式与命令式结合**: 规则的总体结构是声明式的 (`WHEN...THEN`)，但在 `THEN` 块内部，您可以编写命令式的脚本代码。
 *   **注释**: 您可以使用 `//` 来添加单行注释，解析器会忽略它们。
 
 ### 2.2. 规则基本结构
 
 ```
-WHEN event
+WHEN event or event2...
 WHERE expression
 THEN {
     // 脚本代码...
@@ -31,7 +31,11 @@ THEN {
 END
 ```
 
-*   **`WHEN event`**: **必需**。定义规则的**触发器**。例如 `message`, `user_join`。
+*   **`WHEN event`**: **必需**。定义规则的**触发器**。多个触发器可以用 `or` 连接。
+    *   **消息类**: `message` (文本消息), `command`, `photo`, `video`, `document`, `edited_message`。
+    *   **用户活动类**: `user_join`, `user_leave`。
+    *   **媒体组**: `media_group` (当一组图片/视频被聚合后触发)。
+    *   **计划任务**: `schedule("*/5 * * * *")` (使用 Cron 表达式)。`schedule` 触发器是排他的，不能与其他任何事件一起使用。
 *   **`WHERE expression`**: **可选**。定义规则的**守卫条件**。这是一个高效的前置检查，只有当 `expression` 的结果为真时，`THEN` 块内的脚本才会被执行。
 *   **`THEN { ... }`**: **必需**。定义规则的**执行体**。其中包含用于处理事件的脚本。
 *   **`END`**: **必需**。标志着规则定义的结束。
@@ -53,20 +57,34 @@ END
     ```
     my_var = 10;
     my_list = [1, 2, 3];
+    a = b = 100; // 支持链式赋值
     ```
 2.  **上下文变量 (只读)**: 由系统提供，包含了当前触发事件的所有信息。
     *   `user.*`: 触发事件的用户信息。例如, `user.id`, `user.is_admin`。
     *   `message.*`: 触发事件的消息信息。例如, `message.text`, `message.reply_to_message`。
-    *   `command.*`: 当 `WHEN command` 时可用，提供对命令参数的访问。
-        *   `command.name`: 命令的名称 (不含 `/`)。例如, 对于 `/kick user1`，值为 `"kick"`。
+    *   `command.*`: 当 `WHEN command` 时可用。
+        *   `command.name`: 命令的名称 (不含 `/`)。
         *   `command.full_args`: 包含所有参数的单个字符串。
         *   `command.arg_count`: 参数的数量。
         *   `command.arg[N]`: 访问第N个参数 (从0开始)。
+    *   `media_group.*`: 当 `WHEN media_group` 时可用。
+        *   `media_group.messages`: 包含媒体组中所有消息对象的列表。
+        *   `media_group.message_count`: 媒体组中的消息数量。
+        *   `media_group.caption`: 媒体组的标题（通常是第一张带标题的图片）。
+    *   `user.stats.*`: 获取用户在特定时间窗口内的统计数据。
+        *   `user.stats.messages_1h`: 当前用户在过去1小时内发送的消息总数（包括文本、图片、视频等）。
+        *   支持的时间单位: `s` (秒), `m` (分钟), `h` (小时), `d` (天)。例如: `user.stats.messages_5s`。
+        *   支持的统计类型: `messages`, `joins`, `leaves`。
+    *   `group.stats.*`: 获取整个群组在特定时间窗口内的统计数据。用法同 `user.stats.*`。
+
 3.  **持久化变量 (读写)**: 跨规则、跨时间存在的变量，存储在数据库中。
     *   `vars.group.my_var`: 群组作用域的变量。
-    *   `vars.user.my_var`: 用户在特定群组内的作用域变量。
-    *   **读取**: `my_warnings = vars.user.warnings or 0;`
-    *   **写入**: 必须使用 `set_var` 动作: `set_var("user.warnings", my_warnings + 1);`
+    *   `vars.user.my_var`: 用户在特定群组内的作用域变量（默认指向当前用户）。
+    *   `vars.user_12345.my_var`: 访问指定用户ID (12345) 的变量。
+    *   **读取**:
+        *   简单读取（当前用户或群组）: `my_warnings = vars.user.warnings or 0;`
+        *   高级读取（指定用户或带默认值）: 推荐使用 `get_var()` 函数。
+    *   **写入**: **必须**使用 `set_var` 动作: `set_var("user.warnings", my_warnings + 1);`
 
 ### 2.5. 控制流
 
@@ -97,6 +115,7 @@ END
 | `upper(string)` | 将字符串转为大写。 |
 | `split(string, separator, maxsplit)` | 将字符串按 `separator` 分割成一个列表。`maxsplit`为可选参数。 |
 | `join(list, separator)` | 使用 `separator` 连接 `list` 中的所有元素成一个字符串。 |
+| `get_var(path, default, user_id)` | **推荐的**读取持久化变量的方式。`path`格式为`"scope.name"`，`default`为可选的默认值，`user_id`为可选的目标用户ID。 |
 
 ### 2.8. 可用动作 (Actions)
 
@@ -106,17 +125,16 @@ END
 
 这套设计哲学旨在让规则的行为变得明确且可预测。为了对**被回复消息的用户**执行操作，您必须在规则中明确地从上下文中提取其ID，如下所示：
 ```
-// 示例：回复一条消息并使用 /warn 命令来警告被回复的用户
+// 示例：使用 /warn 命令警告被回复的用户
 WHEN command WHERE command.name == 'warn' THEN {
   if (message.reply_to_message) {
-    // 从上下文变量中获取被回复用户的ID
     target_id = message.reply_to_message.from_user.id;
 
-    // 使用 'vars.user_USER_ID.var_name' 语法来读取和写入其他用户的变量
-    set_var("user.warnings", (vars.user_target_id.warnings or 0) + 1, target_id);
-    kick_user(target_id);
+    // 使用 get_var 和 set_var 来处理指定用户的变量
+    current_warnings = get_var("user.warnings", 0, target_id);
+    set_var("user.warnings", current_warnings + 1, target_id);
 
-    reply("用户 " + target_id + " 已被警告并踢出。");
+    reply("用户 " + target_id + " 已被警告。");
   } else {
     reply("请回复一个用户的消息来使用此命令。");
   }
@@ -131,9 +149,9 @@ WHEN command WHERE command.name == 'warn' THEN {
 | `ban_user(user_id, reason)` | 永久封禁用户。`user_id` 和 `reason` 为可选参数。 |
 | `kick_user(user_id)` | 将用户踢出群组（可重新加入）。`user_id` 为可选参数。 |
 | `mute_user(duration, user_id)` | 禁言用户。`duration` 支持 `m`, `h`, `d` 单位。`user_id` 为可选参数。 |
-| `unmute_user(user_id)` | 解除用户禁言（恢复发送消息权限）。`user_id` 为可选参数。 |
-| `set_var(name, value, user_id)` | 为用户或群组设置一个持久化变量。当作用域为 'user' 时，可以额外提供一个 `user_id` 参数来指定目标用户。`user_id` 为可选参数。 |
-| `log(message, tag)` | 记录一条日志。`message` 是必需的文本，`tag` 是可选的分类标签。每个群组最多保留500条日志，采用先进先出策略。 |
+| `unmute_user(user_id)` | 解除用户禁言。`user_id` 为可选参数。 |
+| `set_var(path, value, user_id)` | 设置一个持久化变量。`path`格式为`"scope.name"`，当值为`null`时删除变量。`user_id`可选。 |
+| `log(message, tag)` | 记录一条日志。`message` 是必需的文本，`tag` 是可选的分类标签。 |
 | `start_verification()` | 对新用户启动人机验证流程。 |
 | `stop()` | 立即停止执行当前规则，且不再处理后续规则。 |
 
@@ -193,35 +211,11 @@ WHEN command WHERE command.name == 'warn' THEN {
 ```python
 from src.core.parser import precompile_rule
 
-# 一个语法正确的规则
-valid_script = \"\"\"
-WHEN message
-WHERE user.id == 12345
-THEN {
-    reply("Hello, admin!");
-}
-END
-\"\"\"
+valid_script = "WHEN message WHERE user.id == 123 THEN { reply('ok'); } END"
+is_valid, error = precompile_rule(valid_script) # --> (True, None)
 
-is_valid, error_message = precompile_rule(valid_script)
-# 结果: is_valid = True, error_message = None
-print(f"脚本有效: {is_valid}")
-
-
-# 一个语法错误的规则 (缺少分号)
-invalid_script = \"\"\"
-WHEN message
-THEN {
-    reply("This will fail")
-}
-END
-\"\"\"
-
-is_valid, error_message = precompile_rule(invalid_script)
-# 结果: is_valid = False, error_message = "解析错误 (第 4 行, 第 1 列): 期望得到 token 类型 SEMICOLON，但得到 RBRACE ('}')"
-print(f"脚本有效: {is_valid}")
-print(f"错误信息: {error_message}")
-
+invalid_script = "WHEN message THEN { reply('ok') } END"
+is_valid, error = precompile_rule(invalid_script) # --> (False, '解析错误...')
 ```
 
 **返回值**:
