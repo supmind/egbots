@@ -28,6 +28,60 @@ END
 """
     },
     {
+        "name": "[管理] 解除禁言",
+        "priority": 500,
+        "description": "提供 /unmute 命令，允许管理员通过回复消息或指定用户ID来为一个用户解除禁言。",
+        "script": """
+WHEN command WHERE command.name == 'unmute' AND user.is_admin == true THEN {
+    target_id = null;
+    if (message.reply_to_message) {
+        target_id = message.reply_to_message.from_user.id;
+    } else if (command.arg_count > 0) {
+        target_id = int(command.arg[0]);
+    }
+
+    if (target_id != null) {
+        unmute_user(target_id);
+        reply("用户 " + target_id + " 已被成功解除禁言。");
+        log("用户 " + target_id + " 被 " + user.id + " 解除禁言。", "moderation");
+    } else {
+        reply("使用方法: 回复一个用户的消息并输入 /unmute，或使用 /unmute <user_id>");
+    }
+}
+END
+"""
+    },
+    {
+        "name": "[管理] 禁言用户",
+        "priority": 500,
+        "description": "提供 /mute 命令，允许管理员通过回复消息或指定用户ID，并提供时长（如 10m, 1h, 2d）来禁言一个用户。",
+        "script": """
+WHEN command WHERE command.name == 'mute' AND user.is_admin == true THEN {
+    target_id = null;
+    duration = null;
+
+    if (message.reply_to_message) {
+        target_id = message.reply_to_message.from_user.id;
+        if (command.arg_count > 0) {
+            duration = command.arg[0];
+        }
+    } else if (command.arg_count > 1) {
+        target_id = int(command.arg[0]);
+        duration = command.arg[1];
+    }
+
+    if (target_id != null and duration != null) {
+        mute_user(duration, target_id);
+        reply("用户 " + target_id + " 已被成功禁言 " + duration + "。");
+        log("用户 " + target_id + " 被 " + user.id + " 禁言 " + duration + "。", "moderation");
+    } else {
+        reply("使用方法:\\n- 回复用户消息: /mute <时长(e.g., 10m, 1h, 2d)>\\n- 使用ID: /mute <user_id> <时长>");
+    }
+}
+END
+"""
+    },
+    {
         "name": "[内容] 自动删除转发消息",
         "priority": 400,
         "description": "自动删除所有普通用户转发的消息（来自用户或频道），以防止垃圾信息或不相关内容的传播。管理员不受此限制。",
@@ -69,5 +123,29 @@ END
         "priority": 500,
         "description": "提供 /warn 命令。管理员使用 /warn 回复消息或指定用户ID来警告用户。用户累计收到3次警告后，将被自动踢出。",
         "script": """WHEN command WHERE command.name == 'warn' AND user.is_admin == true THEN { target_id = null; if (message.reply_to_message) { target_id = message.reply_to_message.from_user.id; } else if (command.arg_count > 0) { target_id = int(command.arg[0]); } if (target_id != null) { current_warnings = get_var("user.warnings", 0, target_id) or 0; new_warnings = current_warnings + 1; log("用户 " + target_id + " 被 " + user.id + " 警告。次数: " + new_warnings, "warning"); set_var("user.warnings", new_warnings, target_id); if (new_warnings >= 3) { reply("用户 " + target_id + " 已累计3次警告，将被自动踢出。"); kick_user(target_id); set_var("user.warnings", null, target_id); } else { reply("用户 " + target_id + " 已被警告，当前警告次数: " + new_warnings + "/3。"); } } else { reply("使用方法: 回复一个用户的消息并输入 /warn，或使用 /warn <user_id>"); } } END"""
+    },
+    {
+        "name": "[管理] 封禁用户",
+        "priority": 500,
+        "description": "提供 /ban 命令，允许管理员通过回复消息或指定用户ID来永久封禁一个用户。",
+        "script": """
+WHEN command WHERE command.name == 'ban' AND user.is_admin == true THEN {
+    target_id = null;
+    if (message.reply_to_message) {
+        target_id = message.reply_to_message.from_user.id;
+    } else if (command.arg_count > 0) {
+        target_id = int(command.arg[0]);
+    }
+
+    if (target_id != null) {
+        ban_user(target_id);
+        reply("用户 " + target_id + " 已被成功封禁。");
+        log("用户 " + target_id + " 被 " + user.id + " 封禁。", "moderation");
+    } else {
+        reply("使用方法: 回复一个用户的消息并输入 /ban，或使用 /ban <user_id>");
+    }
+}
+END
+"""
     }
 ]
