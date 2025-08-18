@@ -73,7 +73,19 @@ class VariableResolver:
         """
         path_lower = path.lower()
 
-        # 步骤 1: 优先处理特殊的、有前缀的变量类型
+        # 核心修复：将 `user.` 作为 `effective_user.` 的别名进行处理，
+        # 但要确保不影响更具体的 `user.is_admin` 和 `user.stats.*` 解析器。
+        if path_lower.startswith('user.'):
+            # 步骤 1: 优先处理需要特殊计算的 `user.*` 变量
+            if path_lower == 'user.is_admin':
+                return await self._resolve_computed_is_admin()
+            if path_lower.startswith('user.stats.'):
+                return self._resolve_stats_variable(path_lower)
+            # 步骤 2: 对于所有其他 `user.*` 变量，将其重定向到 `effective_user.*`
+            new_path = "effective_" + path
+            return self._resolve_from_update_object(new_path)
+
+        # 步骤 3: 优先处理特殊的、有前缀的变量类型
         if path_lower.startswith('command'):
             return self._resolve_command_variable(path_lower)
 
@@ -83,11 +95,8 @@ class VariableResolver:
         if path_lower.startswith('media_group.'):
             return self._resolve_media_group_variable(path_lower)
 
-        # 步骤 2: 处理需要特殊计算的、已知的变量
-        if path_lower == 'user.is_admin':
-            return await self._resolve_computed_is_admin()
-
-        if path_lower.startswith(('user.stats.', 'group.stats.')):
+        # 步骤 4: 处理其他需要特殊计算的变量
+        if path_lower.startswith('group.stats.'):
             return self._resolve_stats_variable(path_lower)
 
         if path_lower == 'time.unix':

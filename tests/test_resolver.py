@@ -76,6 +76,11 @@ async def test_resolve_simple_context_variable(mock_update):
     # 测试无效路径
     assert await resolver.resolve("effective_user.invalid_prop") is None
 
+    # 核心修复测试：验证 `user.` 是否能作为 `effective_user.` 的别名
+    assert await resolver.resolve("user.id") == 123
+    assert await resolver.resolve("user.first_name") == "Test"
+    assert await resolver.resolve("user.is_bot") is False
+
 async def test_resolve_command_variable():
     """测试 command.* 变量的解析。"""
     # 为这个特定的测试场景创建一个专用的 Update 对象
